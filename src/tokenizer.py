@@ -12,22 +12,23 @@ Vocabulary layout:
   164-176  KEY_SIG   (-6 … +6 sharps)
   177-182  TIME_SIG  (common meters)
   183-239  TEXT chars (printable ASCII 32-88)
-  240-247  PART_0 … PART_7  (staff/part context switch)
-  248-295  STEP_0 … STEP_47 (absolute offset within measure, 32nd-note units)
+  240-255  PART_0 … PART_15  (combined part+voice: part_idx*2 + voice_idx)
+  256-303  STEP_0 … STEP_47  (absolute offset within measure, 32nd-note units)
 
-Within each measure events are grouped first by timestep then by part:
+PART tokens encode both staff and voice: PART_{part*2 + voice}.
+Each token unambiguously identifies a single voice lane, so the decoder can
+reconstruct Voice containers without guessing which lane a lone element belongs
+to.  Supports up to 8 staves × 2 voices = 16 lanes.
+
+Within each measure events are emitted in (offset, combined_part_voice) order:
 
   [BAR]
     [STEP_0]
-      [PART_0] [VEL] [NOTE] [DUR]        ← voice 1 of staff 0
-               [VEL] [NOTE] [DUR]        ← voice 2 of staff 0 (same STEP+PART)
-      [PART_1] [VEL] [NOTE] [DUR]        ← staff 1
+      [PART_0] [NOTE] [DUR]   ← part 0, voice 0
+      [PART_1] [NOTE] [DUR]   ← part 0, voice 1
+      [PART_2] [NOTE] [DUR]   ← part 1, voice 0
     [STEP_4]
-      [PART_0] [VEL] [NOTE] [DUR]
-    ...
-
-Multiple VEL-NOTE-DUR groups under the same STEP+PART represent concurrent
-voices; the model learns to produce them at the correct timestep.
+      [PART_0] [NOTE] [DUR]
 """
 
 from __future__ import annotations
@@ -37,8 +38,10 @@ DURATIONS = [0.125, 0.25, 0.375, 0.5, 0.75, 1.0, 1.5, 2.0,
 
 TIME_SIGS = ["2/4", "3/4", "4/4", "6/8", "3/8", "12/8"]
 
-MAX_PARTS  = 8
-MAX_STEP   = 48   # 48 × 0.125 ql = 6 quarter notes; covers up to 12/8
+MAX_REAL_PARTS      = 8
+MAX_VOICES_PER_PART = 2
+MAX_PARTS           = MAX_REAL_PARTS * MAX_VOICES_PER_PART  # 16 combined slots
+MAX_STEP            = 48   # 48 × 0.125 ql = 6 quarter notes; covers up to 12/8
 
 PAD, BOS, EOS, BAR = 0, 1, 2, 3
 NOTE_OFF   = 4
@@ -48,8 +51,8 @@ KEY_OFF    = 164
 TIME_OFF   = 177
 TEXT_OFF   = 183
 PART_OFF   = 240
-STEP_OFF   = 248
-VOCAB_SIZE = STEP_OFF + MAX_STEP   # 296
+STEP_OFF   = 256   # shifted: 240 + 16 PART slots
+VOCAB_SIZE = STEP_OFF + MAX_STEP   # 304
 
 
 def _closest_dur_idx(qlen: float) -> int:
@@ -65,37 +68,40 @@ def _offset_to_step(offset: float) -> int:
 def score_to_tokens(score) -> list[int]:
     """music21 Score → timestep-structured token list.
 
-    Events are sorted by (measure, offset, part_idx).  A STEP token is emitted
-    whenever the offset changes within a measure; a PART token is emitted
-    whenever the active part changes within a timestep.  Multiple voice events
-    for the same part at the same offset are written consecutively under the
-    same STEP+PART header, producing natural voice stacking.
+    Events are sorted by (measure, offset, combined_idx) where combined_idx
+    encodes both part and voice: combined = part_idx * MAX_VOICES_PER_PART +
+    voice_idx.  A STEP token is emitted when the offset changes; a PART token
+    (carrying combined_idx) is emitted when the lane changes.  Because each
+    voice gets its own PART slot, the decoder can reconstruct voice containers
+    without ambiguity even when only one voice is active at a given offset.
     """
     import music21 as m21
 
-    parts = list(score.parts)[:MAX_PARTS]
+    parts = list(score.parts)[:MAX_REAL_PARTS]
     if not parts:
         return [BOS, EOS]
 
-    # (measure_number, offset_in_measure, part_idx, token_list)
+    # (measure_number, offset_in_measure, combined_idx, token_list)
     events: list[tuple[int, float, int, list[int]]] = []
 
     for part_idx, part in enumerate(parts):
         for measure in part.getElementsByClass(m21.stream.Measure):
             m_num = measure.number if measure.number is not None else 0
 
-            # Yield each voice as a separate stream; fall back to the measure
-            # itself when there are no explicit voice containers.
-            streams = (
-                [v.notesAndRests for v in measure.voices]
-                if measure.voices
-                else [measure.notesAndRests]
-            )
+            if measure.voices:
+                voice_streams = [
+                    (vi, v.notesAndRests)
+                    for vi, v in enumerate(measure.voices)
+                    if vi < MAX_VOICES_PER_PART
+                ]
+            else:
+                voice_streams = [(0, measure.notesAndRests)]
 
-            for note_stream in streams:
+            for voice_idx, note_stream in voice_streams:
+                combined = part_idx * MAX_VOICES_PER_PART + voice_idx
                 for el in note_stream:
-                    offset   = float(el.offset)
-                    dur_idx  = _closest_dur_idx(el.duration.quarterLength)
+                    offset  = float(el.offset)
+                    dur_idx = _closest_dur_idx(el.duration.quarterLength)
 
                     if el.isRest:
                         toks = [REST_OFF + dur_idx]
@@ -106,31 +112,31 @@ def score_to_tokens(score) -> list[int]:
                     else:
                         continue
 
-                    events.append((m_num, offset, part_idx, toks))
+                    events.append((m_num, offset, combined, toks))
 
-    # Primary sort: measure → offset → part index
+    # Primary sort: measure → offset → combined (part*voices + voice)
     events.sort(key=lambda e: (e[0], e[1], e[2]))
 
     tokens: list[int] = [BOS]
     cur_measure = -1
     cur_offset  = -1.0
-    cur_part    = -1
+    cur_lane    = -1
 
-    for m_num, offset, part_idx, toks in events:
+    for m_num, offset, combined, toks in events:
         if m_num != cur_measure:
             tokens.append(BAR)
             cur_measure = m_num
             cur_offset  = -1.0
-            cur_part    = -1
+            cur_lane    = -1
 
         if offset != cur_offset:
             tokens.append(STEP_OFF + _offset_to_step(offset))
             cur_offset = offset
-            cur_part   = -1     # re-emit PART after every new STEP
+            cur_lane   = -1
 
-        if part_idx != cur_part:
-            tokens.append(PART_OFF + part_idx)
-            cur_part = part_idx
+        if combined != cur_lane:
+            tokens.append(PART_OFF + combined)
+            cur_lane = combined
 
         tokens.extend(toks)
 
@@ -141,17 +147,19 @@ def score_to_tokens(score) -> list[int]:
 def tokens_to_score(tokens: list[int]):
     """Timestep token list → music21 Score.
 
-    Elements that share the same (part, measure, offset) are simultaneous
-    voices and are placed in separate Voice containers so notation software
-    renders them stacked rather than sequential.
+    PART tokens encode combined (part_idx, voice_idx) as
+    combined = part_idx * MAX_VOICES_PER_PART + voice_idx, so each lane maps
+    to an unambiguous Voice container — no positional guessing required.
+
+    lane_events[combined][m_num][offset_ql] = element
     """
     import music21 as m21
     from collections import defaultdict
 
-    # parts_events[part_idx][m_num][offset_ql] = [el, el, ...]
-    parts_events: dict = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    # lane_events[combined][m_num][offset_ql] = music21 element
+    lane_events: dict = defaultdict(lambda: defaultdict(dict))
 
-    cur_part    = 0
+    cur_lane    = 0
     cur_measure = 0
     cur_offset  = 0.0
 
@@ -175,15 +183,13 @@ def tokens_to_score(tokens: list[int]):
             continue
 
         if PART_OFF <= t < PART_OFF + MAX_PARTS:
-            cur_part = t - PART_OFF
+            cur_lane = t - PART_OFF
             i += 1
             continue
 
         if REST_OFF <= t < REST_OFF + 16:
             dur = DURATIONS[t - REST_OFF]
-            parts_events[cur_part][cur_measure][cur_offset].append(
-                m21.note.Rest(quarterLength=dur)
-            )
+            lane_events[cur_lane][cur_measure][cur_offset] = m21.note.Rest(quarterLength=dur)
             i += 1
             continue
 
@@ -203,34 +209,46 @@ def tokens_to_score(tokens: list[int]):
                 el = m21.chord.Chord(
                     [m21.pitch.Pitch(midi=p) for p in pitches], quarterLength=dur
                 )
-            parts_events[cur_part][cur_measure][cur_offset].append(el)
+            lane_events[cur_lane][cur_measure][cur_offset] = el
             continue
 
         i += 1
 
-    # Build score
+    # Group lanes by real part index
+    # combined = part_idx * MAX_VOICES_PER_PART + voice_idx
+    parts_lanes: dict[int, dict[int, dict]] = defaultdict(dict)
+    for combined in sorted(lane_events.keys()):
+        part_idx  = combined // MAX_VOICES_PER_PART
+        voice_idx = combined % MAX_VOICES_PER_PART
+        parts_lanes[part_idx][voice_idx] = lane_events[combined]
+
     score = m21.stream.Score()
-    for part_idx in sorted(parts_events.keys()):
+    for part_idx in sorted(parts_lanes.keys()):
         part = m21.stream.Part()
-        for m_num in sorted(parts_events[part_idx].keys()):
-            measure  = m21.stream.Measure(number=m_num)
-            off_map  = parts_events[part_idx][m_num]   # offset → [elements]
+        voices_data = parts_lanes[part_idx]  # voice_idx → {m_num → {offset → el}}
 
-            # If any offset carries more than one element, the measure has
-            # simultaneous voices and needs Voice containers throughout.
-            max_voices = max(len(els) for els in off_map.values())
+        all_measures: set[int] = set()
+        for v_data in voices_data.values():
+            all_measures.update(v_data.keys())
 
-            if max_voices > 1:
-                voices = [m21.stream.Voice(id=str(v + 1))
-                          for v in range(max_voices)]
-                for offset_ql in sorted(off_map.keys()):
-                    for v_idx, el in enumerate(off_map[offset_ql]):
-                        voices[v_idx].insert(offset_ql, el)
-                for voice in voices:
+        for m_num in sorted(all_measures):
+            measure = m21.stream.Measure(number=m_num)
+
+            if len(voices_data) > 1:
+                # Multiple voice lanes → use Voice containers
+                for voice_idx in sorted(voices_data.keys()):
+                    off_map = voices_data[voice_idx].get(m_num, {})
+                    if not off_map:
+                        continue
+                    voice = m21.stream.Voice(id=str(voice_idx + 1))
+                    for offset_ql in sorted(off_map.keys()):
+                        voice.insert(offset_ql, off_map[offset_ql])
                     measure.insert(0, voice)
             else:
+                voice_idx = next(iter(voices_data))
+                off_map = voices_data[voice_idx].get(m_num, {})
                 for offset_ql in sorted(off_map.keys()):
-                    measure.insert(offset_ql, off_map[offset_ql][0])
+                    measure.insert(offset_ql, off_map[offset_ql])
 
             part.append(measure)
         score.append(part)

@@ -10,11 +10,11 @@ import music21 as m21
 from src.tokenizer import (
     score_to_tokens, tokens_to_score,
     PAD, BOS, EOS, BAR, NOTE_OFF, DUR_OFF, REST_OFF,
-    KEY_OFF, TIME_OFF, TEXT_OFF, PART_OFF, STEP_OFF, MAX_STEP,
+    KEY_OFF, TIME_OFF, TEXT_OFF, PART_OFF, STEP_OFF, MAX_STEP, MAX_PARTS,
     VOCAB_SIZE, DURATIONS,
 )
 
-SCORE_PATH = r"data\openscore\scores_Abbott,_Jane_Bingham___Think_of_Today_lc6583512.mxl"
+SCORE_PATH = r"data\openscore\scores_Abbott,_Jane_Bingham___Just_for_Today_lc6583477.mxl"
 
 # ── Load ──────────────────────────────────────────────────────────────────────
 print("Loading score …")
@@ -45,7 +45,7 @@ def tok_name(t):
         return f"TIME({t-TIME_OFF})"
     if TEXT_OFF <= t < TEXT_OFF + 56:
         return f"TEXT({chr(t-TEXT_OFF+32)!r})"
-    if PART_OFF <= t < PART_OFF + 8:
+    if PART_OFF <= t < PART_OFF + MAX_PARTS:
         return f"PART_{t-PART_OFF}"
     if STEP_OFF <= t < STEP_OFF + MAX_STEP:
         return f"STEP_{t-STEP_OFF}(+{(t-STEP_OFF)*0.125:.3f}ql)"
@@ -68,7 +68,7 @@ for t in tokens:
     elif NOTE_OFF <= t < NOTE_OFF + 128: hist["NOTE"] += 1
     elif DUR_OFF  <= t < DUR_OFF + 16:   hist["DUR"]  += 1
     elif REST_OFF <= t < REST_OFF + 16:  hist["REST"] += 1
-    elif PART_OFF <= t < PART_OFF + 8:        hist["PART"] += 1
+    elif PART_OFF <= t < PART_OFF + MAX_PARTS: hist["PART"] += 1
     elif STEP_OFF <= t < STEP_OFF + MAX_STEP: hist["STEP"] += 1
     else: hist["OTHER"] += 1
 
