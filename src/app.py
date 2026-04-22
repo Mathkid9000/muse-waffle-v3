@@ -18,6 +18,7 @@ from src.dataset import download_dataset, dataset_status, load_cached_paths
 from src.model import build_model, load_model, model_status, DEFAULT_CONFIG, WEIGHTS_FILE, CONFIG_FILE
 from src.trainer import train
 from src.generator import generate_and_export, show_text_score
+from src.similarity import compare_to_dataset
 
 
 CSS = """
@@ -343,10 +344,10 @@ class MuseWaffleApp(App):
         self._thread_log(f"Device: {device}")
         model, _ = load_model(device)
 
-        def on_epoch(epoch: int, loss: float):
-            self.call_from_thread(self._log, f"  Epoch {epoch}  avg_loss={loss:.4f}")
+        def on_epoch(epoch: int, loss: float, val_loss: float):
+            self.call_from_thread(self._log, f"  Epoch {epoch}  avg_loss={loss:.4f}  val_loss={val_loss:.4f}")
             self.call_from_thread(
-                self._set_status, f"Training  epoch {epoch}/{epochs}  loss={loss:.4f}"
+                self._set_status, f"Training  epoch {epoch}/{epochs}  loss={loss:.4f}  val={val_loss:.4f}"
             )
 
         train(
@@ -414,4 +415,5 @@ class MuseWaffleApp(App):
         if paths["xml"]:
             self._thread_log("─ Score preview (music21) ─")
             show_text_score(paths["xml"], self._thread_log)
+            compare_to_dataset(paths["xml"], self._thread_log)
         self._thread_log(f"Files saved to [b]{Path('output').resolve()}[/b]")
