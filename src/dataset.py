@@ -7,6 +7,7 @@ import requests
 from pathlib import Path
 from typing import Callable, Optional
 from dotenv import load_dotenv
+from tqdm import tqdm
 
 REPO = "OpenScore/Lieder"
 BRANCH = "main"
@@ -60,7 +61,7 @@ def download_dataset(
     files = files[:max_files]
     downloaded = []
 
-    for i, item in enumerate(files):
+    for i, item in tqdm(enumerate(files), total=len(files), desc="Downloading"):
         dest = DATA_DIR / item["path"].replace("/", "_")
         progress(i, len(files))
         if dest.exists():

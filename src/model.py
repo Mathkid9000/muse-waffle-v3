@@ -17,16 +17,17 @@ from torch import Tensor
 from src.tokenizer import VOCAB_SIZE
 
 CHECKPOINT_DIR = Path("checkpoints")
-CONFIG_FILE    = CHECKPOINT_DIR / "config.json"
-WEIGHTS_FILE   = CHECKPOINT_DIR / "model.pt"
+CONFIG_FILE = CHECKPOINT_DIR / "config.json"
+WEIGHTS_FILE = CHECKPOINT_DIR / "model.pt"
 
 DEFAULT_CONFIG = dict(
-    vocab_size   = VOCAB_SIZE,
-    d_model      = 256,
-    n_heads      = 8,
-    n_layers     = 4,
-    max_seq_len  = 2048,
-    dropout      = 0.1,
+    vocab_size = VOCAB_SIZE,
+    d_model = 256,
+    n_heads = 8,
+    n_layers = 4,
+    max_seq_len = 2048,
+    dropout = 0.1,
+    epoches = []
 )
 
 
@@ -140,6 +141,18 @@ def build_model(cfg: dict | None = None) -> MusicTransformer:
         json.dump(cfg, f, indent=2)
     return MusicTransformer(cfg)
 
+def append_epoch_to_config(cfg: dict, training_loss, val_loss):
+    if cfg is None:
+        print("Will not overwrite config with null config")
+        return
+    
+    if 'epoches' not in cfg:
+        cfg['epoches'] = [(training_loss, val_loss)]
+    else: 
+        cfg['epoches'].append((training_loss, val_loss))
+    
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(cfg, f, indent=2)
 
 def load_model(device: str = "cuda" if __import__("torch").cuda.is_available() else "cpu") -> tuple[MusicTransformer, dict]:
     if not CONFIG_FILE.exists():

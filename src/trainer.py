@@ -11,6 +11,7 @@ from torch.utils.data import Dataset, DataLoader, random_split
 
 from src.tokenizer import score_to_tokens, text_to_tokens, BOS, PAD
 from src.model import MusicTransformer, WEIGHTS_FILE
+from tqdm import tqdm
 
 CHECKPOINT_DIR = Path("checkpoints")
 
@@ -42,9 +43,9 @@ class MusicDataset(Dataset):
 def _load_sequences(paths: list[str], log: Callable[[str], None]) -> list[list[int]]:
     import music21 as m21
     sequences = []
-    for i, path in enumerate(paths):
-        if i % 20 == 0:
-            log(f"  Parsing {i}/{len(paths)} scores...")
+    for i, path in tqdm(enumerate(paths), total=len(paths), desc="Parsing scores..."):
+        # if i % 20 == 0:
+        #     log(f"  Parsing {i}/{len(paths)} scores...")
         try:
             score = m21.converter.parse(path)
             # build text prefix from metadata
@@ -103,8 +104,8 @@ def train(
 
         model.train()
         epoch_loss = 0.0
-        batches    = 0
-        for x, y in loader:
+        batches = 0
+        for x, y in tqdm(loader, desc="Epoch Training"):
             if stop_flag[0]:
                 break
             x, y = x.to(device), y.to(device)
@@ -131,6 +132,7 @@ def train(
         avg_val_loss = val_loss / max(val_batches, 1)
 
         on_epoch(epoch, avg_loss, avg_val_loss)
+        
         torch.save(model.state_dict(), WEIGHTS_FILE)
         if device == "cuda":
             torch.cuda.empty_cache()
