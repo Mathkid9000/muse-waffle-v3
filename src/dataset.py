@@ -13,7 +13,7 @@ REPO = "OpenScore/Lieder"
 BRANCH = "main"
 API_TREE = f"https://api.github.com/repos/{REPO}/git/trees/{BRANCH}?recursive=1"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}"
-DATA_DIR = Path("data/openscore")
+DATA_DIR = Path("/storage/data/openscore")
 MANIFEST = DATA_DIR / "manifest.json"
 
 HEADERS = {"Accept": "application/vnd.github+json"}

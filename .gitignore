@@ -1,5 +1,1 @@
-.env
-output/
-data/
-checkpoints/
-.claude
+storage

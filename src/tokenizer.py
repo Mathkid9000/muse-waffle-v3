@@ -80,7 +80,13 @@ TEXT_OFF = TIME_OFF + 6              # 194  (ASCII 32-88 = 57 chars)
 PART_OFF = TEXT_OFF + 57             # 251
 STEP_OFF = PART_OFF + MAX_PARTS      # 267
 GRACE    = STEP_OFF + MAX_STEP       # 411
-VOCAB_SIZE = GRACE  + 1              # 412
+
+# Infill special tokens (for fill-in-the-middle generation)
+FILL_START = GRACE + 1               # 412 - marks start of fill region (prefix ends here)
+FILL_END   = FILL_START + 1          # 413 - marks end of suffix, start of generation
+EMPTY_BAR  = FILL_END + 1            # 414 - placeholder for empty measures in input
+
+VOCAB_SIZE = EMPTY_BAR + 1           # 415
 
 
 def _closest_dur_idx(qlen: float) -> int:
@@ -342,3 +348,234 @@ def text_to_tokens(text: str) -> list[int]:
         if 32 <= code <= 88:
             out.append(TEXT_OFF + code - 32)
     return out
+
+
+def identify_empty_measures(score) -> list[tuple[int, int]]:
+    """Detect empty measures across all parts.
+
+    A measure is considered empty if ALL parts have zero notes AND zero rests
+    in that measure. Returns a list of (start_measure, end_measure) tuples
+    for contiguous empty regions (inclusive).
+    """
+    import music21 as m21
+
+    parts = list(score.parts)[:MAX_REAL_PARTS]
+    print(parts)
+    if not parts:
+        return []
+
+    # Collect all measure numbers across all parts
+    all_measure_nums: set[int] = set()
+    for part in parts:
+        for measure in part.getElementsByClass(m21.stream.Measure):
+            m_num = measure.number if measure.number is not None else 0
+            all_measure_nums.add(m_num)
+            
+    print(all_measure_nums)
+
+    if not all_measure_nums:
+        return []
+
+    # Check each measure: empty if ALL parts have no notes/rests
+    empty_measures: list[int] = []
+    for m_num in sorted(all_measure_nums):
+        is_empty = True
+        for part in parts:
+            measures = [m for m in part.getElementsByClass(m21.stream.Measure)
+                       if (m.number if m.number is not None else 0) == m_num]
+            # if measures:
+            #     measure = measures[0]
+            #     # Check for any notes or rests
+            #     notes_and_rests = list(measure.flatten().notesAndRests)
+            #     if not (len(notes_and_rests) == 1 and notes_and_rests[0].isRest and notes_and_rests[0].quarterLength == 4):
+            #         is_empty = False
+            #         break
+            if not measures:
+                is_empty = False
+                break
+            measure = measures[0]
+            notes_and_rests = list(measure.flatten().notesAndRests)
+            if len(notes_and_rests) != 1:
+                is_empty = False
+                break
+            el = notes_and_rests[0]
+            print(f"{el}, {el.isRest}, {el.style.hideObjectOnPrint}")
+            if not el.isRest:
+                is_empty = False
+                break
+            if not (hasattr(el, 'style') and el.style.hideObjectOnPrint):
+                is_empty = False
+                break
+        if is_empty:
+            empty_measures.append(m_num)
+
+    # Group contiguous empty measures into ranges
+    if not empty_measures:
+        return []
+
+    gaps: list[tuple[int, int]] = []
+    start = empty_measures[0]
+    end = empty_measures[0]
+
+    for m_num in empty_measures[1:]:
+        if m_num == end + 1:
+            end = m_num
+        else:
+            gaps.append((start, end))
+            start = m_num
+            end = m_num
+    gaps.append((start, end))
+
+    return gaps
+
+
+def score_to_tokens_by_measure(score) -> dict[int, list[int]]:
+    """music21 Score → dict mapping measure number to tokens for that measure.
+
+    Returns tokens for each measure separately (without BOS/EOS).
+    Each measure's tokens start with BAR followed by that measure's content.
+    """
+    import music21 as m21
+
+    parts = list(score.parts)[:MAX_REAL_PARTS]
+    if not parts:
+        return {}
+
+    # Collect events by measure
+    events_by_measure: dict[int, list[tuple[float, int, list[int]]]] = {}
+
+    for part_idx, part in enumerate(parts):
+        for measure in part.getElementsByClass(m21.stream.Measure):
+            m_num = measure.number if measure.number is not None else 0
+
+            if m_num not in events_by_measure:
+                events_by_measure[m_num] = []
+
+            if measure.voices:
+                voice_streams = [
+                    (vi, v.notesAndRests)
+                    for vi, v in enumerate(measure.voices)
+                    if vi < MAX_VOICES_PER_PART
+                ]
+            else:
+                voice_streams = [(0, measure.notesAndRests)]
+
+            for voice_idx, note_stream in voice_streams:
+                combined = part_idx * MAX_VOICES_PER_PART + voice_idx
+                for el in note_stream:
+                    offset = float(el.offset)
+                    is_grace = el.duration.quarterLength == 0
+
+                    if is_grace:
+                        dtype = el.duration.type
+                        written_ql = (m21.duration.Duration(dtype).quarterLength
+                                      if dtype and dtype != 'zero' else 0.25)
+                        dur_idx = _closest_dur_idx(written_ql if written_ql > 0 else 0.25)
+                    else:
+                        dur_idx = _closest_dur_idx(el.duration.quarterLength)
+
+                    if el.isRest:
+                        toks = [REST_OFF + dur_idx]
+                    elif el.isNote or el.isChord:
+                        note_list = [el] if el.isNote else list(el.notes)
+                        toks = []
+                        if is_grace:
+                            toks.append(GRACE)
+                        toks += [NOTE_OFF + n.pitch.midi for n in note_list]
+                        toks.append(DUR_OFF + dur_idx)
+                        if not is_grace and el.tie is not None and el.tie.type in ('start', 'continue'):
+                            toks.append(TIE)
+                    else:
+                        continue
+
+                    events_by_measure[m_num].append((offset, combined, toks))
+
+    # Convert events to tokens per measure
+    measure_tokens: dict[int, list[int]] = {}
+
+    for m_num in sorted(events_by_measure.keys()):
+        events = sorted(events_by_measure[m_num], key=lambda e: (e[0], e[1]))
+        tokens: list[int] = [BAR]
+        cur_offset = -1.0
+        cur_lane = -1
+
+        for offset, combined, toks in events:
+            if offset != cur_offset:
+                tokens.append(STEP_OFF + _offset_to_step(offset))
+                cur_offset = offset
+                cur_lane = -1
+
+            if combined != cur_lane:
+                tokens.append(PART_OFF + combined)
+                cur_lane = combined
+
+            tokens.extend(toks)
+
+        measure_tokens[m_num] = tokens
+
+    return measure_tokens
+
+
+def score_to_tokens_with_gaps(score) -> tuple[list[int], list[tuple[int, int]]]:
+    """Tokenizes a score while identifying empty regions that need filling.
+
+    Returns:
+        (tokens, gap_descriptors)
+        - tokens: Full token sequence with EMPTY_BAR placeholders for gaps
+        - gap_descriptors: List of (start_measure, end_measure) for empty regions
+    """
+    gaps = identify_empty_measures(score)
+    measure_tokens = score_to_tokens_by_measure(score)
+
+    if not measure_tokens:
+        return [BOS, EOS], gaps
+
+    # Build token sequence, using EMPTY_BAR for gap measures
+    gap_measures: set[int] = set()
+    for start, end in gaps:
+        for m in range(start, end + 1):
+            gap_measures.add(m)
+
+    tokens: list[int] = [BOS]
+    for m_num in sorted(measure_tokens.keys()):
+        if m_num in gap_measures:
+            tokens.append(EMPTY_BAR)
+        else:
+            tokens.extend(measure_tokens[m_num])
+    tokens.append(EOS)
+
+    return tokens, gaps
+
+
+def extract_prefix_suffix_tokens(
+    score, gap_start: int, gap_end: int
+) -> tuple[list[int], list[int]]:
+    """Extract prefix and suffix tokens around a gap region.
+
+    Args:
+        score: music21 Score object
+        gap_start: First measure number of the gap (inclusive)
+        gap_end: Last measure number of the gap (inclusive)
+
+    Returns:
+        (prefix_tokens, suffix_tokens)
+        - prefix_tokens: Tokens for all measures before the gap (without BOS/EOS)
+        - suffix_tokens: Tokens for all measures after the gap (without BOS/EOS)
+    """
+    measure_tokens = score_to_tokens_by_measure(score)
+
+    prefix: list[int] = []
+    suffix: list[int] = []
+
+    for m_num in sorted(measure_tokens.keys()):
+        if m_num < gap_start:
+            prefix.extend(measure_tokens[m_num])
+        elif m_num > gap_end:
+            suffix.extend(measure_tokens[m_num])
+
+    return prefix, suffix
+
+
+def get_gap_measure_count(tokens: list[int]) -> int:
+    """Count the number of BAR tokens in a sequence (measures generated)."""
+    return tokens.count(BAR)

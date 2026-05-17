@@ -1,0 +1,8 @@
+{
+  "vocab_size": 304,
+  "d_model": 256,
+  "n_heads": 8,
+  "n_layers": 4,
+  "max_seq_len": 2048,
+  "dropout": 0.1
+}

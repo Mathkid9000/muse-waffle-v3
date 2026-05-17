@@ -16,7 +16,7 @@ from torch import Tensor
 
 from src.tokenizer import VOCAB_SIZE
 
-CHECKPOINT_DIR = Path("checkpoints")
+CHECKPOINT_DIR = Path("/storage/checkpoints")
 CONFIG_FILE = CHECKPOINT_DIR / "config.json"
 WEIGHTS_FILE = CHECKPOINT_DIR / "model.pt"
 
@@ -133,6 +133,76 @@ class MusicTransformer(nn.Module):
                 break
         return idx[0].tolist()
 
+    @torch.no_grad()
+    def generate_infill(
+        self,
+        prefix_tokens: list[int],
+        suffix_tokens: list[int],
+        target_bars: int = 4,
+        max_new: int = 400,
+        temperature: float = 1.0,
+        top_k: int = 50,
+        device: str = "cuda" if __import__("torch").cuda.is_available() else "cpu",
+    ) -> list[int]:
+        """Generate tokens to fill a gap using FIM (fill-in-the-middle) approach.
+
+        Constructs: [BOS] + prefix + [FILL_START] + suffix + [FILL_END]
+        Then generates autoregressively until EOS or target bar count is reached.
+
+        Args:
+            prefix_tokens: Tokens before the gap (without BOS)
+            suffix_tokens: Tokens after the gap (without EOS)
+            target_bars: Number of BAR tokens to generate (matches gap size)
+            max_new: Maximum tokens to generate
+            temperature: Sampling temperature
+            top_k: Top-k sampling parameter
+            device: Device to run on
+
+        Returns:
+            Generated fill tokens (without special markers)
+        """
+        from src.tokenizer import BOS, EOS, BAR, FILL_START, FILL_END
+
+        self.eval()
+
+        # Build FIM prompt: [BOS] + prefix + [FILL_START] + suffix + [FILL_END]
+        prompt = [BOS] + prefix_tokens + [FILL_START] + suffix_tokens + [FILL_END]
+        idx = torch.tensor([prompt], dtype=torch.long, device=device)
+        max_ctx = self.cfg["max_seq_len"]
+
+        generated: list[int] = []
+        bar_count = 0
+
+        for _ in range(max_new):
+            idx_cond = idx[:, -max_ctx:]
+            logits = self(idx_cond)[:, -1, :] / max(temperature, 1e-6)
+
+            if top_k > 0:
+                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits[logits < v[:, [-1]]] = float("-inf")
+
+            probs = torch.softmax(logits, dim=-1)
+            next_t = torch.multinomial(probs, 1)
+            next_token = next_t.item()
+
+            # Stop if EOS
+            # if next_token == EOS:
+            #     print(f'')
+            #     break
+
+            if next_token != EOS:
+                generated.append(next_token)
+            idx = torch.cat([idx, next_t], dim=1)
+
+            # Count bars and stop when we reach target
+            if next_token == BAR:
+                bar_count += 1
+                print(f'Written {bar_count} bars of {target_bars}')
+                if bar_count >= target_bars:
+                    break
+
+        return generated
+
 
 def build_model(cfg: dict | None = None) -> MusicTransformer:
     cfg = cfg or DEFAULT_CONFIG
@@ -176,3 +246,83 @@ def model_status() -> str:
     else:
         info += " | Weights: none (untrained)"
     return info
+
+
+def expand_embeddings_for_infill(
+    model: MusicTransformer,
+    old_vocab_size: int = 412
+) -> MusicTransformer:
+    """Expand model embeddings and head for infill tokens.
+
+    Adds space for 3 new tokens: FILL_START, FILL_END, EMPTY_BAR.
+    Initializes new tokens from semantically similar existing tokens:
+    - FILL_START: initialized from BOS (marks a boundary)
+    - FILL_END: initialized from EOS (marks end of context)
+    - EMPTY_BAR: initialized from BAR (represents a measure)
+
+    Args:
+        model: Existing MusicTransformer model
+        old_vocab_size: Original vocabulary size (default 412)
+
+    Returns:
+        Model with expanded embeddings
+    """
+    from src.tokenizer import BOS, EOS, BAR, VOCAB_SIZE
+
+    new_vocab_size = VOCAB_SIZE  # 415
+    d_model = model.cfg["d_model"]
+
+    if model.cfg["vocab_size"] >= new_vocab_size:
+        return model  # Already expanded
+
+    # Create new embedding layer
+    old_tok_emb = model.tok_emb.weight.data
+    new_tok_emb = nn.Embedding(new_vocab_size, d_model)
+    nn.init.normal_(new_tok_emb.weight, std=0.02)
+
+    # Copy old embeddings
+    new_tok_emb.weight.data[:old_vocab_size] = old_tok_emb
+
+    # Initialize new tokens from similar existing tokens
+    # FILL_START (412) ← BOS (1)
+    new_tok_emb.weight.data[old_vocab_size] = old_tok_emb[BOS].clone()
+    # FILL_END (413) ← EOS (2)
+    new_tok_emb.weight.data[old_vocab_size + 1] = old_tok_emb[EOS].clone()
+    # EMPTY_BAR (414) ← BAR (3)
+    new_tok_emb.weight.data[old_vocab_size + 2] = old_tok_emb[BAR].clone()
+
+    model.tok_emb = new_tok_emb
+
+    # Create new output head
+    old_head = model.head.weight.data
+    new_head = nn.Linear(d_model, new_vocab_size, bias=False)
+    nn.init.normal_(new_head.weight, std=0.02)
+
+    # Copy old weights
+    new_head.weight.data[:old_vocab_size] = old_head
+
+    # Initialize new output weights similarly
+    new_head.weight.data[old_vocab_size] = old_head[BOS].clone()
+    new_head.weight.data[old_vocab_size + 1] = old_head[EOS].clone()
+    new_head.weight.data[old_vocab_size + 2] = old_head[BAR].clone()
+
+    model.head = new_head
+
+    # Update config
+    model.cfg["vocab_size"] = new_vocab_size
+
+    return model
+
+
+def build_infill_model(cfg: dict | None = None) -> MusicTransformer:
+    """Build a model with expanded vocabulary for infill training."""
+    from src.tokenizer import VOCAB_SIZE
+
+    cfg = cfg or DEFAULT_CONFIG.copy()
+    cfg["vocab_size"] = VOCAB_SIZE  # Use new vocab size (415)
+
+    CHECKPOINT_DIR.mkdir(exist_ok=True)
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(cfg, f, indent=2)
+
+    return MusicTransformer(cfg)
