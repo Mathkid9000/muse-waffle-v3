@@ -10,13 +10,16 @@ import math
 import json
 from pathlib import Path
 
+from dotenv import load_dotenv
+import os
 import torch
 import torch.nn as nn
 from torch import Tensor
 
 from src.tokenizer import VOCAB_SIZE
 
-CHECKPOINT_DIR = Path("/storage/checkpoints")
+load_dotenv()
+CHECKPOINT_DIR = Path(os.getenv('STORAGE_DIR')) / "checkpoints"
 CONFIG_FILE = CHECKPOINT_DIR / "config.json"
 WEIGHTS_FILE = CHECKPOINT_DIR / "model.pt"
 

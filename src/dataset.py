@@ -9,18 +9,18 @@ from typing import Callable, Optional
 from dotenv import load_dotenv
 from tqdm import tqdm
 
+load_dotenv(dotenv_path='env.env')
 REPO = "OpenScore/Lieder"
 BRANCH = "main"
 API_TREE = f"https://api.github.com/repos/{REPO}/git/trees/{BRANCH}?recursive=1"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}"
-DATA_DIR = Path("/storage/data/openscore")
+DATA_DIR = Path(os.getenv('STORAGE_DIR')) / Path("data/openscore")
 MANIFEST = DATA_DIR / "manifest.json"
 
 HEADERS = {"Accept": "application/vnd.github+json"}
 
 
 def _get_token() -> dict:
-    load_dotenv()
     token = os.getenv("GITHUB_TOKEN")
     if token:
         return {**HEADERS, "Authorization": f"Bearer {token}"}

@@ -4,6 +4,8 @@ from __future__ import annotations
 import random
 from pathlib import Path
 from typing import Callable
+import os
+from dotenv import load_dotenv
 
 import torch
 import torch.nn as nn
@@ -13,8 +15,8 @@ from src.tokenizer import score_to_tokens, text_to_tokens, BOS, PAD
 from src.model import MusicTransformer, WEIGHTS_FILE
 from tqdm import tqdm
 
-CHECKPOINT_DIR = Path("/storage/checkpoints")
-
+load_dotenv()
+CHECKPOINT_DIR = Path(os.getenv('STORAGE_DIR')) / "checkpoints"
 
 class MusicDataset(Dataset):
     def __init__(self, sequences: list[list[int]], max_len: int = 512):
