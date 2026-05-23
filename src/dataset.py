@@ -14,7 +14,8 @@ REPO = "OpenScore/Lieder"
 BRANCH = "main"
 API_TREE = f"https://api.github.com/repos/{REPO}/git/trees/{BRANCH}?recursive=1"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}"
-DATA_DIR = Path(os.getenv('STORAGE_DIR')) / Path("data/openscore")
+STORAGE_DIR = Path(os.getenv('STORAGE_DIR'))
+DATA_DIR = STORAGE_DIR / Path("data/openscore")
 MANIFEST = DATA_DIR / "manifest.json"
 
 HEADERS = {"Accept": "application/vnd.github+json"}
@@ -71,7 +72,7 @@ def download_dataset(
             resp = requests.get(item["url"], headers=_get_token(), timeout=20)
             resp.raise_for_status()
             dest.write_bytes(resp.content)
-            downloaded.append(str(dest))
+            downloaded.append(str(Path("data/openscore") / item["path"].replace("/", "_")))
             time.sleep(0.05)
         except Exception as e:
             log(f"  Skip {item['path']}: {e}")
@@ -88,7 +89,14 @@ def load_cached_paths() -> list[str]:
     if not MANIFEST.exists():
         return []
     with open(MANIFEST) as f:
-        return json.load(f)
+        paths = json.load(f)
+
+    for i, path in enumerate(paths):
+        paths[i] = STORAGE_DIR / path
+
+    print(paths)
+    return paths
+
 
 
 def dataset_status() -> str:
