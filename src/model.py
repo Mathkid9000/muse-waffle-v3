@@ -317,7 +317,7 @@ def expand_embeddings_for_infill(
     return model
 
 
-def build_infill_model(cfg: dict | None = None) -> MusicTransformer, dict:
+def build_infill_model(cfg: dict | None = None):
     """Build a model with expanded vocabulary for infill training."""
     from src.tokenizer import VOCAB_SIZE
 
