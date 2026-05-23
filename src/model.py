@@ -317,9 +317,13 @@ def expand_embeddings_for_infill(
     return model
 
 
-def build_infill_model(cfg: dict | None = None) -> MusicTransformer:
+def build_infill_model(cfg: dict | None = None) -> MusicTransformer, dict:
     """Build a model with expanded vocabulary for infill training."""
     from src.tokenizer import VOCAB_SIZE
+
+    if not cfg:
+        with open(CONFIG_FILE, "r") as f:
+            cfg = json.load(f)
 
     cfg = cfg or DEFAULT_CONFIG.copy()
     cfg["vocab_size"] = VOCAB_SIZE  # Use new vocab size (415)
@@ -328,4 +332,4 @@ def build_infill_model(cfg: dict | None = None) -> MusicTransformer:
     with open(CONFIG_FILE, "w") as f:
         json.dump(cfg, f, indent=2)
 
-    return MusicTransformer(cfg)
+    return MusicTransformer(cfg), cfg
