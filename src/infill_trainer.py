@@ -108,6 +108,9 @@ class InfillDataset(Dataset):
     Each example is either:
     - Standard: Full sequence for next-token prediction (loss on all tokens)
     - FIM: Restructured sequence with loss only on fill tokens
+
+    Gap position and size are re-randomized on every __getitem__ call so the
+    model sees each song with a different gap each epoch.
     """
 
     def __init__(
@@ -124,32 +127,28 @@ class InfillDataset(Dataset):
         """
         self.max_len = max_len
         self.fim_ratio = fim_ratio
-        self.sequences = sequences
-
-        # Pre-compute examples
-        self.examples: list[tuple[list[int], int]] = []
-        for measure_tokens in sequences:
-            if random.random() < fim_ratio:
-                result = create_fim_example(measure_tokens)
-                if result is not None:
-                    seq, loss_start = result
-                    if len(seq) <= max_len + 1:
-                        self.examples.append((seq, loss_start))
-                    else:
-                        # Truncate but keep FIM structure
-                        truncated = seq[:max_len + 1]
-                        self.examples.append((truncated, loss_start))
-            else:
-                seq = create_standard_example(measure_tokens)
-                if len(seq) > max_len + 1:
-                    seq = seq[:max_len + 1]
-                self.examples.append((seq, 1))  # Loss from position 1 (after BOS)
+        # Only keep sequences long enough for FIM (prefix + gap + suffix)
+        self.sequences = [s for s in sequences if len(s) >= 3]
 
     def __len__(self):
-        return len(self.examples)
+        return len(self.sequences)
 
     def __getitem__(self, idx: int):
-        seq, loss_start = self.examples[idx]
+        measure_tokens = self.sequences[idx]
+
+        if random.random() < self.fim_ratio:
+            result = create_fim_example(measure_tokens)
+            if result is not None:
+                seq, loss_start = result
+            else:
+                seq = create_standard_example(measure_tokens)
+                loss_start = 1
+        else:
+            seq = create_standard_example(measure_tokens)
+            loss_start = 1
+
+        if len(seq) > self.max_len + 1:
+            seq = seq[:self.max_len + 1]
 
         x = seq[:-1]
         y = seq[1:]
