@@ -184,25 +184,25 @@ class MusicTransformer(nn.Module):
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
                 logits[logits < v[:, [-1]]] = float("-inf")
 
+            # Prevent EOS until the target number of bars has been generated
+            if bar_count < target_bars:
+                logits[:, EOS] = float("-inf")
+
             probs = torch.softmax(logits, dim=-1)
             next_t = torch.multinomial(probs, 1)
             next_token = next_t.item()
 
-            # Stop if EOS
-            # if next_token == EOS:
-            #     print(f'')
-            #     break
+            if next_token == EOS:
+                break
 
-            if next_token != EOS:
-                generated.append(next_token)
-            idx = torch.cat([idx, next_t], dim=1)
-
-            # Count bars and stop when we reach target
             if next_token == BAR:
                 bar_count += 1
                 print(f'Written {bar_count} bars of {target_bars}')
-                if bar_count >= target_bars:
-                    break
+                if bar_count > target_bars:
+                    break  # next measure starting — all target measures are complete
+
+            generated.append(next_token)
+            idx = torch.cat([idx, next_t], dim=1)
 
         return generated
 

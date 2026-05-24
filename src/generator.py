@@ -33,6 +33,10 @@ def generate_and_export(
     log("Converting tokens → music21 score...")
     score = tokens_to_score(tokens)
 
+    for el in score.flatten().notesAndRests:
+        if el.isNote or el.isChord:
+            el.style.color = 'red'
+
     OUTPUT_DIR.mkdir(exist_ok=True)
     safe_name = "".join(c if c.isalnum() or c in "_ " else "_" for c in prompt)[:40].strip()
     safe_name = safe_name.replace(" ", "_") or "output"

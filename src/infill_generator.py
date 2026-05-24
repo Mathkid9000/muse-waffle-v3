@@ -70,6 +70,7 @@ def merge_fill_into_score(
     fill_tokens: list[int],
     gap_start: int,
     gap_end: int,
+    color='red'
 ):
     """Insert generated tokens back into the score at correct measure positions.
 
@@ -138,10 +139,13 @@ def merge_fill_into_score(
                     # Copy all elements from generated measure
                     for el in gen_measure:
                         if isinstance(el, (m21.note.Note, m21.note.Rest, m21.chord.Chord)):
+                            if color is not None: el.style.color = color
                             measure.insert(el.offset, el)
                         elif isinstance(el, m21.stream.Voice):
+                            if color is not None: el.style.color = color
                             new_voice = m21.stream.Voice(id=el.id)
                             for voice_el in el:
+                                if color is not None: voice_el.style.color = color
                                 new_voice.insert(voice_el.offset, voice_el)
                             measure.insert(0, new_voice)
                     break
