@@ -113,10 +113,13 @@ def score_to_tokens(score) -> list[int]:
         return [BOS, EOS]
 
     events: list[tuple[int, float, int, list[int]]] = []
+    measure_durations: dict[int, float] = {}
 
     for part_idx, part in enumerate(parts):
         for measure in part.getElementsByClass(m21.stream.Measure):
             m_num = measure.number if measure.number is not None else 0
+            ht = float(measure.highestTime)
+            measure_durations[m_num] = ht if ht > 0 else float(measure.barDuration.quarterLength)
 
             if measure.voices:
                 voice_streams = [
@@ -158,6 +161,16 @@ def score_to_tokens(score) -> list[int]:
                         continue
 
                     events.append((m_num, offset, combined, toks))
+
+    # Inject explicit whole-measure rests for active lanes absent from a measure.
+    # This gives the model a clear "voice is silent here" signal in training context
+    # so it learns to continue silence in fills rather than inventing notes.
+    active_lanes = {e[2] for e in events}
+    for m_num in list(measure_durations):
+        present = {e[2] for e in events if e[0] == m_num}
+        dur_idx = _closest_dur_idx(measure_durations[m_num])
+        for lane in active_lanes - present:
+            events.append((m_num, 0.0, lane, [REST_OFF + dur_idx]))
 
     events.sort(key=lambda e: (e[0], e[1], e[2]))
 
@@ -443,6 +456,7 @@ def score_to_tokens_by_measure(score) -> dict[int, list[int]]:
 
     # Collect events by measure
     events_by_measure: dict[int, list[tuple[float, int, list[int]]]] = {}
+    measure_durations: dict[int, float] = {}
 
     for part_idx, part in enumerate(parts):
         for measure in part.getElementsByClass(m21.stream.Measure):
@@ -450,6 +464,8 @@ def score_to_tokens_by_measure(score) -> dict[int, list[int]]:
 
             if m_num not in events_by_measure:
                 events_by_measure[m_num] = []
+            ht = float(measure.highestTime)
+            measure_durations[m_num] = ht if ht > 0 else float(measure.barDuration.quarterLength)
 
             if measure.voices:
                 voice_streams = [
@@ -489,6 +505,14 @@ def score_to_tokens_by_measure(score) -> dict[int, list[int]]:
                         continue
 
                     events_by_measure[m_num].append((offset, combined, toks))
+
+    # Inject explicit whole-measure rests for active lanes absent from a measure.
+    active_lanes = {e[1] for evts in events_by_measure.values() for e in evts}
+    for m_num, evts in events_by_measure.items():
+        present = {e[1] for e in evts}
+        dur_idx = _closest_dur_idx(measure_durations.get(m_num, 4.0))
+        for lane in active_lanes - present:
+            evts.append((0.0, lane, [REST_OFF + dur_idx]))
 
     # Convert events to tokens per measure
     measure_tokens: dict[int, list[int]] = {}
@@ -548,30 +572,31 @@ def score_to_tokens_with_gaps(score) -> tuple[list[int], list[tuple[int, int]]]:
 
 
 def extract_prefix_suffix_tokens(
-    score, gap_start: int, gap_end: int
+    score, gap_start: int, gap_end: int, max_context_measures: int = 16,
 ) -> tuple[list[int], list[int]]:
     """Extract prefix and suffix tokens around a gap region.
+
+    Only the nearest `max_context_measures` measures on each side are included,
+    matching the window used during FIM training.
 
     Args:
         score: music21 Score object
         gap_start: First measure number of the gap (inclusive)
         gap_end: Last measure number of the gap (inclusive)
+        max_context_measures: Maximum measures to include on each side
 
     Returns:
         (prefix_tokens, suffix_tokens)
-        - prefix_tokens: Tokens for all measures before the gap (without BOS/EOS)
-        - suffix_tokens: Tokens for all measures after the gap (without BOS/EOS)
+        - prefix_tokens: Tokens for up to max_context_measures before the gap
+        - suffix_tokens: Tokens for up to max_context_measures after the gap
     """
     measure_tokens = score_to_tokens_by_measure(score)
 
-    prefix: list[int] = []
-    suffix: list[int] = []
+    pre_nums  = [m for m in sorted(measure_tokens) if m < gap_start][-max_context_measures:]
+    post_nums = [m for m in sorted(measure_tokens) if m > gap_end  ][:max_context_measures]
 
-    for m_num in sorted(measure_tokens.keys()):
-        if m_num < gap_start:
-            prefix.extend(measure_tokens[m_num])
-        elif m_num > gap_end:
-            suffix.extend(measure_tokens[m_num])
+    prefix = [t for m in pre_nums  for t in measure_tokens[m]]
+    suffix = [t for m in post_nums for t in measure_tokens[m]]
 
     return prefix, suffix
 

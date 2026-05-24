@@ -36,6 +36,7 @@ def create_fim_example(
     gap_ratio: float = 0.15,
     min_gap: int = 1,
     max_gap: int = 4,
+    max_context_measures: int = 16,
 ) -> tuple[list[int], list[int], int] | None:
     """Create a single FIM training example from tokenized measures.
 
@@ -67,18 +68,14 @@ def create_fim_example(
         return None
     gap_start_idx = random.randint(1, max_start)
 
-    # Build prefix, gap, and suffix token sequences
-    prefix_tokens: list[int] = []
-    gap_tokens: list[int] = []
-    suffix_tokens: list[int] = []
+    # Build prefix, gap, and suffix — keeping only the nearest measures to the gap
+    prefix_measures = sorted_measures[max(0, gap_start_idx - max_context_measures) : gap_start_idx]
+    gap_measures    = sorted_measures[gap_start_idx : gap_start_idx + gap_size]
+    suffix_measures = sorted_measures[gap_start_idx + gap_size : gap_start_idx + gap_size + max_context_measures]
 
-    for i, m_num in enumerate(sorted_measures):
-        if i < gap_start_idx:
-            prefix_tokens.extend(measure_tokens[m_num])
-        elif i < gap_start_idx + gap_size:
-            gap_tokens.extend(measure_tokens[m_num])
-        else:
-            suffix_tokens.extend(measure_tokens[m_num])
+    prefix_tokens = [t for m in prefix_measures for t in measure_tokens[m]]
+    gap_tokens    = [t for m in gap_measures    for t in measure_tokens[m]]
+    suffix_tokens = [t for m in suffix_measures for t in measure_tokens[m]]
 
     # Construct FIM sequence
     # [BOS] + prefix + [FILL_START] + suffix + [FILL_END] + gap_content + [EOS]
@@ -173,13 +170,16 @@ class InfillDataset(Dataset):
 
 def _load_measure_sequences(
     paths: list[str],
-    log: Callable[[str], None]
+    log: Callable[[str], None],
+    max_sequences=0
 ) -> list[dict[int, list[int]]]:
     """Load scores and convert to per-measure token dictionaries."""
     import music21 as m21
 
     sequences = []
     for path in tqdm(paths, desc="Parsing scores for infill training..."):
+        if max_sequences != 0 and len(sequences) >= max_sequences:
+            break
         try:
             score = m21.converter.parse(path)
             measure_tokens = score_to_tokens_by_measure(score)
