@@ -23,7 +23,8 @@ from torch.utils.data import Dataset, DataLoader, random_split
 from tqdm import tqdm
 
 from src.tokenizer import (
-    score_to_tokens, score_to_tokens_by_measure, text_to_tokens,
+    score_to_tokens, score_to_tokens_by_measure, score_to_header_tokens,
+    text_to_tokens,
     BOS, EOS, PAD, BAR, FILL_START, FILL_END
 )
 from src.model import MusicTransformer, WEIGHTS_FILE, CHECKPOINT_DIR
@@ -32,24 +33,25 @@ INFILL_WEIGHTS_FILE = CHECKPOINT_DIR / "infill_model.pt"
 
 
 def create_fim_example(
+    header_tokens: list[int],
     measure_tokens: dict[int, list[int]],
     gap_ratio: float = 0.15,
     min_gap: int = 1,
     max_gap: int = 4,
     max_context_measures: int = 16,
-) -> tuple[list[int], list[int], int] | None:
+) -> tuple[list[int], int] | None:
     """Create a single FIM training example from tokenized measures.
 
     Args:
+        header_tokens: Instrument header tokens for this score
         measure_tokens: Dict mapping measure number to tokens for that measure
         gap_ratio: Target ratio of gap measures to total measures
         min_gap: Minimum number of measures to use as gap
         max_gap: Maximum number of measures to use as gap
 
     Returns:
-        (input_sequence, target_sequence, loss_start_idx) or None if can't create
-        - input_sequence: [BOS] + prefix + [FILL_START] + suffix + [FILL_END] + gap_content
-        - target_sequence: Same as input, shifted by 1 for next-token prediction
+        (input_sequence, loss_start_idx) or None if can't create
+        - input_sequence: [BOS] + header + prefix + [FILL_START] + suffix + [FILL_END] + gap_content
         - loss_start_idx: Index where loss computation starts (after FILL_END)
     """
     sorted_measures = sorted(measure_tokens.keys())
@@ -59,7 +61,6 @@ def create_fim_example(
         return None
 
     # Determine gap size
-    target_gap_size = max(min_gap, min(max_gap, int(n_measures * gap_ratio)))
     gap_size = random.randint(min_gap, min(max_gap, n_measures - 2))
 
     # Select gap start position (must leave room for prefix and suffix)
@@ -73,26 +74,26 @@ def create_fim_example(
     gap_measures    = sorted_measures[gap_start_idx : gap_start_idx + gap_size]
     suffix_measures = sorted_measures[gap_start_idx + gap_size : gap_start_idx + gap_size + max_context_measures]
 
-    prefix_tokens = [t for m in prefix_measures for t in measure_tokens[m]]
-    gap_tokens    = [t for m in gap_measures    for t in measure_tokens[m]]
-    suffix_tokens = [t for m in suffix_measures for t in measure_tokens[m]]
+    prefix_toks = [t for m in prefix_measures for t in measure_tokens[m]]
+    gap_toks    = [t for m in gap_measures    for t in measure_tokens[m]]
+    suffix_toks = [t for m in suffix_measures for t in measure_tokens[m]]
 
-    # Construct FIM sequence
-    # [BOS] + prefix + [FILL_START] + suffix + [FILL_END] + gap_content + [EOS]
+    # Construct FIM sequence:
+    # [BOS] + header + prefix + [FILL_START] + suffix + [FILL_END] + gap_content + [EOS]
     input_seq = (
-        [BOS] + prefix_tokens + [FILL_START] + suffix_tokens +
-        [FILL_END] + gap_tokens + [EOS]
+        [BOS] + header_tokens + prefix_toks + [FILL_START] +
+        suffix_toks + [FILL_END] + gap_toks + [EOS]
     )
 
     # Loss starts after FILL_END (we want model to predict gap content)
-    loss_start_idx = len([BOS] + prefix_tokens + [FILL_START] + suffix_tokens + [FILL_END])
+    loss_start_idx = len([BOS] + header_tokens + prefix_toks + [FILL_START] + suffix_toks + [FILL_END])
 
     return input_seq, loss_start_idx
 
 
-def create_standard_example(measure_tokens: dict[int, list[int]]) -> list[int]:
+def create_standard_example(header_tokens: list[int], measure_tokens: dict[int, list[int]]) -> list[int]:
     """Create a standard next-token prediction example (no FIM)."""
-    tokens = [BOS]
+    tokens = [BOS] + header_tokens
     for m_num in sorted(measure_tokens.keys()):
         tokens.extend(measure_tokens[m_num])
     tokens.append(EOS)
@@ -112,36 +113,36 @@ class InfillDataset(Dataset):
 
     def __init__(
         self,
-        sequences: list[dict[int, list[int]]],
+        sequences: list[tuple[list[int], dict[int, list[int]]]],
         max_len: int = 512,
         fim_ratio: float = 0.5,
     ):
         """
         Args:
-            sequences: List of measure_tokens dicts (from score_to_tokens_by_measure)
+            sequences: List of (header_tokens, measure_tokens) tuples
             max_len: Maximum sequence length
             fim_ratio: Proportion of examples that use FIM format
         """
         self.max_len = max_len
         self.fim_ratio = fim_ratio
         # Only keep sequences long enough for FIM (prefix + gap + suffix)
-        self.sequences = [s for s in sequences if len(s) >= 3]
+        self.sequences = [(h, m) for h, m in sequences if len(m) >= 3]
 
     def __len__(self):
         return len(self.sequences)
 
     def __getitem__(self, idx: int):
-        measure_tokens = self.sequences[idx]
+        header_tokens, measure_tokens = self.sequences[idx]
 
         if random.random() < self.fim_ratio:
-            result = create_fim_example(measure_tokens)
+            result = create_fim_example(header_tokens, measure_tokens)
             if result is not None:
                 seq, loss_start = result
             else:
-                seq = create_standard_example(measure_tokens)
+                seq = create_standard_example(header_tokens, measure_tokens)
                 loss_start = 1
         else:
-            seq = create_standard_example(measure_tokens)
+            seq = create_standard_example(header_tokens, measure_tokens)
             loss_start = 1
 
         if len(seq) > self.max_len + 1:
@@ -172,8 +173,8 @@ def _load_measure_sequences(
     paths: list[str],
     log: Callable[[str], None],
     max_sequences=0
-) -> list[dict[int, list[int]]]:
-    """Load scores and convert to per-measure token dictionaries."""
+) -> list[tuple[list[int], dict[int, list[int]]]]:
+    """Load scores and convert to (header_tokens, measure_tokens) tuples."""
     import music21 as m21
 
     sequences = []
@@ -182,9 +183,10 @@ def _load_measure_sequences(
             break
         try:
             score = m21.converter.parse(path)
+            header = score_to_header_tokens(score)
             measure_tokens = score_to_tokens_by_measure(score)
             if measure_tokens and len(measure_tokens) >= 3:
-                sequences.append(measure_tokens)
+                sequences.append((header, measure_tokens))
         except Exception as e:
             log(f"  Skip {Path(path).name}: {e}")
 

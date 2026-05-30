@@ -14,7 +14,8 @@ from typing import Callable
 
 from src.tokenizer import (
     identify_empty_measures, extract_prefix_suffix_tokens,
-    tokens_to_score, score_to_tokens_by_measure, BAR, BOS, EOS
+    tokens_to_score, score_to_tokens_by_measure, score_to_header_tokens,
+    BAR, BOS, EOS
 )
 from src.model import load_model, CHECKPOINT_DIR
 
@@ -45,8 +46,8 @@ def extract_prefix_suffix(
     score,
     gap_start: int,
     gap_end: int,
-) -> tuple[list[int], list[int], int]:
-    """Extract prefix and suffix tokens around a gap.
+) -> tuple[list[int], list[int], list[int], int]:
+    """Extract prefix, suffix, and header tokens around a gap.
 
     Args:
         score: music21 Score object
@@ -54,15 +55,17 @@ def extract_prefix_suffix(
         gap_end: Last measure of gap (inclusive)
 
     Returns:
-        (prefix_tokens, suffix_tokens, target_bars)
-        - prefix_tokens: All content before gap
-        - suffix_tokens: All content after gap
+        (prefix_tokens, suffix_tokens, header_tokens, target_bars)
+        - prefix_tokens: Content before gap
+        - suffix_tokens: Content after gap
+        - header_tokens: Instrument header for this score
         - target_bars: Number of bars to generate (gap size)
     """
     prefix, suffix = extract_prefix_suffix_tokens(score, gap_start, gap_end)
+    header = score_to_header_tokens(score)
     target_bars = gap_end - gap_start + 1
 
-    return prefix, suffix, target_bars
+    return prefix, suffix, header, target_bars
 
 
 def merge_fill_into_score(
@@ -204,14 +207,15 @@ def infill_and_export(
     for i, (gap_start, gap_end) in enumerate(gaps):
         log(f"Processing gap {i+1}/{len(gaps)}: measures {gap_start}-{gap_end}")
 
-        # Extract prefix and suffix
-        prefix, suffix, target_bars = extract_prefix_suffix(score, gap_start, gap_end)
-        log(f"  Prefix: {len(prefix)} tokens, Suffix: {len(suffix)} tokens, Target: {target_bars} bars")
+        # Extract prefix, suffix and instrument header
+        prefix, suffix, header, target_bars = extract_prefix_suffix(score, gap_start, gap_end)
+        log(f"  Prefix: {len(prefix)} tokens, Suffix: {len(suffix)} tokens, Header: {header}, Target: {target_bars} bars")
 
         # Generate fill content
         fill_tokens = model.generate_infill(
             prefix_tokens=prefix,
             suffix_tokens=suffix,
+            header_tokens=header,
             target_bars=target_bars,
             max_new=max_new,
             temperature=temperature,

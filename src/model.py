@@ -25,14 +25,13 @@ WEIGHTS_FILE = CHECKPOINT_DIR / "model.pt"
 
 DEFAULT_CONFIG = dict(
     vocab_size = VOCAB_SIZE,
-    d_model = 256,
+    d_model = 512,
     n_heads = 8,
-    n_layers = 4,
+    n_layers = 6,
     max_seq_len = 2048,
     dropout = 0.1,
     epoches = []
 )
-
 
 class CausalSelfAttention(nn.Module):
     def __init__(self, d_model: int, n_heads: int, dropout: float):
@@ -141,6 +140,7 @@ class MusicTransformer(nn.Module):
         self,
         prefix_tokens: list[int],
         suffix_tokens: list[int],
+        header_tokens: list[int] | None = None,
         target_bars: int = 4,
         max_new: int = 400,
         temperature: float = 1.0,
@@ -149,12 +149,13 @@ class MusicTransformer(nn.Module):
     ) -> list[int]:
         """Generate tokens to fill a gap using FIM (fill-in-the-middle) approach.
 
-        Constructs: [BOS] + prefix + [FILL_START] + suffix + [FILL_END]
+        Constructs: [BOS] + header + prefix + [FILL_START] + suffix + [FILL_END]
         Then generates autoregressively until EOS or target bar count is reached.
 
         Args:
             prefix_tokens: Tokens before the gap (without BOS)
             suffix_tokens: Tokens after the gap (without EOS)
+            header_tokens: Instrument header tokens for the score (optional)
             target_bars: Number of BAR tokens to generate (matches gap size)
             max_new: Maximum tokens to generate
             temperature: Sampling temperature
@@ -168,8 +169,9 @@ class MusicTransformer(nn.Module):
 
         self.eval()
 
-        # Build FIM prompt: [BOS] + prefix + [FILL_START] + suffix + [FILL_END]
-        prompt = [BOS] + prefix_tokens + [FILL_START] + suffix_tokens + [FILL_END]
+        # Build FIM prompt: [BOS] + header + prefix + [FILL_START] + suffix + [FILL_END]
+        hdr = header_tokens or []
+        prompt = [BOS] + hdr + prefix_tokens + [FILL_START] + suffix_tokens + [FILL_END]
         idx = torch.tensor([prompt], dtype=torch.long, device=device)
         max_ctx = self.cfg["max_seq_len"]
 
@@ -317,7 +319,56 @@ def expand_embeddings_for_infill(
     return model
 
 
-def build_infill_model(cfg: dict | None = None):
+def expand_embeddings_for_metadata(
+    model: MusicTransformer,
+    old_vocab_size: int = 415,
+) -> MusicTransformer:
+    """Expand model embeddings from 415 to 463 to add TEMPO and INSTR tokens.
+
+    New token initialisation:
+    - TEMPO tokens (415-430): mean of all existing embeddings (semantically novel)
+    - INSTR tokens (431-462): copy of BAR embedding (structural separator role)
+    """
+    from src.tokenizer import BAR, VOCAB_SIZE
+
+    new_vocab_size = VOCAB_SIZE  # 463
+    d_model = model.cfg["d_model"]
+
+    if model.cfg["vocab_size"] >= new_vocab_size:
+        return model  # Already expanded
+
+    old_tok_emb = model.tok_emb.weight.data
+    mean_emb = old_tok_emb.mean(dim=0)
+    bar_emb  = old_tok_emb[BAR].clone()
+
+    new_tok_emb = nn.Embedding(new_vocab_size, d_model)
+    nn.init.normal_(new_tok_emb.weight, std=0.02)
+    new_tok_emb.weight.data[:old_vocab_size] = old_tok_emb
+
+    # TEMPO tokens <- mean embedding
+    for i in range(16):
+        new_tok_emb.weight.data[old_vocab_size + i] = mean_emb.clone()
+    # INSTR tokens <- BAR embedding
+    for i in range(32):
+        new_tok_emb.weight.data[old_vocab_size + 16 + i] = bar_emb.clone()
+
+    model.tok_emb = new_tok_emb
+
+    old_head = model.head.weight.data
+    new_head = nn.Linear(d_model, new_vocab_size, bias=False)
+    nn.init.normal_(new_head.weight, std=0.02)
+    new_head.weight.data[:old_vocab_size] = old_head
+    for i in range(16):
+        new_head.weight.data[old_vocab_size + i] = old_head.mean(dim=0).clone()
+    for i in range(32):
+        new_head.weight.data[old_vocab_size + 16 + i] = old_head[BAR].clone()
+
+    model.head = new_head
+    model.cfg["vocab_size"] = new_vocab_size
+    return model
+
+
+def build_infill_model(cfg: dict | None = None, override_cfg = False):
     """Build a model with expanded vocabulary for infill training."""
     from src.tokenizer import VOCAB_SIZE
 
@@ -325,8 +376,8 @@ def build_infill_model(cfg: dict | None = None):
         with open(CONFIG_FILE, "r") as f:
             cfg = json.load(f)
 
-    cfg = cfg or DEFAULT_CONFIG.copy()
-    cfg["vocab_size"] = VOCAB_SIZE  # Use new vocab size (415)
+    cfg = (cfg and not override_cfg) or DEFAULT_CONFIG.copy()
+    cfg["vocab_size"] = VOCAB_SIZE
 
     CHECKPOINT_DIR.mkdir(exist_ok=True)
     with open(CONFIG_FILE, "w") as f:

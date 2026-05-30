@@ -8,34 +8,42 @@ Vocabulary layout:
   3        BAR
   4        TIE   (note is tied forward to the next same-pitch note)
   5-132    NOTE  pitch 0-127  (MIDI)
-  133-153  DURATION  (21 bins: 32nd … double-whole, plus triplet 16th/8th/quarter/half/whole)
+  133-153  DURATION  (21 bins: 32nd to double-whole, plus triplet 16th/8th/quarter/half/whole)
   154-174  REST      (same 21 duration bins)
-  175-187  KEY_SIG   (-6 … +6 sharps)
+  175-187  KEY_SIG   (-6 to +6 sharps)
   188-193  TIME_SIG  (common meters)
   194-250  TEXT chars (printable ASCII 32-88, 57 values)
-  251-266  PART_0 … PART_15  (combined part+voice: part_idx*2 + voice_idx)
-  267-410  STEP_0 … STEP_143 (absolute offset within measure, 1/24 ql units)
+  251-266  PART_0 to PART_15  (combined part+voice: part_idx*2 + voice_idx)
+  267-410  STEP_0 to STEP_143 (absolute offset within measure, 1/24 ql units)
   411      GRACE  (next note/chord is a grace note; DUR carries its written duration)
+  412      FILL_START  (infill: end of prefix)
+  413      FILL_END    (infill: end of suffix, start of generation)
+  414      EMPTY_BAR   (infill: placeholder for empty measures)
+  415-430  TEMPO  (16 BPM buckets)
+  431-462  INSTR  (32 instrument categories; see INSTR_NAMES)
 
 PART tokens encode both staff and voice: PART_{part*2 + voice}.
 Each token unambiguously identifies a single voice lane.  Supports up to
-8 staves × 2 voices = 16 lanes.
+8 staves x 2 voices = 16 lanes.
 
-Step resolution is 1/24 ql, which divides both 32nd-notes (3 steps) and
-triplet 16th/8th/quarter notes (4/8/16 steps) exactly, preventing rounding
-collisions between regular and tuplet notes that would otherwise silently drop
-events.
+Step resolution is 1/24 ql per step.
+1/24 is the LCM of 1/8 (32nd notes) and 1/3 (triplets), so both quantise
+to integers with no rounding error.  144 steps x (1/24 ql) = 6 ql, matching
+the previous 48-step range while covering 12/8 time signatures fully.
 
-Within each measure events are emitted in (offset, combined_part_voice) order:
+Each measure opens with BAR followed by optional global symbols, then note events:
 
-  [BAR]
+  [BAR] [KEY_SIG?] [TIME_SIG?] [TEMPO?]   <- only emitted when present in that measure
     [STEP_0]
-      [PART_0] [NOTE] [DUR]                ← plain note
-      [PART_0] [NOTE] [DUR] [TIE]         ← tied note
-      [PART_0] [GRACE] [NOTE] [DUR]       ← grace note (written dur in DUR)
-      [PART_2] [NOTE] [DUR]                ← part 1, voice 0
-    [STEP_8]                                ← offset 8/24 = 0.333 ql (triplet 8th)
       [PART_0] [NOTE] [DUR]
+      [PART_0] [NOTE] [DUR] [TIE]
+      [PART_0] [GRACE] [NOTE] [DUR]
+      [PART_2] [NOTE] [DUR]
+    [STEP_8]
+      [PART_0] [NOTE] [DUR]
+
+Instrument tokens appear once per part right after BOS (before the first BAR):
+  [BOS] [INSTR_0 INSTR_1 ...] [BAR] ...
 """
 
 from __future__ import annotations
@@ -60,11 +68,49 @@ MAX_VOICES_PER_PART = 2
 MAX_PARTS           = MAX_REAL_PARTS * MAX_VOICES_PER_PART  # 16
 
 # Step resolution: 1/24 ql per step.
-# 1/24 is the LCM of 1/8 (32nd notes) and 1/3 (triplets), so both quantise
-# to integers with no rounding error.  144 steps × (1/24 ql) = 6 ql, matching
-# the previous 48-step range while covering 12/8 time signatures fully.
 STEP_SIZE = 1 / 24
 MAX_STEP  = 144
+
+# Tempo: 16 BPM buckets.  Bucket i covers [TEMPO_BUCKETS[i], TEMPO_BUCKETS[i+1]).
+N_TEMPO = 16
+TEMPO_BUCKETS = [20, 40, 52, 63, 72, 84, 96, 108, 116, 126, 138, 152, 168, 192, 216, 256]
+
+# Instrument categories (32 entries, index 0 = unknown/other).
+N_INSTR = 32
+INSTR_NAMES = [
+    "other",          # 0
+    "piano",          # 1
+    "harpsichord",    # 2
+    "organ",          # 3
+    "accordion",      # 4
+    "guitar",         # 5
+    "bass_guitar",    # 6
+    "violin",         # 7
+    "viola",          # 8
+    "cello",          # 9
+    "double_bass",    # 10
+    "harp",           # 11
+    "flute",          # 12
+    "oboe",           # 13
+    "clarinet",       # 14
+    "bassoon",        # 15
+    "saxophone",      # 16
+    "horn",           # 17
+    "trumpet",        # 18
+    "trombone",       # 19
+    "tuba",           # 20
+    "percussion",     # 21
+    "timpani",        # 22
+    "celesta",        # 23
+    "voice_soprano",  # 24
+    "voice_mezzo",    # 25
+    "voice_alto",     # 26
+    "voice_tenor",    # 27
+    "voice_baritone", # 28
+    "voice_bass",     # 29
+    "voice",          # 30 (generic)
+    "choir",          # 31
+]
 
 PAD      = 0
 BOS      = 1
@@ -86,7 +132,9 @@ FILL_START = GRACE + 1               # 412 - marks start of fill region (prefix 
 FILL_END   = FILL_START + 1          # 413 - marks end of suffix, start of generation
 EMPTY_BAR  = FILL_END + 1            # 414 - placeholder for empty measures in input
 
-VOCAB_SIZE = EMPTY_BAR + 1           # 415
+TEMPO_OFF = EMPTY_BAR + 1            # 415
+INSTR_OFF = TEMPO_OFF + N_TEMPO      # 431
+VOCAB_SIZE = INSTR_OFF + N_INSTR     # 463
 
 
 def _closest_dur_idx(qlen: float) -> int:
@@ -94,17 +142,134 @@ def _closest_dur_idx(qlen: float) -> int:
 
 
 def _offset_to_step(offset: float) -> int:
-    """Quarter-length offset → 1/24-ql step index, clamped to [0, MAX_STEP)."""
+    """Quarter-length offset -> 1/24-ql step index, clamped to [0, MAX_STEP)."""
     return min(MAX_STEP - 1, max(0, round(offset / STEP_SIZE)))
 
 
+def bpm_to_tempo_idx(bpm: float) -> int:
+    """Map a BPM value to a TEMPO bucket index (0 to N_TEMPO-1)."""
+    idx = 0
+    for i, boundary in enumerate(TEMPO_BUCKETS):
+        if bpm >= boundary:
+            idx = i
+    return idx
+
+
+def instrument_to_idx(part) -> int:
+    """Determine the INSTR category index (0-31) for a music21 Part."""
+    import music21 as m21
+
+    instrs = list(part.getElementsByClass(m21.instrument.Instrument))
+    cls_name = type(instrs[0]).__name__.lower() if instrs else ""
+    part_name = (part.partName or "").lower()
+    name = (part_name + " " + cls_name).strip()
+
+    # Voice subtypes (check before generic "voice" / "bass")
+    if "soprano" in name:                                      return 24
+    if "mezzo" in name:                                        return 25
+    if "contralto" in name or ("alto" in name and "contralt" in name): return 26
+    if "alto" in name and "voice" in name:                    return 26
+    if "tenor" in name:                                        return 27
+    if "bariton" in name:                                      return 28
+    if "bass" in name and ("voice" in name or "sing" in name or "gesang" in name): return 29
+    if ("voice" in name or "vocal" in name or "gesang" in name
+            or "sing" in name or "soprano" in name or "mezzo" in name): return 30
+    if "choir" in name or "chorus" in name:                   return 31
+
+    # Keyboard / plucked / etc.
+    if "piano" in name or "fortepiano" in name or "klavier" in name: return 1
+    if "harpsichord" in name or "cembalo" in name:            return 2
+    if "organ" in name:                                        return 3
+    if "accordion" in name:                                    return 4
+    if "guitar" in name and "bass" not in name:               return 5
+    if "bass guitar" in name or "electric bass" in name:      return 6
+
+    # Strings
+    if "violin" in name and "viola" not in name:              return 7
+    if "viola" in name and "bass" not in name:                return 8
+    if "cello" in name or "violoncello" in name:              return 9
+    if "double bass" in name or "contrabass" in name or "doublebass" in name: return 10
+    if "harp" in name:                                         return 11
+
+    # Woodwinds
+    if "flute" in name or "piccolo" in name:                  return 12
+    if "oboe" in name or "english horn" in name or "cor anglais" in name: return 13
+    if "clarinet" in name:                                     return 14
+    if "bassoon" in name or "fagot" in name:                  return 15
+    if "saxophone" in name or "saxophon" in name:             return 16
+
+    # Brass
+    if "horn" in name:                                         return 17
+    if "trumpet" in name or "cornet" in name:                 return 18
+    if "trombone" in name:                                     return 19
+    if "tuba" in name:                                         return 20
+
+    # Percussion
+    if "timpani" in name or "timpano" in name:                return 22
+    if "percussion" in name or "drum" in name or "snare" in name: return 21
+
+    # Other
+    if "celesta" in name or "celeste" in name:                return 23
+
+    return 0  # other / unknown
+
+
+def score_to_header_tokens(score) -> list[int]:
+    """Returns one INSTR token per part (in order), to be emitted right after BOS."""
+    parts = list(score.parts)[:MAX_REAL_PARTS]
+    return [INSTR_OFF + instrument_to_idx(p) for p in parts]
+
+
+def _extract_measure_symbols(score):
+    """Extract per-measure KEY_SIG, TIME_SIG, and TEMPO tokens from the first part.
+
+    Returns three dicts mapping measure_number -> token_id.
+    Only measures that actually contain the element are included.
+    """
+    import music21 as m21
+
+    parts = list(score.parts)
+    if not parts:
+        return {}, {}, {}
+
+    key_toks: dict[int, int] = {}
+    time_toks: dict[int, int] = {}
+    tempo_toks: dict[int, int] = {}
+
+    for measure in parts[0].getElementsByClass(m21.stream.Measure):
+        m_num = measure.number if measure.number is not None else 0
+
+        for ks in measure.getElementsByClass(m21.key.KeySignature):
+            sharps = int(ks.sharps)
+            if -6 <= sharps <= 6:
+                key_toks[m_num] = KEY_OFF + (sharps + 6)
+            break  # one key sig per measure is enough
+
+        for ts in measure.getElementsByClass(m21.meter.TimeSignature):
+            ratio = ts.ratioString
+            if ratio in TIME_SIGS:
+                time_toks[m_num] = TIME_OFF + TIME_SIGS.index(ratio)
+            break
+
+        for mm in measure.getElementsByClass(m21.tempo.MetronomeMark):
+            if mm.number is not None:
+                tempo_toks[m_num] = TEMPO_OFF + bpm_to_tempo_idx(float(mm.number))
+            break
+
+    return key_toks, time_toks, tempo_toks
+
+
 def score_to_tokens(score) -> list[int]:
-    """music21 Score → timestep-structured token list.
+    """music21 Score -> timestep-structured token list.
 
     Events are sorted by (measure, offset, combined_idx).  A STEP token is
     emitted when the offset changes; a PART token when the lane changes.  A TIE
     token is appended after NOTE+DUR when the note carries a tie start/continue,
     allowing the decoder to reconstruct tie connections.
+
+    The sequence opens with [BOS] followed by one INSTR token per part, then
+    measure content.  Each measure starts with [BAR] optionally followed by
+    KEY_SIG, TIME_SIG, and/or TEMPO tokens (only when present in that measure).
     """
     import music21 as m21
 
@@ -137,8 +302,6 @@ def score_to_tokens(score) -> list[int]:
                     is_grace  = el.duration.quarterLength == 0
 
                     if is_grace:
-                        # Use written (non-zero) duration for the DUR token so the
-                        # decoder can reconstruct the grace note's notated type.
                         dtype = el.duration.type
                         written_ql = (m21.duration.Duration(dtype).quarterLength
                                       if dtype and dtype != 'zero' else 0.25)
@@ -163,8 +326,6 @@ def score_to_tokens(score) -> list[int]:
                     events.append((m_num, offset, combined, toks))
 
     # Inject explicit whole-measure rests for active lanes absent from a measure.
-    # This gives the model a clear "voice is silent here" signal in training context
-    # so it learns to continue silence in fills rather than inventing notes.
     active_lanes = {e[2] for e in events}
     for m_num in list(measure_durations):
         present = {e[2] for e in events if e[0] == m_num}
@@ -174,7 +335,10 @@ def score_to_tokens(score) -> list[int]:
 
     events.sort(key=lambda e: (e[0], e[1], e[2]))
 
-    tokens: list[int] = [BOS]
+    key_toks, time_toks, tempo_toks = _extract_measure_symbols(score)
+
+    # BOS + one INSTR token per part
+    tokens: list[int] = [BOS] + score_to_header_tokens(score)
     cur_measure = -1
     cur_offset  = -1.0
     cur_lane    = -1
@@ -183,6 +347,10 @@ def score_to_tokens(score) -> list[int]:
         if m_num != cur_measure:
             tokens.append(BAR)
             cur_measure = m_num
+            # Emit global symbols for this measure
+            for sym_dict in (key_toks, time_toks, tempo_toks):
+                if m_num in sym_dict:
+                    tokens.append(sym_dict[m_num])
             cur_offset  = -1.0
             cur_lane    = -1
 
@@ -202,13 +370,11 @@ def score_to_tokens(score) -> list[int]:
 
 
 def tokens_to_score(tokens: list[int]):
-    """Timestep token list → music21 Score.
+    """Timestep token list -> music21 Score.
 
     lane_events[combined][m_num] stores a list of (offset_ql, element) pairs.
     Using a list (rather than a dict keyed by offset) prevents silent overwrites
-    when two events in the same lane round to the same quantised step — e.g. a
-    triplet 8th at 0.333 ql and a dotted 8th at 0.375 ql both hitting step 8
-    before the step-resolution upgrade.
+    when two events in the same lane round to the same quantised step.
     """
     import music21 as m21
     from collections import defaultdict
@@ -221,11 +387,21 @@ def tokens_to_score(tokens: list[int]):
     cur_offset    = 0.0
     next_is_grace = False
 
+    # Accumulate global symbols per measure for score reconstruction
+    measure_key_sigs: dict[int, int] = {}    # measure -> sharps value
+    measure_time_sigs: dict[int, int] = {}   # measure -> TIME_SIGS index
+    measure_tempos: dict[int, float] = {}    # measure -> BPM
+
     i = 0
     while i < len(tokens):
         t = tokens[i]
 
         if t in (BOS, EOS, PAD):
+            i += 1
+            continue
+
+        # Instrument header tokens - skip (used during training, not needed for playback)
+        if INSTR_OFF <= t < INSTR_OFF + N_INSTR:
             i += 1
             continue
 
@@ -241,6 +417,25 @@ def tokens_to_score(tokens: list[int]):
 
         if t == GRACE:
             next_is_grace = True
+            i += 1
+            continue
+
+        # Global measure symbols
+        if KEY_OFF <= t < KEY_OFF + 13:
+            measure_key_sigs[cur_measure] = (t - KEY_OFF) - 6
+            i += 1
+            continue
+
+        if TIME_OFF <= t < TIME_OFF + len(TIME_SIGS):
+            measure_time_sigs[cur_measure] = t - TIME_OFF
+            i += 1
+            continue
+
+        if TEMPO_OFF <= t < TEMPO_OFF + N_TEMPO:
+            bucket = t - TEMPO_OFF
+            lo = TEMPO_BUCKETS[bucket]
+            hi = TEMPO_BUCKETS[bucket + 1] if bucket + 1 < N_TEMPO else lo + 40
+            measure_tempos[cur_measure] = (lo + hi) / 2.0
             i += 1
             continue
 
@@ -327,6 +522,14 @@ def tokens_to_score(tokens: list[int]):
         for m_num in sorted(all_measures):
             measure = m21.stream.Measure(number=m_num)
 
+            # Reconstruct global measure symbols
+            if m_num in measure_key_sigs:
+                measure.insert(0, m21.key.KeySignature(measure_key_sigs[m_num]))
+            if m_num in measure_time_sigs:
+                measure.insert(0, m21.meter.TimeSignature(TIME_SIGS[measure_time_sigs[m_num]]))
+            if m_num in measure_tempos and part_idx == 0:
+                measure.insert(0, m21.tempo.MetronomeMark(number=measure_tempos[m_num]))
+
             if len(voices_data) > 1:
                 for voice_idx in sorted(voices_data.keys()):
                     pairs = voices_data[voice_idx].get(m_num, [])
@@ -354,7 +557,7 @@ def tokens_to_score(tokens: list[int]):
 
 
 def text_to_tokens(text: str) -> list[int]:
-    """ASCII text → token ids (printable chars in range 32-88 → TEXT_OFF+0..56)."""
+    """ASCII text -> token ids (printable chars in range 32-88 -> TEXT_OFF+0..56)."""
     out = []
     for ch in text[:56]:
         code = ord(ch)
@@ -383,7 +586,7 @@ def identify_empty_measures(score) -> list[tuple[int, int]]:
         for measure in part.getElementsByClass(m21.stream.Measure):
             m_num = measure.number if measure.number is not None else 0
             all_measure_nums.add(m_num)
-            
+
     print(all_measure_nums)
 
     if not all_measure_nums:
@@ -396,13 +599,6 @@ def identify_empty_measures(score) -> list[tuple[int, int]]:
         for part in parts:
             measures = [m for m in part.getElementsByClass(m21.stream.Measure)
                        if (m.number if m.number is not None else 0) == m_num]
-            # if measures:
-            #     measure = measures[0]
-            #     # Check for any notes or rests
-            #     notes_and_rests = list(measure.flatten().notesAndRests)
-            #     if not (len(notes_and_rests) == 1 and notes_and_rests[0].isRest and notes_and_rests[0].quarterLength == 4):
-            #         is_empty = False
-            #         break
             if not measures:
                 is_empty = False
                 break
@@ -443,10 +639,11 @@ def identify_empty_measures(score) -> list[tuple[int, int]]:
 
 
 def score_to_tokens_by_measure(score) -> dict[int, list[int]]:
-    """music21 Score → dict mapping measure number to tokens for that measure.
+    """music21 Score -> dict mapping measure number to tokens for that measure.
 
     Returns tokens for each measure separately (without BOS/EOS).
-    Each measure's tokens start with BAR followed by that measure's content.
+    Each measure's tokens start with BAR followed by optional KEY_SIG, TIME_SIG,
+    and TEMPO tokens (only when present), then STEP/PART/note content.
     """
     import music21 as m21
 
@@ -514,12 +711,20 @@ def score_to_tokens_by_measure(score) -> dict[int, list[int]]:
         for lane in active_lanes - present:
             evts.append((0.0, lane, [REST_OFF + dur_idx]))
 
+    key_toks, time_toks, tempo_toks = _extract_measure_symbols(score)
+
     # Convert events to tokens per measure
     measure_tokens: dict[int, list[int]] = {}
 
     for m_num in sorted(events_by_measure.keys()):
         events = sorted(events_by_measure[m_num], key=lambda e: (e[0], e[1]))
         tokens: list[int] = [BAR]
+
+        # Emit global symbols for this measure
+        for sym_dict in (key_toks, time_toks, tempo_toks):
+            if m_num in sym_dict:
+                tokens.append(sym_dict[m_num])
+
         cur_offset = -1.0
         cur_lane = -1
 
