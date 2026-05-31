@@ -94,7 +94,6 @@ def load_cached_paths() -> list[str]:
     for i, path in enumerate(paths):
         paths[i] = STORAGE_DIR / path
 
-    print(paths)
     return paths
 
 
