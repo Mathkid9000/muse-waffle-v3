@@ -27,10 +27,7 @@ from src.tokenizer import (
     text_to_tokens,
     BOS, EOS, PAD, BAR, FILL_START, FILL_END
 )
-from src.model import MusicTransformer, WEIGHTS_FILE, CHECKPOINT_DIR
-
-INFILL_WEIGHTS_FILE = CHECKPOINT_DIR / "infill_model.pt"
-
+from src.model import MusicTransformer, WEIGHTS_FILE, OPTIMIZER_FILE, CHECKPOINT_DIR
 
 def create_fim_example(
     header_tokens: list[int],
@@ -240,6 +237,9 @@ def train_infill(
     loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, drop_last=False)
     val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False, drop_last=False)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    if OPTIMIZER_FILE.exists():
+        optimizer.load_state_dict(torch.load(OPTIMIZER_FILE, map_location=device, weights_only=False))
+        log("Resumed optimizer state from previous session.")
     model.to(device)
 
     CHECKPOINT_DIR.mkdir(exist_ok=True)
@@ -317,7 +317,8 @@ def train_infill(
         on_epoch(epoch, avg_loss, avg_val_loss)
 
         # Save checkpoint
-        torch.save(model.state_dict(), INFILL_WEIGHTS_FILE)
+        torch.save(model.state_dict(), WEIGHTS_FILE)
+        torch.save(optimizer.state_dict(), OPTIMIZER_FILE)
         if device == "cuda":
             torch.cuda.empty_cache()
         log(f"Epoch {epoch}/{epochs}  loss={avg_loss:.4f}  val_loss={avg_val_loss:.4f}  (infill checkpoint saved)")

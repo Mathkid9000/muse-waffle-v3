@@ -66,7 +66,7 @@ def download_dataset(
         dest = DATA_DIR / item["path"].replace("/", "_")
         progress(i, len(files))
         if dest.exists():
-            downloaded.append(str(dest))
+            downloaded.append(str(Path("data/openscore") / item["path"].replace("/", "_")))
             continue
         try:
             resp = requests.get(item["url"], headers=_get_token(), timeout=20)

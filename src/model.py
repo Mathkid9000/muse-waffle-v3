@@ -18,10 +18,11 @@ from torch import Tensor
 
 from src.tokenizer import VOCAB_SIZE
 
-load_dotenv()
+load_dotenv('env.env')
 CHECKPOINT_DIR = Path(os.getenv('STORAGE_DIR')) / "checkpoints"
 CONFIG_FILE = CHECKPOINT_DIR / "config.json"
-WEIGHTS_FILE = CHECKPOINT_DIR / "model.pt"
+WEIGHTS_FILE = CHECKPOINT_DIR / "infill_model.pt"
+OPTIMIZER_FILE = CHECKPOINT_DIR / "infill_optimizer.pt"
 
 DEFAULT_CONFIG = dict(
     vocab_size = VOCAB_SIZE,
@@ -208,14 +209,6 @@ class MusicTransformer(nn.Module):
 
         return generated
 
-
-def build_model(cfg: dict | None = None) -> MusicTransformer:
-    cfg = cfg or DEFAULT_CONFIG
-    CHECKPOINT_DIR.mkdir(exist_ok=True)
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(cfg, f, indent=2)
-    return MusicTransformer(cfg)
-
 def append_epoch_to_config(cfg: dict, training_loss, val_loss):
     if cfg is None:
         print("Will not overwrite config with null config")
@@ -239,19 +232,6 @@ def load_model(device: str = "cuda" if __import__("torch").cuda.is_available() e
         state = torch.load(WEIGHTS_FILE, map_location=device, weights_only=False)
         model.load_state_dict(state)
     return model, cfg
-
-
-def model_status() -> str:
-    if not CONFIG_FILE.exists():
-        return "Not built"
-    info = f"Config: {CONFIG_FILE}"
-    if WEIGHTS_FILE.exists():
-        size = WEIGHTS_FILE.stat().st_size // 1024
-        info += f" | Weights: {size} KB"
-    else:
-        info += " | Weights: none (untrained)"
-    return info
-
 
 def expand_embeddings_for_infill(
     model: MusicTransformer,
@@ -368,7 +348,7 @@ def expand_embeddings_for_metadata(
     return model
 
 
-def build_infill_model(cfg: dict | None = None, override_cfg = False):
+def build_model(cfg: dict | None = None, override_cfg = False):
     """Build a model with expanded vocabulary for infill training."""
     from src.tokenizer import VOCAB_SIZE
 

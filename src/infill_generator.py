@@ -17,11 +17,9 @@ from src.tokenizer import (
     tokens_to_score, score_to_tokens_by_measure, score_to_header_tokens,
     BAR, BOS, EOS
 )
-from src.model import load_model, CHECKPOINT_DIR
+from src.model import load_model
 
 OUTPUT_DIR = Path("output")
-INFILL_WEIGHTS_FILE = CHECKPOINT_DIR / "infill_model.pt"
-
 
 def load_partial_xml(xml_path: str) -> tuple:
     """Parse input XML and identify gaps.
@@ -191,15 +189,8 @@ def infill_and_export(
     log(f"Detected {len(gaps)} gap(s): {gaps}")
 
     # Load infill model
-    log(f"Loading infill model from {INFILL_WEIGHTS_FILE}...")
-    if not INFILL_WEIGHTS_FILE.exists():
-        log("[yellow]Infill model not found. Using standard model.[/yellow]")
-        model, _ = load_model(device)
-    else:
-        model, cfg = load_model(device)
-        # Load infill weights
-        state = torch.load(INFILL_WEIGHTS_FILE, map_location=device, weights_only=False)
-        model.load_state_dict(state)
+    log(f"Loading infill model...")
+    model, _ = load_model(device)
 
     log(f"Model loaded ({model.num_params():,} params)")
 
