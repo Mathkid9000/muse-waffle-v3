@@ -356,7 +356,7 @@ def build_model(cfg: dict | None = None, override_cfg = False):
         with open(CONFIG_FILE, "r") as f:
             cfg = json.load(f)
 
-    cfg = (cfg and not override_cfg) or DEFAULT_CONFIG.copy()
+    cfg = DEFAULT_CONFIG.copy() if override_cfg else (cfg or DEFAULT_CONFIG.copy())
     cfg["vocab_size"] = VOCAB_SIZE
 
     CHECKPOINT_DIR.mkdir(exist_ok=True)
