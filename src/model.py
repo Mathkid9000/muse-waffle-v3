@@ -209,6 +209,84 @@ class MusicTransformer(nn.Module):
 
         return generated
 
+    @torch.no_grad()
+    def generate_standard(
+        self,
+        header_tokens: list[int],
+        first_bar_prefix: list[int] | None = None,
+        target_bars: int = 4,
+        max_new: int = 1000,
+        temperature: float = 0.9,
+        top_k: int = 50,
+        device: str = "cuda" if __import__("torch").cuda.is_available() else "cpu",
+    ) -> list[int]:
+        """Generate tokens from scratch using the standard autoregressive format.
+
+        Uses [BOS] + header + first_bar_prefix as the prompt, then samples
+        autoregressively. This is in-distribution for the 50% standard training
+        examples, unlike generate_infill() with empty prefix/suffix which the
+        model has never seen during training.
+
+        Args:
+            header_tokens: Instrument header tokens (INSTR_OFF + idx)
+            first_bar_prefix: Tokens to force after the header, e.g.
+                [BAR, KEY_SIG_token, TIME_SIG_token, TEMPO_token]. Forces the
+                model into a known key/meter/tempo before free sampling begins.
+                Defaults to [BAR] if None.
+            target_bars: Total number of BAR tokens to produce (including any
+                BAR tokens in first_bar_prefix)
+            max_new: Maximum tokens to generate autoregressively
+            temperature: Sampling temperature (0.8–1.0 recommended)
+            top_k: Top-k sampling parameter
+            device: Device to run on
+
+        Returns:
+            Generated measure tokens (without BOS/EOS; prepend header and
+            wrap with BOS/EOS when constructing the full sequence)
+        """
+        from src.tokenizer import BOS, EOS, BAR
+
+        self.eval()
+
+        forced = first_bar_prefix if first_bar_prefix is not None else [BAR]
+        # Count any BAR tokens already committed via first_bar_prefix
+        bar_count = forced.count(BAR)
+
+        prompt = [BOS] + header_tokens + forced
+        idx = torch.tensor([prompt], dtype=torch.long, device=device)
+        max_ctx = self.cfg["max_seq_len"]
+
+        generated: list[int] = []
+
+        for _ in range(max_new):
+            idx_cond = idx[:, -max_ctx:]
+            logits = self(idx_cond)[:, -1, :] / max(temperature, 1e-6)
+
+            if top_k > 0:
+                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits[logits < v[:, [-1]]] = float("-inf")
+
+            if bar_count < target_bars:
+                logits[:, EOS] = float("-inf")
+
+            probs = torch.softmax(logits, dim=-1)
+            next_t = torch.multinomial(probs, 1)
+            next_token = next_t.item()
+
+            if next_token == EOS:
+                break
+
+            if next_token == BAR:
+                bar_count += 1
+                print(f'Written {bar_count} bars of {target_bars}')
+                if bar_count > target_bars:
+                    break
+
+            generated.append(next_token)
+            idx = torch.cat([idx, next_t], dim=1)
+
+        return generated
+
 def append_epoch_to_config(cfg: dict, training_loss, val_loss):
     if cfg is None:
         print("Will not overwrite config with null config")

@@ -25,9 +25,37 @@ from tqdm import tqdm
 from src.tokenizer import (
     score_to_tokens, score_to_tokens_by_measure, score_to_header_tokens,
     text_to_tokens,
-    BOS, EOS, PAD, BAR, FILL_START, FILL_END
+    BOS, EOS, PAD, BAR, FILL_START, FILL_END,
+    NOTE_OFF, KEY_OFF,
 )
 from src.model import MusicTransformer, WEIGHTS_FILE, OPTIMIZER_FILE, CHECKPOINT_DIR
+
+_NOTE_END = NOTE_OFF + 128   # 133 — exclusive upper bound of NOTE token range
+_KEY_END  = KEY_OFF  + 13   # 188 — exclusive upper bound of KEY_SIG token range
+
+
+def _transpose_tokens(tokens: list[int], semitones: int) -> list[int]:
+    """Shift NOTE and KEY_SIG tokens by semitones; all other tokens are unchanged.
+
+    NOTE tokens are clamped to [0, 127] so extreme transpositions stay in range.
+    KEY_SIG tokens are shifted via the circle of fifths (7 semitones = 1 sharp)
+    and wrapped to the representable [-6, +6] sharps range.
+    """
+    if semitones == 0:
+        return tokens
+    result = []
+    for t in tokens:
+        if NOTE_OFF <= t < _NOTE_END:
+            new_pitch = max(0, min(127, t - NOTE_OFF + semitones))
+            result.append(NOTE_OFF + new_pitch)
+        elif KEY_OFF <= t < _KEY_END:
+            old_sharps = (t - KEY_OFF) - 6          # map token index → [-6, 6]
+            new_sharps = ((old_sharps + semitones * 7) + 6) % 12 - 6
+            result.append(KEY_OFF + new_sharps + 6)
+        else:
+            result.append(t)
+    return result
+
 
 def create_fim_example(
     header_tokens: list[int],
@@ -113,15 +141,18 @@ class InfillDataset(Dataset):
         sequences: list[tuple[list[int], dict[int, list[int]]]],
         max_len: int = 512,
         fim_ratio: float = 0.5,
+        transpose_range: int = 6,
     ):
         """
         Args:
             sequences: List of (header_tokens, measure_tokens) tuples
             max_len: Maximum sequence length
             fim_ratio: Proportion of examples that use FIM format
+            transpose_range: Max semitone shift for pitch augmentation (0 to disable)
         """
         self.max_len = max_len
         self.fim_ratio = fim_ratio
+        self.transpose_range = transpose_range
         # Only keep sequences long enough for FIM (prefix + gap + suffix)
         self.sequences = [(h, m) for h, m in sequences if len(m) >= 3]
 
@@ -141,6 +172,10 @@ class InfillDataset(Dataset):
         else:
             seq = create_standard_example(header_tokens, measure_tokens)
             loss_start = 1
+
+        if self.transpose_range:
+            shift = random.randint(-self.transpose_range, self.transpose_range)
+            seq = _transpose_tokens(seq, shift)
 
         if len(seq) > self.max_len + 1:
             seq = seq[:self.max_len + 1]
@@ -226,8 +261,8 @@ def train_infill(
     log(f"Loaded {len(sequences)} scores.")
 
     random.shuffle(sequences)
-    dataset = InfillDataset(sequences, model.cfg["max_seq_len"], fim_ratio)
-    log(f"Dataset: {len(dataset)} examples (max_len={model.cfg['max_seq_len']}, fim_ratio={fim_ratio})")
+    dataset = InfillDataset(sequences, model.cfg["max_seq_len"], fim_ratio, transpose_range=6)
+    log(f"Dataset: {len(dataset)} examples (max_len={model.cfg['max_seq_len']}, fim_ratio={fim_ratio}, transpose_range=6)")
 
     n_val = max(1, int(len(dataset) * VAL_RATIO))
     n_train = len(dataset) - n_val
@@ -236,7 +271,8 @@ def train_infill(
 
     loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, drop_last=False)
     val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False, drop_last=False)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.1)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-5)
     if OPTIMIZER_FILE.exists():
         optimizer.load_state_dict(torch.load(OPTIMIZER_FILE, map_location=device, weights_only=False))
         log("Resumed optimizer state from previous session.")
@@ -314,6 +350,7 @@ def train_infill(
 
         avg_val_loss = val_loss / max(val_batches, 1)
 
+        scheduler.step()
         on_epoch(epoch, avg_loss, avg_val_loss)
 
         # Save checkpoint
