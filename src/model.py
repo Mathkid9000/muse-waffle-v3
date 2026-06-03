@@ -23,6 +23,7 @@ CHECKPOINT_DIR = Path(os.getenv('STORAGE_DIR')) / "checkpoints"
 CONFIG_FILE = CHECKPOINT_DIR / "config.json"
 WEIGHTS_FILE = CHECKPOINT_DIR / "infill_model.pt"
 OPTIMIZER_FILE = CHECKPOINT_DIR / "infill_optimizer.pt"
+VAL_SPLIT_FILE = CHECKPOINT_DIR / "val_paths.json"
 
 DEFAULT_CONFIG = dict(
     vocab_size = VOCAB_SIZE,

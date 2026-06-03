@@ -13,13 +13,14 @@ causal attention.
 """
 
 from __future__ import annotations
+import json
 import random
 from pathlib import Path
 from typing import Callable
 
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader, random_split
+from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 
 from src.tokenizer import (
@@ -28,7 +29,7 @@ from src.tokenizer import (
     BOS, EOS, PAD, BAR, FILL_START, FILL_END,
     NOTE_OFF, KEY_OFF,
 )
-from src.model import MusicTransformer, WEIGHTS_FILE, OPTIMIZER_FILE, CHECKPOINT_DIR
+from src.model import MusicTransformer, WEIGHTS_FILE, OPTIMIZER_FILE, VAL_SPLIT_FILE, CHECKPOINT_DIR
 
 _NOTE_END = NOTE_OFF + 128   # 133 — exclusive upper bound of NOTE token range
 _KEY_END  = KEY_OFF  + 13   # 188 — exclusive upper bound of KEY_SIG token range
@@ -239,6 +240,7 @@ def train_infill(
     on_epoch: Callable[[int, float, float], None],
     stop_flag: list[bool],
     fim_ratio: float = 0.5,
+    resume_optimizer: bool = False
 ):
     """Train model with mixed standard + FIM objectives.
 
@@ -254,31 +256,43 @@ def train_infill(
         stop_flag: Stop flag for interruption
         fim_ratio: Proportion of FIM examples (default 0.5 = 50%)
     """
+    CHECKPOINT_DIR.mkdir(exist_ok=True)
+
+    # Determine train/val path split — preserved across resumes so val files never
+    # leak into training when the notebook cell is re-run.
+    if resume_optimizer and VAL_SPLIT_FILE.exists():
+        saved_val = set(json.loads(VAL_SPLIT_FILE.read_text()))
+        val_paths   = [p for p in data_paths if str(p) in saved_val]
+        train_paths = [p for p in data_paths if str(p) not in saved_val]
+        log(f"Loaded preserved val split: {len(val_paths)} val / {len(train_paths)} train paths.")
+    else:
+        shuffled = list(data_paths)
+        random.shuffle(shuffled)
+        n_val_paths = max(1, int(len(shuffled) * VAL_RATIO))
+        val_paths   = shuffled[-n_val_paths:]
+        train_paths = shuffled[:-n_val_paths]
+        VAL_SPLIT_FILE.write_text(json.dumps([str(p) for p in val_paths]))
+        log(f"Created val split: {len(val_paths)} val / {len(train_paths)} train paths (saved to {VAL_SPLIT_FILE}).")
+
     log("Parsing scores for infill training...")
-    sequences = _load_measure_sequences(data_paths, log)
-    if not sequences:
+    train_sequences = _load_measure_sequences(train_paths, log)
+    val_sequences   = _load_measure_sequences(val_paths, log)
+    if not train_sequences:
         raise RuntimeError("No sequences loaded - run 'Download Dataset' first.")
-    log(f"Loaded {len(sequences)} scores.")
+    log(f"Loaded {len(train_sequences)} train / {len(val_sequences)} val scores.")
 
-    random.shuffle(sequences)
-    dataset = InfillDataset(sequences, model.cfg["max_seq_len"], fim_ratio, transpose_range=6)
-    log(f"Dataset: {len(dataset)} examples (max_len={model.cfg['max_seq_len']}, fim_ratio={fim_ratio}, transpose_range=6)")
-
-    n_val = max(1, int(len(dataset) * VAL_RATIO))
-    n_train = len(dataset) - n_val
-    train_set, val_set = random_split(dataset, [n_train, n_val])
-    log(f"Split: {n_train} train / {n_val} val examples.")
+    train_set = InfillDataset(train_sequences, model.cfg["max_seq_len"], fim_ratio, transpose_range=6)
+    val_set   = InfillDataset(val_sequences,   model.cfg["max_seq_len"], fim_ratio, transpose_range=6)
+    log(f"Dataset: {len(train_set)} train / {len(val_set)} val examples (max_len={model.cfg['max_seq_len']}, fim_ratio={fim_ratio}, transpose_range=6)")
 
     loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, drop_last=False)
     val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False, drop_last=False)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.1)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-5)
-    if OPTIMIZER_FILE.exists():
+    if OPTIMIZER_FILE.exists() and resume_optimizer:
         optimizer.load_state_dict(torch.load(OPTIMIZER_FILE, map_location=device, weights_only=False))
         log("Resumed optimizer state from previous session.")
     model.to(device)
-
-    CHECKPOINT_DIR.mkdir(exist_ok=True)
 
     for epoch in range(1, epochs + 1):
         if stop_flag[0]:
