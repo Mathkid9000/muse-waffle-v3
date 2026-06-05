@@ -20,10 +20,24 @@ from src.tokenizer import VOCAB_SIZE
 
 load_dotenv('env.env')
 CHECKPOINT_DIR = Path(os.getenv('STORAGE_DIR')) / "checkpoints"
-CONFIG_FILE = CHECKPOINT_DIR / "config.json"
-WEIGHTS_FILE = CHECKPOINT_DIR / "infill_model.pt"
-OPTIMIZER_FILE = CHECKPOINT_DIR / "infill_optimizer.pt"
-VAL_SPLIT_FILE = CHECKPOINT_DIR / "val_paths.json"
+
+
+def model_paths(name: str) -> dict[str, Path]:
+    model_dir = CHECKPOINT_DIR / name
+    return {
+        "dir":       model_dir,
+        "config":    model_dir / "config.json",
+        "weights":   model_dir / "model.pt",
+        "optimizer": model_dir / "optimizer.pt",
+        "val_split": model_dir / "val_paths.json",
+    }
+
+
+# Legacy aliases — app.py still imports these directly
+CONFIG_FILE    = model_paths("infill")["config"]
+WEIGHTS_FILE   = model_paths("infill")["weights"]
+OPTIMIZER_FILE = model_paths("infill")["optimizer"]
+VAL_SPLIT_FILE = model_paths("infill")["val_split"]
 
 DEFAULT_CONFIG = dict(
     vocab_size = VOCAB_SIZE,
@@ -288,27 +302,41 @@ class MusicTransformer(nn.Module):
 
         return generated
 
-def append_epoch_to_config(cfg: dict, training_loss, val_loss):
+def append_epoch_to_config(name: str, cfg: dict, training_loss, val_loss):
     if cfg is None:
         print("Will not overwrite config with null config")
         return
-    
+
     if 'epoches' not in cfg:
         cfg['epoches'] = [(training_loss, val_loss)]
-    else: 
+    else:
         cfg['epoches'].append((training_loss, val_loss))
-    
-    with open(CONFIG_FILE, "w") as f:
+
+    with open(model_paths(name)["config"], "w") as f:
         json.dump(cfg, f, indent=2)
 
-def load_model(device: str = "cuda" if __import__("torch").cuda.is_available() else "cpu") -> tuple[MusicTransformer, dict]:
-    if not CONFIG_FILE.exists():
-        raise FileNotFoundError("No model config found. Run 'Build Model' first.")
-    with open(CONFIG_FILE) as f:
+def load_model(
+    name: str,
+    device: str = "cuda" if torch.cuda.is_available() else "cpu",
+) -> tuple[MusicTransformer, dict]:
+    paths = model_paths(name)
+    config_path = paths["config"]
+    if not config_path.exists() and name == "infill":
+        legacy = CHECKPOINT_DIR / "config.json"
+        if legacy.exists():
+            config_path = legacy
+    if not config_path.exists():
+        raise FileNotFoundError(f"No config for model '{name}'. Run 'Build Model' first.")
+    with open(config_path) as f:
         cfg = json.load(f)
     model = MusicTransformer(cfg).to(device)
-    if WEIGHTS_FILE.exists():
-        state = torch.load(WEIGHTS_FILE, map_location=device, weights_only=False)
+    weights = paths["weights"]
+    if not weights.exists() and name == "infill":
+        legacy_w = CHECKPOINT_DIR / "infill_model.pt"
+        if legacy_w.exists():
+            weights = legacy_w
+    if weights.exists():
+        state = torch.load(weights, map_location=device, weights_only=False)
         model.load_state_dict(state)
     return model, cfg
 
@@ -427,19 +455,20 @@ def expand_embeddings_for_metadata(
     return model
 
 
-def build_model(cfg: dict | None = None, override_cfg = False):
-    """Build a model with expanded vocabulary for infill training."""
+def build_model(name: str, cfg: dict | None = None, override_cfg=False):
+    """Build a model with expanded vocabulary."""
     from src.tokenizer import VOCAB_SIZE
 
-    if not cfg:
-        with open(CONFIG_FILE, "r") as f:
+    paths = model_paths(name)
+    if not cfg and paths["config"].exists():
+        with open(paths["config"], "r") as f:
             cfg = json.load(f)
 
     cfg = DEFAULT_CONFIG.copy() if override_cfg else (cfg or DEFAULT_CONFIG.copy())
     cfg["vocab_size"] = VOCAB_SIZE
 
-    CHECKPOINT_DIR.mkdir(exist_ok=True)
-    with open(CONFIG_FILE, "w") as f:
+    paths["dir"].mkdir(parents=True, exist_ok=True)
+    with open(paths["config"], "w") as f:
         json.dump(cfg, f, indent=2)
 
     return MusicTransformer(cfg), cfg

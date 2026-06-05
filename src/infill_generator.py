@@ -190,7 +190,7 @@ def infill_and_export(
 
     # Load infill model
     log(f"Loading infill model...")
-    model, _ = load_model(device)
+    model, _ = load_model("infill", device)
 
     log(f"Model loaded ({model.num_params():,} params)")
 
