@@ -71,6 +71,7 @@ def create_fim_example(
 
 
 def train_infill(
+    name: str,
     model: MusicTransformer,
     data_paths: list[str],
     epochs: int,
@@ -99,7 +100,7 @@ def train_infill(
         resume_optimizer: Resume optimizer state and val split from last run
     """
     _train_loop(
-        "infill", model, data_paths, epochs, batch_size, lr, device,
+        name, model, data_paths, epochs, batch_size, lr, device,
         log, on_epoch, stop_flag,
         fim_ratio=fim_ratio,
         fim_example_fn=create_fim_example,

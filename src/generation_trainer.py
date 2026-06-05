@@ -14,6 +14,7 @@ from src.trainer import _train_loop
 
 
 def train_generation(
+    name: str,
     model: MusicTransformer,
     data_paths: list[str],
     epochs: int,
@@ -40,7 +41,7 @@ def train_generation(
         resume_optimizer: Resume optimizer state and val split from last run
     """
     _train_loop(
-        "generation", model, data_paths, epochs, batch_size, lr, device,
+        name, model, data_paths, epochs, batch_size, lr, device,
         log, on_epoch, stop_flag,
         fim_ratio=0.0,
         fim_example_fn=None,
