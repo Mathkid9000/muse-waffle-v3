@@ -1,0 +1,66 @@
+.outer {
+  height: 100%;
+  overflow: auto;
+  background: #2d2d2d;
+  cursor: crosshair;
+  user-select: none;
+}
+
+.pages {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 20px;
+  gap: 20px;
+}
+
+.page {
+  background: #fff;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6);
+  border-radius: 1px;
+  flex-shrink: 0;
+}
+
+.page svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+/* Empty state: show a blank paper rectangle on the dark canvas */
+.emptyState {
+  display: flex;
+  justify-content: center;
+  padding: 40px 20px;
+  min-height: 100%;
+  box-sizing: border-box;
+}
+
+.paper {
+  background: #fff;
+  width: 595px;
+  min-height: 842px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6);
+  border-radius: 1px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.paperHint {
+  color: #bbb;
+  font-size: 14px;
+  text-align: center;
+  padding: 0 32px;
+  line-height: 1.6;
+}
+
+.loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: #aaa;
+  font-size: 14px;
+}

@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 sys.path.insert(0, os.path.dirname(__file__))
 
 import music21 as m21
-from src.tokenizer import (
+from ml.tokenizer import (
     score_to_tokens, tokens_to_score,
     PAD, BOS, EOS, BAR, TIE, GRACE, NOTE_OFF, DUR_OFF, REST_OFF,
     KEY_OFF, TIME_OFF, TEXT_OFF, PART_OFF, STEP_OFF, MAX_STEP, MAX_PARTS,
@@ -19,7 +19,7 @@ from src.tokenizer import (
     VOCAB_SIZE, DURATIONS, STEP_SIZE,
 )
 from pathlib import Path
-from src.dataset import load_cached_paths
+from ml.dataset import load_cached_paths
 
 load_dotenv('env.env')
 STORAGE_DIR = Path(os.environ.get('STORAGE_DIR'))
@@ -115,7 +115,7 @@ print("\n" + "="*70)
 print("FIM ROUND-TRIP TEST  (using InfillDataset -- exactly what the model sees)")
 print("="*70)
 
-from src.infill_trainer import InfillDataset, _load_measure_sequences, create_fim_example
+from ml.infill_trainer import InfillDataset, _load_measure_sequences, create_fim_example
 
 def fim_roundtrip_test(seed: int | None = None):
     """Use InfillDataset to produce the exact FIM token sequence the transformer

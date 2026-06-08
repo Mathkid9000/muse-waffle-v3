@@ -2,3 +2,5 @@ output/
 storage
 env.env
 todo.txt
+.claude
+*__pycache__
