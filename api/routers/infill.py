@@ -12,17 +12,21 @@ logger = logging.getLogger(__name__)
 
 
 def _mark_measures_empty(score, start: int, end: int) -> None:
-    """Replace all content in [start, end] with a single hidden rest in each part."""
+    """Replace note content in [start, end] with a hidden rest; preserve time/key/tempo."""
     import music21 as m21
 
+    _structural = (m21.key.KeySignature, m21.meter.TimeSignature, m21.tempo.MetronomeMark)
     for part in score.parts:
         for measure in part.getElementsByClass(m21.stream.Measure):
             m_num = measure.number if measure.number is not None else 0
             if start <= m_num <= end:
+                keep = [el for el in measure if isinstance(el, _structural)]
                 measure.elements = []
                 rest = m21.note.Rest(quarterLength=4)
                 rest.style.hideObjectOnPrint = True
                 measure.insert(0, rest)
+                for el in keep:
+                    measure.insert(el.offset, el)
 
 
 def _run_infill(body: InfillRequest) -> str:

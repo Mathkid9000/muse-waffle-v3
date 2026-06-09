@@ -9,7 +9,7 @@ class InfillRequest(BaseModel):
     end_measure: int = Field(..., ge=1, description="Last measure of the gap (inclusive)")
     temperature: float = Field(0.9, ge=0.1, le=2.0)
     top_k: int = Field(50, ge=1, le=200)
-    model_name: str = Field("D512-H8-L8", description="Infill model checkpoint name")
+    model_name: str = Field("INFILL-D1024-H8-L8", description="Infill model checkpoint name")
     device: str = Field("cpu", description="Inference device: cpu or cuda")
 
 

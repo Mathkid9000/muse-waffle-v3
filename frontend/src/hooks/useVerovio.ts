@@ -53,7 +53,7 @@ export function useVerovio() {
     })
   }, [])
 
-  function renderXml(xml: string, pageWidth: number, scale: number): string[] {
+  function renderXml(data: string, pageWidth: number, scale: number): string[] {
     const tk = tkRef.current
     if (!tk) return []
 
@@ -67,7 +67,12 @@ export function useVerovio() {
       spacingLinear: 0.2,
     })
 
-    if (!tk.loadData(xml)) return []
+    // MXL files are stored with a prefix so we know to use the ZIP loader
+    const loaded = data.startsWith('__MXL__')
+      ? tk.loadZipDataBase64(data.slice(7))
+      : tk.loadData(data)
+
+    if (!loaded) return []
 
     const pageCount = tk.getPageCount()
     return Array.from({ length: pageCount }, (_, i) => tk.renderToSVG(i + 1))

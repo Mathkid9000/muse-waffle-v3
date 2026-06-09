@@ -3,6 +3,10 @@ import { useVerovio } from '../../hooks/useVerovio'
 import { useStore } from '../../store'
 import styles from './ScoreViewer.module.css'
 
+// Matches Verovio measure elements by class (standard) or by the "m-" ID prefix (fallback).
+// querySelectorAll deduplicates, so elements matching both selectors appear exactly once.
+const MEASURE_SEL = 'g.measure'
+
 export default function ScoreViewer() {
   const { ready, renderXml } = useVerovio()
   const currentXml = useStore((s) => s.currentXml)
@@ -18,35 +22,25 @@ export default function ScoreViewer() {
   const zoomRef = useRef(zoom)
   zoomRef.current = zoom
 
-  // Re-render Verovio only when XML changes; zoom is handled purely via CSS
   useEffect(() => {
-    if (!ready || !currentXml) {
-      setPages([])
-      return
-    }
+    if (!ready || !currentXml) { setPages([]); return }
     const w = outerRef.current?.clientWidth ?? 1000
     setPages(renderXml(currentXml, w * 2.5, 40))
   }, [ready, currentXml])
 
-  // Stamp sequential data-measure attributes by querying the live DOM.
-  // This is more reliable than regex on the SVG string.
-  useEffect(() => {
-    const inner = innerRef.current
-    if (!inner) return
-    inner.querySelectorAll<Element>('g.measure').forEach((g, i) =>
-      g.setAttribute('data-measure', String(i + 1))
-    )
-  }, [pages])
-
-  // Inject/refresh selection highlight rects after measure attributes are set
+  // Inject selection highlight rects directly into the SVG DOM.
+  // No data-measure stamp needed: we query measures by selector at runtime.
   useEffect(() => {
     const inner = innerRef.current
     if (!inner) return
     inner.querySelectorAll('.mw-sel').forEach((el) => el.remove())
     if (!selection) return
+
+    const measures = inner.querySelectorAll<SVGGraphicsElement>(MEASURE_SEL)
     const ns = 'http://www.w3.org/2000/svg'
+
     for (let m = selection.start; m <= selection.end; m++) {
-      const g = inner.querySelector(`[data-measure="${m}"]`) as SVGGraphicsElement | null
+      const g = measures[m - 1]
       if (!g) continue
       try {
         const bb = g.getBBox()
@@ -65,17 +59,63 @@ export default function ScoreViewer() {
     }
   }, [selection, pages])
 
-  function measureAt(target: EventTarget | null): number | null {
+  // Returns the 1-based measure index for a mouse event.
+  // 1. Tries closest() — works when the click lands on a note/rest/barline child.
+  // 2. Falls back to geometric hit-test — works when clicking empty staff space.
+  function measureAt(e: React.MouseEvent): number | null {
+    const target = e.target
     if (!(target instanceof Element)) return null
-    const g = target.closest('[data-measure]')
-    if (!g) return null
-    const n = parseInt(g.getAttribute('data-measure') ?? '', 10)
-    return isNaN(n) ? null : n
+    const inner = innerRef.current
+    if (!inner) return null
+
+    const allMeasures = inner.querySelectorAll<SVGGraphicsElement>(MEASURE_SEL)
+    if (allMeasures.length === 0) return null
+
+    // Fast path: clicked element is inside a measure group
+    const direct = target.closest<Element>(MEASURE_SEL)
+    if (direct) {
+      const idx = Array.from(allMeasures).indexOf(direct as SVGGraphicsElement)
+      return idx >= 0 ? idx + 1 : null
+    }
+
+    // Geometric fallback: map pointer into SVG coordinates and test bounding boxes.
+    // getScreenCTM() is unreliable when CSS zoom is applied; instead derive the transform
+    // from getBoundingClientRect() (zoom-aware) and the SVG viewBox.
+    let svg = target.closest('svg') as SVGSVGElement | null
+    if (!svg && target instanceof SVGSVGElement) svg = target
+    if (!svg) return null
+
+
+    const svgRect = svg.getBoundingClientRect()
+    const vb = (svg.querySelector(".definition-scale") as SVGSVGElement).viewBox.baseVal
+    console.log('FALLBACK', svg, svgRect, vb);
+    if (!vb || svgRect.width === 0 || svgRect.height === 0) return null
+
+    const scaleX = vb.width / svgRect.width
+    const scaleY = vb.height / svgRect.height
+    const x = (e.clientX - svgRect.left) * scaleX + vb.x
+    const y = (e.clientY - svgRect.top) * scaleY + vb.y
+    console.log(x, y)
+
+    for (let i = 0; i < allMeasures.length; i++) {
+      if (!svg.contains(allMeasures[i])) continue
+      try {
+        const bb = allMeasures[i].getBBox()
+        if (x >= bb.x && x <= bb.x + bb.width && y >= bb.y && y <= bb.y + bb.height) {
+          return i + 1
+        }
+      } catch { }
+    }
+
+    return null
   }
 
   function onMouseDown(e: React.MouseEvent) {
-    const m = measureAt(e.target)
-    if (m === null) return
+    const m = measureAt(e)
+    if (m === null) {
+      setSelection(null)
+      return
+    }
     e.preventDefault()
     dragStartRef.current = m
     setSelection({ start: m, end: m })
@@ -83,7 +123,7 @@ export default function ScoreViewer() {
 
   function onMouseMove(e: React.MouseEvent) {
     if (dragStartRef.current === null || !(e.buttons & 1)) return
-    const m = measureAt(e.target)
+    const m = measureAt(e)
     if (m === null) return
     setSelection({
       start: Math.min(dragStartRef.current, m),
@@ -108,8 +148,6 @@ export default function ScoreViewer() {
     const newZoom = Math.max(25, Math.min(300, prevZoom + delta))
     if (newZoom === prevZoom) return
 
-    // Keep the content point under the cursor stationary after zoom.
-    // scrollTop is in "zoomed layout pixels"; dividing by zoom gives natural coords.
     const newScrollTop = (outer.scrollTop + cy) * (newZoom / prevZoom) - cy
     setZoom(newZoom)
     requestAnimationFrame(() => {

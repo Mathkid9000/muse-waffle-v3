@@ -134,10 +134,15 @@ def merge_fill_into_score(
             for measure in part.getElementsByClass(m21.stream.Measure):
                 m_num = measure.number if measure.number is not None else 0
                 if m_num == target_m_num:
-                    # Clear existing content and copy from generated
+                    # Preserve structural metadata from the original measure
+                    _structural = (m21.key.KeySignature, m21.meter.TimeSignature,
+                                   m21.tempo.MetronomeMark)
+                    keep = [el for el in measure if isinstance(el, _structural)]
                     measure.elements = []
+                    for el in keep:
+                        measure.insert(el.offset, el)
 
-                    # Copy all elements from generated measure
+                    # Copy notes/rests/voices from generated measure
                     for el in gen_measure:
                         if isinstance(el, (m21.note.Note, m21.note.Rest, m21.chord.Chord)):
                             if color is not None: el.style.color = color
@@ -229,6 +234,13 @@ def infill_and_export(
 
     midi_path = str(OUTPUT_DIR / f"{base_name}.mid")
     xml_out_path = str(OUTPUT_DIR / f"{base_name}.xml")
+
+    try:
+        for part in score.parts:
+            part.makeBeams(inPlace=True)
+    except Exception as e:
+        print(f'SOMETHING WENT WRONG 2 {e}')
+        pass
 
     score.write("midi", fp=midi_path)
     log(f"Saved MIDI -> {midi_path}")

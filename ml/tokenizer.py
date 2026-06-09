@@ -553,6 +553,21 @@ def tokens_to_score(tokens: list[int]):
         part.append(m21.stream.Measure())
         score.append(part)
 
+    # makeBeams needs at least one time signature per part; insert a default 4/4 if none decoded.
+    for part in score.parts:
+        measures = list(part.getElementsByClass(m21.stream.Measure))
+        if measures and not any(
+            list(m.getElementsByClass(m21.meter.TimeSignature)) for m in measures
+        ):
+            measures[0].insert(0, m21.meter.TimeSignature('4/4'))
+
+    try:
+        for part in score.parts:
+            part.makeBeams(inPlace=True)
+    except Exception as e:
+        print(f"SOMETHING WENT WRONG {e}")
+        pass
+
     return score
 
 

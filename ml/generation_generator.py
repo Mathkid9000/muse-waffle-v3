@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable
 
-from ml.tokenizer import tokens_to_score, BOS, EOS
+from ml.tokenizer import tokens_to_score, BOS, EOS, BAR
 from ml.model import load_model
 
 OUTPUT_DIR = Path("output")
@@ -41,9 +41,11 @@ def generate_and_export(
     model, _ = load_model(model_name, device)
     log(f"Model loaded ({model.num_params():,} params)")
 
+    forced = first_bar_prefix if first_bar_prefix is not None else [BAR]
+
     generated = model.generate_standard(
         header_tokens=header_tokens,
-        first_bar_prefix=first_bar_prefix,
+        first_bar_prefix=forced,
         target_bars=target_bars,
         max_new=max_new,
         temperature=temperature,
@@ -51,7 +53,7 @@ def generate_and_export(
         device=device,
     )
 
-    full_tokens = [BOS] + header_tokens + generated + [EOS]
+    full_tokens = [BOS] + header_tokens + forced + generated + [EOS]
     score = tokens_to_score(full_tokens)
 
     OUTPUT_DIR.mkdir(exist_ok=True)

@@ -14,11 +14,24 @@ export default function Toolbar() {
     const file = e.target.files?.[0]
     if (!file) return
     const reader = new FileReader()
-    reader.onload = (ev) => {
-      if (typeof ev.target?.result === 'string') setXml(ev.target.result)
+    if (file.name.toLowerCase().endsWith('.mxl')) {
+      // MXL is a ZIP archive — read as binary and pass base64 to Verovio's ZIP loader
+      reader.onload = (ev) => {
+        const buf = ev.target?.result as ArrayBuffer
+        const bytes = new Uint8Array(buf)
+        let binary = ''
+        for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i])
+        setXml('__MXL__' + btoa(binary))
+      }
+      reader.onerror = () => setError('Failed to read file.')
+      reader.readAsArrayBuffer(file)
+    } else {
+      reader.onload = (ev) => {
+        if (typeof ev.target?.result === 'string') setXml(ev.target.result)
+      }
+      reader.onerror = () => setError('Failed to read file.')
+      reader.readAsText(file)
     }
-    reader.onerror = () => setError('Failed to read file.')
-    reader.readAsText(file)
     e.target.value = ''
   }
 
