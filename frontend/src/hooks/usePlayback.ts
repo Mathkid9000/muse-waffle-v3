@@ -28,6 +28,7 @@ export function usePlayback() {
   }
 
   async function play(fromMeasure = 1) {
+    console.log("PLAYING FROM", fromMeasure);
     const { Tone, Midi } = await libs()
     cleanup(Tone)
     await Tone.start()
