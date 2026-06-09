@@ -29,5 +29,15 @@ class GenerateRequest(BaseModel):
     device: str = Field("cpu", description="Inference device: cpu or cuda")
 
 
+class AppendRequest(BaseModel):
+    xml: str = Field(..., description="Existing MusicXML content to append to")
+    num_bars: int = Field(4, ge=1, le=32)
+    max_new: int = Field(1024, ge=100, le=4096)
+    temperature: float = Field(0.9, ge=0.1, le=2.0)
+    top_k: int = Field(50, ge=1, le=200)
+    model_name: str = Field("GEN-D1024-H8-L8", description="Generation model checkpoint name")
+    device: str = Field("cpu", description="Inference device: cpu or cuda")
+
+
 class XmlResponse(BaseModel):
     xml: str = Field(..., description="Generated MusicXML content")

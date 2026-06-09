@@ -19,7 +19,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from api.routers import infill, generate
+from api.routers import infill, generate, append
 
 app = FastAPI(title="Muse Waffle API", version="1.0.0")
 
@@ -32,6 +32,7 @@ app.add_middleware(
 
 app.include_router(infill.router, prefix="/api")
 app.include_router(generate.router, prefix="/api")
+app.include_router(append.router, prefix="/api")
 
 # Serve the built React frontend in production (frontend/dist)
 _dist = PROJECT_ROOT / "frontend" / "dist"

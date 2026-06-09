@@ -23,6 +23,16 @@ export interface GenerateRequest {
   device?: string
 }
 
+export interface AppendRequest {
+  xml: string
+  num_bars: number
+  max_new?: number
+  temperature?: number
+  top_k?: number
+  model_name?: string
+  device?: string
+}
+
 async function post<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method: 'POST',
@@ -41,4 +51,6 @@ export const api = {
     post<{ xml: string }>('/infill', req),
   generate: (req: GenerateRequest) =>
     post<{ xml: string }>('/generate', req),
+  append: (req: AppendRequest) =>
+    post<{ xml: string }>('/append', req),
 }

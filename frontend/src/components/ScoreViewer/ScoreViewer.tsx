@@ -2,6 +2,7 @@ import { useEffect, useState, useRef } from 'react'
 import { useVerovio } from '../../hooks/useVerovio'
 import { useStore } from '../../store'
 import styles from './ScoreViewer.module.css'
+import AppendBar from './AppendBar'
 
 // Matches Verovio measure elements by class (standard) or by the "m-" ID prefix (fallback).
 // querySelectorAll deduplicates, so elements matching both selectors appear exactly once.
@@ -181,6 +182,7 @@ export default function ScoreViewer() {
           {pages.map((svg, i) => (
             <div key={i} className={styles.page} dangerouslySetInnerHTML={{ __html: svg }} />
           ))}
+          <AppendBar />
         </div>
       )}
     </div>
