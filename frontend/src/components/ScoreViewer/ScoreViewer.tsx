@@ -89,14 +89,12 @@ export default function ScoreViewer() {
 
     const svgRect = svg.getBoundingClientRect()
     const vb = (svg.querySelector(".definition-scale") as SVGSVGElement).viewBox.baseVal
-    console.log('FALLBACK', svg, svgRect, vb);
     if (!vb || svgRect.width === 0 || svgRect.height === 0) return null
 
     const scaleX = vb.width / svgRect.width
     const scaleY = vb.height / svgRect.height
     const x = (e.clientX - svgRect.left) * scaleX + vb.x
     const y = (e.clientY - svgRect.top) * scaleY + vb.y
-    console.log(x, y)
 
     for (let i = 0; i < allMeasures.length; i++) {
       if (!svg.contains(allMeasures[i])) continue

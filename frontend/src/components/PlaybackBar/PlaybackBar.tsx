@@ -6,7 +6,7 @@ import styles from './PlaybackBar.module.css'
 export default function PlaybackBar() {
   const currentXml = useStore((s) => s.currentXml)
   const selection = useStore((s) => s.selection)
-  const { playing, play, stop } = usePlayback()
+  const { playing, loading, play, stop, volume, setVolume } = usePlayback()
   const [fromMeasure, setFromMeasure] = useState(1)
 
   // Sync fromMeasure with score selection when it changes
@@ -22,6 +22,7 @@ export default function PlaybackBar() {
       <button
         className={playing ? styles.stopBtn : styles.playBtn}
         onClick={() => (playing ? stop() : play(fromMeasure))}
+        disabled={loading}
         title={playing ? 'Stop' : 'Play'}
       >
         {playing ? '■' : '▶'}
@@ -37,6 +38,19 @@ export default function PlaybackBar() {
           className={styles.input}
         />
       </label>
+      <label className={styles.label}>
+        Vol
+        <input
+          type="range"
+          min="0"
+          max="1"
+          step="0.01"
+          value={volume}
+          onChange={(e) => setVolume(+e.target.value)}
+          className={styles.volumeSlider}
+        />
+      </label>
+      {loading && <span className={styles.loading}>Loading…</span>}
       {playing && <span className={styles.playing}>Playing…</span>}
     </div>
   )
