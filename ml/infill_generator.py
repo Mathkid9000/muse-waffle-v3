@@ -134,13 +134,11 @@ def merge_fill_into_score(
             for measure in part.getElementsByClass(m21.stream.Measure):
                 m_num = measure.number if measure.number is not None else 0
                 if m_num == target_m_num:
-                    # Preserve structural metadata from the original measure
-                    _structural = (m21.key.KeySignature, m21.meter.TimeSignature,
-                                   m21.tempo.MetronomeMark)
-                    keep = [el for el in measure if isinstance(el, _structural)]
-                    measure.elements = []
-                    for el in keep:
-                        measure.insert(el.offset, el)
+                    # Remove only musical content; structural elements (clef, key/time sig,
+                    # tempo) stay in place so they are never accidentally deleted.
+                    _musical = (m21.note.Note, m21.note.Rest, m21.chord.Chord, m21.stream.Voice)
+                    for el in [e for e in measure if isinstance(e, _musical)]:
+                        measure.remove(el)
 
                     # Copy notes/rests/voices from generated measure
                     for el in gen_measure:
@@ -155,6 +153,21 @@ def merge_fill_into_score(
                                 new_voice.insert(voice_el.offset, voice_el)
                             measure.insert(0, new_voice)
                     break
+
+    # Do beam and accidental correction
+    for part in score.parts:
+        measures = list(part.getElementsByClass(m21.stream.Measure))
+        if measures and not any(
+            list(m.getElementsByClass(m21.meter.TimeSignature)) for m in measures
+        ):
+            measures[0].insert(0, m21.meter.TimeSignature('4/4'))
+    try:
+        for part in score.parts:
+            part.makeBeams(inPlace=True)
+            part.makeAccidentals(inPlace=True)
+    except Exception as e:
+        print(f"makeBeams error: {e}")
+
 
 
 def infill_and_export(
@@ -237,6 +250,7 @@ def infill_and_export(
 
     try:
         for part in score.parts:
+            part.makeAccidentals(inPlace=True)
             part.makeBeams(inPlace=True)
     except Exception as e:
         print(f'SOMETHING WENT WRONG 2 {e}')

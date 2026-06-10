@@ -386,6 +386,7 @@ def tokens_to_score(tokens: list[int]):
     cur_measure   = 0
     cur_offset    = 0.0
     next_is_grace = False
+    part_instrs: list[int] = []   # INSTR index per part, in order
 
     # Accumulate global symbols per measure for score reconstruction
     measure_key_sigs: dict[int, int] = {}    # measure -> sharps value
@@ -400,8 +401,9 @@ def tokens_to_score(tokens: list[int]):
             i += 1
             continue
 
-        # Instrument header tokens - skip (used during training, not needed for playback)
+        # Instrument header tokens — collect so we can assign clefs later
         if INSTR_OFF <= t < INSTR_OFF + N_INSTR:
+            part_instrs.append(t - INSTR_OFF)
             i += 1
             continue
 
@@ -553,6 +555,24 @@ def tokens_to_score(tokens: list[int]):
         part.append(m21.stream.Measure())
         score.append(part)
 
+    # Assign clefs to the first measure of each part based on INSTR token.
+    # Without an explicit clef Verovio defaults to treble, which mis-positions the
+    # key signature symbols for low-register instruments.
+    _BASS_CLEF_INSTRS  = {9, 10, 15, 19, 20, 28, 29}  # cello/double_bass/bassoon/trombone/tuba/voice_bass/baritone
+    _TENOR_CLEF_INSTRS = {27}                           # voice_tenor
+    for pi, part in enumerate(score.parts):
+        measures = list(part.getElementsByClass(m21.stream.Measure))
+        if not measures:
+            continue
+        instr_idx = part_instrs[pi] if pi < len(part_instrs) else 0
+        if instr_idx in _BASS_CLEF_INSTRS:
+            clef_obj = m21.clef.BassClef()
+        elif instr_idx in _TENOR_CLEF_INSTRS:
+            clef_obj = m21.clef.TenorClef()
+        else:
+            clef_obj = m21.clef.TrebleClef()
+        measures[0].insert(0, clef_obj)
+
     # makeBeams needs at least one time signature per part; insert a default 4/4 if none decoded.
     for part in score.parts:
         measures = list(part.getElementsByClass(m21.stream.Measure))
@@ -564,9 +584,9 @@ def tokens_to_score(tokens: list[int]):
     try:
         for part in score.parts:
             part.makeBeams(inPlace=True)
+            part.makeAccidentals(inPlace=True)
     except Exception as e:
-        print(f"SOMETHING WENT WRONG {e}")
-        pass
+        print(f"makeBeams error: {e}")
 
     return score
 

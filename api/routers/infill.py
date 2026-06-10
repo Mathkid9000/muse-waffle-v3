@@ -15,7 +15,7 @@ def _mark_measures_empty(score, start: int, end: int) -> None:
     """Replace note content in [start, end] with a hidden rest; preserve time/key/tempo."""
     import music21 as m21
 
-    _structural = (m21.key.KeySignature, m21.meter.TimeSignature, m21.tempo.MetronomeMark)
+    _structural = (m21.key.KeySignature, m21.meter.TimeSignature, m21.tempo.MetronomeMark, m21.clef.Clef)
     for part in score.parts:
         for measure in part.getElementsByClass(m21.stream.Measure):
             m_num = measure.number if measure.number is not None else 0
