@@ -1,10 +1,42 @@
 """Pydantic request/response schemas for the Muse Waffle API."""
 
-from pydantic import BaseModel, Field
+import base64
+import io
+import xml.etree.ElementTree as _ET
+import zipfile
+
+from pydantic import BaseModel, Field, field_validator
+
+
+def _decode_xml(v: str) -> str:
+    """Accept raw MusicXML or the frontend's __MXL__<base64> ZIP format."""
+    if not v.startswith("__MXL__"):
+        return v
+    data = base64.b64decode(v[7:])
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        # Prefer the rootfile declared in META-INF/container.xml
+        if "META-INF/container.xml" in zf.namelist():
+            container = _ET.fromstring(zf.read("META-INF/container.xml"))
+            ns = {"c": "urn:oasis:names:tc:opendocument:xmlns:container"}
+            rootfile = container.find(".//c:rootfile", ns)
+            if rootfile is not None:
+                path = rootfile.get("full-path", "")
+                if path and path in zf.namelist():
+                    return zf.read(path).decode("utf-8")
+        # Fallback: first .xml entry that isn't in META-INF
+        for name in zf.namelist():
+            if name.endswith(".xml") and not name.startswith("META-INF"):
+                return zf.read(name).decode("utf-8")
+    raise ValueError("Could not find MusicXML content in MXL archive")
 
 
 class InfillRequest(BaseModel):
     xml: str = Field(..., description="MusicXML content as a string")
+
+    @field_validator("xml", mode="before")
+    @classmethod
+    def resolve_xml(cls, v: str) -> str:
+        return _decode_xml(v)
     start_measure: int = Field(..., ge=1, description="First measure of the gap (inclusive)")
     end_measure: int = Field(..., ge=1, description="Last measure of the gap (inclusive)")
     temperature: float = Field(0.9, ge=0.1, le=2.0)
@@ -31,6 +63,11 @@ class GenerateRequest(BaseModel):
 
 class AppendRequest(BaseModel):
     xml: str = Field(..., description="Existing MusicXML content to append to")
+
+    @field_validator("xml", mode="before")
+    @classmethod
+    def resolve_xml(cls, v: str) -> str:
+        return _decode_xml(v)
     num_bars: int = Field(4, ge=1, le=32)
     max_new: int = Field(1024, ge=100, le=4096)
     temperature: float = Field(0.9, ge=0.1, le=2.0)
