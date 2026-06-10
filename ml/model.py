@@ -327,7 +327,7 @@ class MusicTransformer(nn.Module):
 
         generated: list[int] = []
 
-        for _ in range(max_new):
+        for i in range(max_new):
             idx_cond = idx[:, -max_ctx:]
             logits = self(idx_cond)[:, -1, :] / max(temperature, 1e-6)
 
@@ -353,8 +353,7 @@ class MusicTransformer(nn.Module):
             generated.append(next_token)
             idx = torch.cat([idx, next_t], dim=1)
 
-            # Yield snapshot after each completed measure (BAR token now included)
-            if next_token == BAR:
+            if i % 2 == 0:
                 yield list(generated)
 
         yield list(generated)
@@ -384,7 +383,7 @@ class MusicTransformer(nn.Module):
         generated: list[int] = []
         bar_count = 0
 
-        for _ in range(max_new):
+        for i in range(max_new):
             idx_cond = idx[:, -max_ctx:]
             logits = self(idx_cond)[:, -1, :] / max(temperature, 1e-6)
 
@@ -411,7 +410,7 @@ class MusicTransformer(nn.Module):
             idx = torch.cat([idx, next_t], dim=1)
 
             # Yield snapshot after each completed measure (BAR token now included)
-            if next_token == BAR:
+            if i % 2 == 0:
                 yield list(generated)
 
         yield list(generated)

@@ -5,18 +5,12 @@ from pathlib import Path
 from typing import Callable, Generator
 
 from ml.tokenizer import (
-    score_to_tokens_by_measure, score_to_header_tokens,
+    score_to_tokens_by_measure, score_to_header_tokens, score_to_xml_str,
     tokens_to_score, BOS, EOS, BAR,
 )
 from ml.model import load_model
 
 OUTPUT_DIR = Path("output")
-
-
-def _score_to_xml_str(score) -> str:
-    from music21.musicxml.m21ToXml import ScoreExporter
-    return ScoreExporter(score).parse().decode("utf-8")
-
 
 def append_and_export(
     xml_str: str,
@@ -205,6 +199,7 @@ def append_and_stream(
     ):
         last_snapshot = snapshot
         total_generated_bars = snapshot.count(BAR)
+        print(f'gen  bar : {total_generated_bars} /  {n_ctx_bars}')
         new_bars = total_generated_bars - n_ctx_bars
         if new_bars <= prev_new_bars:
             continue
@@ -229,7 +224,7 @@ def append_and_stream(
                     orig_part.append(new_m)
                     next_m_num += 1
 
-            xml_out = _score_to_xml_str(partial_score)
+            xml_out = score_to_xml_str(partial_score)
             log(f"Streamed {new_bars} new bar(s) of {num_bars}")
             yield (new_bars, xml_out, num_bars)
         except Exception as e:
@@ -237,6 +232,7 @@ def append_and_stream(
 
     # Final emit with complete last measure
     full_tokens = [BOS] + header_tokens + flat_measures + last_snapshot + [EOS]
+    print(full_tokens)
     try:
         continuation_score = tokens_to_score(full_tokens)
         cont_parts = list(continuation_score.parts)
@@ -262,7 +258,7 @@ def append_and_stream(
         except Exception:
             pass
 
-        xml_out = _score_to_xml_str(final_score)
+        xml_out = score_to_xml_str(final_score)
         log(f"Append stream complete: {total_new} new bars")
         yield (total_new, xml_out, num_bars)
     except Exception as e:

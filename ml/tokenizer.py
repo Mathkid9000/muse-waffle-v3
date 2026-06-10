@@ -886,3 +886,9 @@ def extract_prefix_suffix_tokens(
 def get_gap_measure_count(tokens: list[int]) -> int:
     """Count the number of BAR tokens in a sequence (measures generated)."""
     return tokens.count(BAR)
+
+
+def score_to_xml_str(score) -> str:
+    from music21.musicxml.m21ToXml import ScoreExporter
+    import xml.etree.ElementTree as ET
+    return ET.tostring(ScoreExporter(score).parse(), encoding="utf-8").decode("utf-8")

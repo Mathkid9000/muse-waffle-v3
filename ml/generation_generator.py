@@ -4,17 +4,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable, Generator
 
-from ml.tokenizer import tokens_to_score, BOS, EOS, BAR
+from ml.tokenizer import tokens_to_score, score_to_xml_str, BOS, EOS, BAR
 from ml.model import load_model
-import xml.etree.ElementTree as ET
 
 OUTPUT_DIR = Path("output")
-
-
-def _score_to_xml_str(score) -> str:
-    from music21.musicxml.m21ToXml import ScoreExporter
-    return ET.tostring(ScoreExporter(score).parse(), encoding="utf-8").decode("utf-8")
-
 
 def generate_and_export(
     header_tokens: list[int],
@@ -119,13 +112,10 @@ def generate_and_stream(
     ):
         last_snapshot = snapshot
         bar_count = n_forced_bars + snapshot.count(BAR)
-        if bar_count <= prev_bar_count:
-            continue  # no new measure boundary yet — will emit at end
-        prev_bar_count = bar_count
 
         full_tokens = [BOS] + header_tokens + forced + snapshot + [EOS]
         score = tokens_to_score(full_tokens)
-        xml_str = _score_to_xml_str(score)
+        xml_str = score_to_xml_str(score)
         log(f"Streamed bar {bar_count} of {target_bars}")
         yield (bar_count, xml_str, target_bars)
 
@@ -133,7 +123,7 @@ def generate_and_stream(
     full_tokens = [BOS] + header_tokens + forced + last_snapshot + [EOS]
     try:
         score = tokens_to_score(full_tokens)
-        xml_str = _score_to_xml_str(score)
+        xml_str = score_to_xml_str(score)
         final_bar = n_forced_bars + last_snapshot.count(BAR)
         log(f"Stream complete: {final_bar} bars")
         yield (final_bar, xml_str, target_bars)
