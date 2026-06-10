@@ -3,6 +3,8 @@ import { useStore } from '../../store'
 import { api } from '../../api/client'
 import styles from './AIPanel.module.css'
 
+type Tab = 'infill' | 'generate' | 'append'
+
 const INSTR_NAMES = [
   'Other', 'Piano', 'Harpsichord', 'Organ', 'Accordion', 'Guitar', 'Bass Guitar',
   'Violin', 'Viola', 'Cello', 'Double Bass', 'Harp', 'Flute', 'Oboe',
@@ -22,8 +24,6 @@ const TEMPO_LABELS = [
   '≈116', '≈126', '≈138', '≈152', '≈168', '≈192', '≈216', '≈256',
 ]
 
-type Tab = 'infill' | 'generate'
-
 export default function AIPanel() {
   const [tab, setTab] = useState<Tab>('infill')
   const currentXml = useStore((s) => s.currentXml)
@@ -34,6 +34,9 @@ export default function AIPanel() {
   const setXml = useStore((s) => s.setXml)
   const setLoading = useStore((s) => s.setLoading)
   const setError = useStore((s) => s.setError)
+  const streamBar = useStore((s) => s.streamBar)
+  const totalBars = useStore((s) => s.totalBars)
+  const setStreamProgress = useStore((s) => s.setStreamProgress)
 
   // Infill range — kept in sync with score selection
   const startMeasure = selection?.start ?? 1
@@ -54,6 +57,12 @@ export default function AIPanel() {
   const [genTopK, setGenTopK] = useState(50)
   const [genDevice, setGenDevice] = useState('cpu')
 
+  // Append params
+  const [appendBars, setAppendBars] = useState(4)
+  const [appendTemp, setAppendTemp] = useState(0.9)
+  const [appendTopK, setAppendTopK] = useState(50)
+  const [appendDevice, setAppendDevice] = useState('cpu')
+
   async function handleInfill() {
     if (!currentXml) return
     if (startMeasure > endMeasure) {
@@ -61,20 +70,25 @@ export default function AIPanel() {
       return
     }
     setLoading(true)
+    setStreamProgress(0, endMeasure - startMeasure + 1)
     try {
-      const res = await api.infill({
+      for await (const evt of api.streamInfill({
         xml: currentXml,
         start_measure: startMeasure,
         end_measure: endMeasure,
         temperature,
         top_k: topK,
         device,
-      })
-      setXml(res.xml)
+      })) {
+        if (evt.xml) setXml(evt.xml)
+        if (evt.bar != null && evt.total != null) setStreamProgress(evt.bar, evt.total)
+        if (evt.done) break
+      }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
       setLoading(false)
+      setStreamProgress(null, null)
     }
   }
 
@@ -84,8 +98,9 @@ export default function AIPanel() {
       return
     }
     setLoading(true)
+    setStreamProgress(0, numBars)
     try {
-      const res = await api.generate({
+      for await (const evt of api.streamGenerate({
         instruments: selectedInstrs,
         key,
         time_sig: timeSig,
@@ -94,12 +109,40 @@ export default function AIPanel() {
         temperature: genTemp,
         top_k: genTopK,
         device: genDevice,
-      })
-      setXml(res.xml)
+      })) {
+        if (evt.xml) setXml(evt.xml)
+        if (evt.bar != null && evt.total != null) setStreamProgress(evt.bar, evt.total)
+        if (evt.done) break
+      }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
       setLoading(false)
+      setStreamProgress(null, null)
+    }
+  }
+
+  async function handleAppend() {
+    if (!currentXml) return
+    setLoading(true)
+    setStreamProgress(0, appendBars)
+    try {
+      for await (const evt of api.streamAppend({
+        xml: currentXml,
+        num_bars: appendBars,
+        temperature: appendTemp,
+        top_k: appendTopK,
+        device: appendDevice,
+      })) {
+        if (evt.xml) setXml(evt.xml)
+        if (evt.bar != null && evt.total != null) setStreamProgress(evt.bar, evt.total)
+        if (evt.done) break
+      }
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setLoading(false)
+      setStreamProgress(null, null)
     }
   }
 
@@ -107,6 +150,14 @@ export default function AIPanel() {
     setSelectedInstrs((prev) =>
       prev.includes(idx) ? prev.filter((i) => i !== idx) : [...prev, idx]
     )
+  }
+
+  function progressLabel(verb: string) {
+    if (!loading) return null
+    if (streamBar != null && totalBars != null) {
+      return `${verb} bar ${streamBar} of ${totalBars}…`
+    }
+    return `${verb}…`
   }
 
   return (
@@ -123,6 +174,12 @@ export default function AIPanel() {
           onClick={() => setTab('generate')}
         >
           Generate New
+        </button>
+        <button
+          className={tab === 'append' ? styles.activeTab : styles.tab}
+          onClick={() => setTab('append')}
+        >
+          Append
         </button>
       </div>
 
@@ -174,7 +231,7 @@ export default function AIPanel() {
             onClick={handleInfill}
             disabled={loading || !currentXml}
           >
-            {loading ? 'Running…' : 'Fill Measures'}
+            {progressLabel('Filling') ?? 'Fill Measures'}
           </button>
         </div>
       )}
@@ -236,7 +293,42 @@ export default function AIPanel() {
             onClick={handleGenerate}
             disabled={loading}
           >
-            {loading ? 'Generating…' : 'Generate Score'}
+            {progressLabel('Generating') ?? 'Generate Score'}
+          </button>
+        </div>
+      )}
+
+      {tab === 'append' && (
+        <div className={styles.section}>
+          <p className={styles.hint}>
+            Generate new measures at the end of the current score.
+          </p>
+          <label className={styles.label}>Bars to add
+            <input type="number" min="1" max="64" value={appendBars}
+              onChange={(e) => setAppendBars(Math.max(1, +e.target.value))} />
+          </label>
+          <label className={styles.label}>Temperature
+            <input type="range" min="0.1" max="2" step="0.05"
+              value={appendTemp} onChange={(e) => setAppendTemp(+e.target.value)} />
+            <span>{appendTemp.toFixed(2)}</span>
+          </label>
+          <label className={styles.label}>Top-K
+            <input type="range" min="1" max="200" step="1"
+              value={appendTopK} onChange={(e) => setAppendTopK(+e.target.value)} />
+            <span>{appendTopK}</span>
+          </label>
+          <label className={styles.label}>Device
+            <select value={appendDevice} onChange={(e) => setAppendDevice(e.target.value)}>
+              <option value="cpu">CPU</option>
+              <option value="cuda">CUDA</option>
+            </select>
+          </label>
+          <button
+            className={styles.runBtn}
+            onClick={handleAppend}
+            disabled={loading || !currentXml}
+          >
+            {progressLabel('Appending') ?? 'Append Measures'}
           </button>
         </div>
       )}

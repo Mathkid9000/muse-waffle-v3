@@ -18,8 +18,14 @@ from ml.tokenizer import (
     BAR, BOS, EOS
 )
 from ml.model import load_model
+from typing import Generator
 
 OUTPUT_DIR = Path("output")
+
+
+def _score_to_xml_str(score) -> str:
+    from music21.musicxml.m21ToXml import ScoreExporter
+    return ScoreExporter(score).parse().decode("utf-8")
 
 def load_partial_xml(xml_path: str) -> tuple:
     """Parse input XML and identify gaps.
@@ -275,6 +281,85 @@ def infill_and_export(
     log(f"Filled score: {measure_count} measures, {note_count} notes/chords")
 
     return {"midi": midi_path, "xml": xml_out_path}
+
+
+def infill_and_stream(
+    score,
+    model_name: str,
+    max_new: int = 500,
+    temperature: float = 0.9,
+    top_k: int = 50,
+    log: Callable[[str], None] = print,
+    device: str = "cpu",
+) -> Generator[tuple[int, str, int], None, None]:
+    """Stream partial MusicXML as each fill measure is generated.
+
+    Yields (bar_index, xml_str, total_bars) after each completed fill measure.
+    Processes gaps left-to-right, streaming within each gap.
+    """
+    import copy
+
+    gaps = identify_empty_measures(score)
+    if not gaps:
+        log("No empty measures detected.")
+        return
+
+    total_fill_bars = sum(end - start + 1 for start, end in gaps)
+    log(f"Detected {len(gaps)} gap(s): {gaps}, total fill bars: {total_fill_bars}")
+
+    log("Loading infill model...")
+    model, _ = load_model(model_name, device)
+    log(f"Model loaded ({model.num_params():,} params)")
+
+    filled_bars = 0
+    working_score = copy.deepcopy(score)
+
+    for i, (gap_start, gap_end) in enumerate(gaps):
+        log(f"Processing gap {i+1}/{len(gaps)}: measures {gap_start}-{gap_end}")
+        prefix, suffix, header, target_bars = extract_prefix_suffix(working_score, gap_start, gap_end)
+
+        prev_bar_count = 0
+        last_snapshot: list[int] = []
+
+        for snapshot in model.generate_infill_stream(
+            prefix_tokens=prefix,
+            suffix_tokens=suffix,
+            header_tokens=header,
+            target_bars=target_bars,
+            max_new=max_new,
+            temperature=temperature,
+            top_k=top_k,
+            device=device,
+        ):
+            last_snapshot = snapshot
+            bar_count = snapshot.count(BAR)
+            if bar_count <= prev_bar_count:
+                continue
+            prev_bar_count = bar_count
+
+            partial_score = copy.deepcopy(working_score)
+            merge_fill_into_score(partial_score, snapshot, gap_start, gap_end)
+            try:
+                xml_str = _score_to_xml_str(partial_score)
+                log(f"Infill stream: gap {i+1} bar {bar_count} of {target_bars}")
+                yield (filled_bars + bar_count, xml_str, total_fill_bars)
+            except Exception as e:
+                log(f"Infill stream XML error: {e}")
+
+        # Final emit for this gap with complete last measure
+        final_snapshot = last_snapshot
+        final_score = copy.deepcopy(working_score)
+        merge_fill_into_score(final_score, final_snapshot, gap_start, gap_end)
+        try:
+            xml_str = _score_to_xml_str(final_score)
+            gap_bars = gap_end - gap_start + 1
+            filled_bars += gap_bars
+            yield (filled_bars, xml_str, total_fill_bars)
+        except Exception as e:
+            log(f"Infill final stream XML error: {e}")
+
+        # Update working_score so subsequent gaps see filled content
+        merge_fill_into_score(working_score, final_snapshot, gap_start, gap_end)
 
 
 def create_test_partial_xml(output_path: str, empty_measures: list[int] = None):

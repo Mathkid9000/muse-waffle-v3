@@ -555,23 +555,65 @@ def tokens_to_score(tokens: list[int]):
         part.append(m21.stream.Measure())
         score.append(part)
 
-    # Assign clefs to the first measure of each part based on INSTR token.
+    # Assign clefs and instrument names to each part based on INSTR token.
     # Without an explicit clef Verovio defaults to treble, which mis-positions the
     # key signature symbols for low-register instruments.
+    # partName (no partAbbreviation) → Verovio shows the name on the first system only.
     _BASS_CLEF_INSTRS  = {9, 10, 15, 19, 20, 28, 29}  # cello/double_bass/bassoon/trombone/tuba/voice_bass/baritone
     _TENOR_CLEF_INSTRS = {27}                           # voice_tenor
+    # Keyboard instruments occupy two staves (treble + bass) in the score.
+    _KEYBOARD_INSTRS   = {1, 2, 3, 11}                 # piano, harpsichord, organ, harp
+    _INSTR_DISPLAY = [
+        "Part", "Piano", "Harpsichord", "Organ", "Accordion",
+        "Guitar", "Bass Guitar", "Violin", "Viola", "Cello",
+        "Double Bass", "Harp", "Flute", "Oboe", "Clarinet",
+        "Bassoon", "Saxophone", "Horn", "Trumpet", "Trombone",
+        "Tuba", "Percussion", "Timpani", "Celesta",
+        "Soprano", "Mezzo-Soprano", "Alto", "Tenor",
+        "Baritone", "Bass", "Voice", "Choir",
+    ]
+
+    # Re-order and expand part_instrs so it aligns with the model's output layout:
+    # non-keyboard instruments appear at the top of the score (lower part_idx),
+    # keyboard instruments occupy two consecutive staves at the bottom.
+    # The API sends one INSTR token per distinct instrument regardless of stave count,
+    # so we expand keyboard entries to two here.
+    _non_kb = [i for i in part_instrs if i not in _KEYBOARD_INSTRS]
+    _kb     = [i for i in part_instrs if i in _KEYBOARD_INSTRS]
+    _expanded_instrs = _non_kb + [i for kb in _kb for i in (kb, kb)]
+    # Pad with 0 ("Part") in case the model generated more parts than expected
+    while len(_expanded_instrs) < len(score.parts):
+        _expanded_instrs.append(0)
+
+    # Sentinel values for pitch-inferred names (negative = never a real INSTR index)
+    _INFERRED_SOPRANO, _INFERRED_ALTO, _INFERRED_TENOR, _INFERRED_BASS = -1, -2, -3, -4
+    _INFERRED_NAMES = {
+        _INFERRED_SOPRANO: "Soprano",
+        _INFERRED_ALTO:    "Alto",
+        _INFERRED_TENOR:   "Tenor",
+        _INFERRED_BASS:    "Bass",
+    }
+
     for pi, part in enumerate(score.parts):
         measures = list(part.getElementsByClass(m21.stream.Measure))
         if not measures:
             continue
-        instr_idx = part_instrs[pi] if pi < len(part_instrs) else 0
-        if instr_idx in _BASS_CLEF_INSTRS:
+        instr_idx = _expanded_instrs[pi]
+
+        if instr_idx in _BASS_CLEF_INSTRS or instr_idx == _INFERRED_BASS:
             clef_obj = m21.clef.BassClef()
         elif instr_idx in _TENOR_CLEF_INSTRS:
             clef_obj = m21.clef.TenorClef()
         else:
             clef_obj = m21.clef.TrebleClef()
         measures[0].insert(0, clef_obj)
+
+        instr_obj = m21.instrument.Instrument()
+        instr_obj.partName = (
+            _INFERRED_NAMES.get(instr_idx)
+            or (_INSTR_DISPLAY[instr_idx] if 0 <= instr_idx < len(_INSTR_DISPLAY) else "Part")
+        )
+        part.insert(0, instr_obj)
 
     # makeBeams needs at least one time signature per part; insert a default 4/4 if none decoded.
     for part in score.parts:

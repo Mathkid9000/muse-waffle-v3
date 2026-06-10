@@ -302,6 +302,121 @@ class MusicTransformer(nn.Module):
 
         return generated
 
+    @torch.no_grad()
+    def generate_standard_stream(
+        self,
+        header_tokens: list[int],
+        first_bar_prefix: list[int] | None = None,
+        target_bars: int = 4,
+        max_new: int = 1000,
+        temperature: float = 0.9,
+        top_k: int = 50,
+        device: str = "cuda" if __import__("torch").cuda.is_available() else "cpu",
+    ):
+        """Like generate_standard but yields accumulated token list after each completed BAR."""
+        from ml.tokenizer import BOS, EOS, BAR
+
+        self.eval()
+
+        forced = first_bar_prefix if first_bar_prefix is not None else [BAR]
+        bar_count = forced.count(BAR)
+
+        prompt = [BOS] + header_tokens + forced
+        idx = torch.tensor([prompt], dtype=torch.long, device=device)
+        max_ctx = self.cfg["max_seq_len"]
+
+        generated: list[int] = []
+
+        for _ in range(max_new):
+            idx_cond = idx[:, -max_ctx:]
+            logits = self(idx_cond)[:, -1, :] / max(temperature, 1e-6)
+
+            if top_k > 0:
+                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits[logits < v[:, [-1]]] = float("-inf")
+
+            if bar_count < target_bars:
+                logits[:, EOS] = float("-inf")
+
+            probs = torch.softmax(logits, dim=-1)
+            next_t = torch.multinomial(probs, 1)
+            next_token = next_t.item()
+
+            if next_token == EOS:
+                break
+
+            if next_token == BAR:
+                bar_count += 1
+                if bar_count > target_bars:
+                    break
+
+            generated.append(next_token)
+            idx = torch.cat([idx, next_t], dim=1)
+
+            # Yield snapshot after each completed measure (BAR token now included)
+            if next_token == BAR:
+                yield list(generated)
+
+        yield list(generated)
+
+    @torch.no_grad()
+    def generate_infill_stream(
+        self,
+        prefix_tokens: list[int],
+        suffix_tokens: list[int],
+        header_tokens: list[int] | None = None,
+        target_bars: int = 4,
+        max_new: int = 400,
+        temperature: float = 1.0,
+        top_k: int = 50,
+        device: str = "cuda" if __import__("torch").cuda.is_available() else "cpu",
+    ):
+        """Like generate_infill but yields accumulated token list after each completed BAR."""
+        from ml.tokenizer import BOS, EOS, BAR, FILL_START, FILL_END
+
+        self.eval()
+
+        hdr = header_tokens or []
+        prompt = [BOS] + hdr + prefix_tokens + [FILL_START] + suffix_tokens + [FILL_END]
+        idx = torch.tensor([prompt], dtype=torch.long, device=device)
+        max_ctx = self.cfg["max_seq_len"]
+
+        generated: list[int] = []
+        bar_count = 0
+
+        for _ in range(max_new):
+            idx_cond = idx[:, -max_ctx:]
+            logits = self(idx_cond)[:, -1, :] / max(temperature, 1e-6)
+
+            if top_k > 0:
+                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits[logits < v[:, [-1]]] = float("-inf")
+
+            if bar_count < target_bars:
+                logits[:, EOS] = float("-inf")
+
+            probs = torch.softmax(logits, dim=-1)
+            next_t = torch.multinomial(probs, 1)
+            next_token = next_t.item()
+
+            if next_token == EOS:
+                break
+
+            if next_token == BAR:
+                bar_count += 1
+                if bar_count > target_bars:
+                    break
+
+            generated.append(next_token)
+            idx = torch.cat([idx, next_t], dim=1)
+
+            # Yield snapshot after each completed measure (BAR token now included)
+            if next_token == BAR:
+                yield list(generated)
+
+        yield list(generated)
+
+
 def append_epoch_to_config(name: str, cfg: dict, training_loss, val_loss):
     if cfg is None:
         print("Will not overwrite config with null config")

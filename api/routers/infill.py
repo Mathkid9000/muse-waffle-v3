@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 import asyncio
+import json
 import logging
+import threading
 import traceback
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from api.schemas import InfillRequest, XmlResponse
 
 router = APIRouter()
@@ -64,3 +67,51 @@ async def infill(body: InfillRequest):
         logger.error("Infill error:\n%s", traceback.format_exc())
         raise HTTPException(500, detail=str(e))
     return XmlResponse(xml=xml)
+
+
+@router.post("/infill/stream")
+async def infill_stream(body: InfillRequest):
+    import music21 as m21
+    from ml.infill_generator import infill_and_stream
+
+    loop = asyncio.get_running_loop()
+    q: asyncio.Queue = asyncio.Queue()
+
+    def run():
+        try:
+            score = m21.converter.parseData(body.xml, format="musicxml")
+            _mark_measures_empty(score, body.start_measure, body.end_measure)
+            for bar, xml, total in infill_and_stream(
+                score=score,
+                model_name=body.model_name,
+                max_new=500,
+                temperature=body.temperature,
+                top_k=body.top_k,
+                device=body.device,
+            ):
+                asyncio.run_coroutine_threadsafe(q.put(("data", bar, xml, total)), loop).result()
+            asyncio.run_coroutine_threadsafe(q.put(("done",)), loop).result()
+        except Exception as e:
+            logger.error("Infill stream error:\n%s", traceback.format_exc())
+            asyncio.run_coroutine_threadsafe(q.put(("error", str(e))), loop).result()
+
+    threading.Thread(target=run, daemon=True).start()
+
+    async def event_gen():
+        while True:
+            item = await q.get()
+            if item[0] == "done":
+                yield 'data: {"done":true}\n\n'
+                break
+            elif item[0] == "error":
+                yield f"data: {json.dumps({'error': item[1]})}\n\n"
+                break
+            else:
+                _, bar, xml, total = item
+                yield f"data: {json.dumps({'xml': xml, 'bar': bar, 'total': total})}\n\n"
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
