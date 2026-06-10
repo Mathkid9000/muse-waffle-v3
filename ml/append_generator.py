@@ -98,15 +98,20 @@ def append_and_export(
         orig_last_m_num = 0
 
     for part_idx, orig_part in enumerate(orig_parts):
-        if part_idx >= len(cont_parts):
-            break
-        cont_measures = list(cont_parts[part_idx].getElementsByClass(m21.stream.Measure))
-        new_measures = cont_measures[n_ctx_bars:]  # skip context, take only new
-
         next_m_num = orig_last_m_num + 1
-        for new_m in new_measures[:num_bars]:
+        if part_idx < len(cont_parts):
+            cont_measures = list(cont_parts[part_idx].getElementsByClass(m21.stream.Measure))
+            new_measures = cont_measures[n_ctx_bars:n_ctx_bars + num_bars]
+        else:
+            new_measures = []
+        for new_m in new_measures:
             new_m.number = next_m_num
             orig_part.append(new_m)
+            next_m_num += 1
+        for _ in range(len(new_measures), num_bars):
+            rest_m = m21.stream.Measure(number=next_m_num)
+            rest_m.append(m21.note.Rest(quarterLength=4.0))
+            orig_part.append(rest_m)
             next_m_num += 1
 
     try:
@@ -185,7 +190,6 @@ def append_and_stream(
         for m in p.getElementsByClass(m21.stream.Measure)
     ) if orig_parts else 0
 
-    prev_new_bars = 0
     last_snapshot: list[int] = []
 
     for snapshot in model.generate_standard_stream(
@@ -198,12 +202,7 @@ def append_and_stream(
         device=device,
     ):
         last_snapshot = snapshot
-        total_generated_bars = snapshot.count(BAR)
-        print(f'gen  bar : {total_generated_bars} /  {n_ctx_bars}')
-        new_bars = total_generated_bars - n_ctx_bars
-        if new_bars <= prev_new_bars:
-            continue
-        prev_new_bars = new_bars
+        new_bars = snapshot.count(BAR)
 
         full_tokens = [BOS] + header_tokens + flat_measures + snapshot + [EOS]
         try:
@@ -213,26 +212,29 @@ def append_and_stream(
             partial_score = copy.deepcopy(orig_score)
             partial_orig_parts = list(partial_score.parts)
 
-            next_m_num = orig_last_m_num + 1
             for part_idx, orig_part in enumerate(partial_orig_parts):
-                if part_idx >= len(cont_parts):
-                    break
-                cont_measures = list(cont_parts[part_idx].getElementsByClass(m21.stream.Measure))
-                new_measures = cont_measures[n_ctx_bars:n_ctx_bars + new_bars]
-                for new_m in new_measures:
-                    new_m.number = next_m_num
+                curr_m_num = orig_last_m_num + 1
+                if part_idx < len(cont_parts):
+                    cont_measures = list(cont_parts[part_idx].getElementsByClass(m21.stream.Measure))
+                    new_measures = cont_measures[n_ctx_bars:n_ctx_bars + new_bars]
+                else:
+                    new_measures = []
+                for i, new_m in enumerate(new_measures):
+                    new_m.number = curr_m_num + i
                     orig_part.append(new_m)
-                    next_m_num += 1
+                for i in range(len(new_measures), new_bars):
+                    rest_m = m21.stream.Measure(number=curr_m_num + i)
+                    rest_m.append(m21.note.Rest(quarterLength=4.0))
+                    orig_part.append(rest_m)
 
             xml_out = score_to_xml_str(partial_score)
-            log(f"Streamed {new_bars} new bar(s) of {num_bars}")
+            # log(f"Streamed {new_bars} new bar(s) of {num_bars}")
             yield (new_bars, xml_out, num_bars)
         except Exception as e:
             log(f"Append stream XML error at {new_bars} bars: {e}")
 
     # Final emit with complete last measure
     full_tokens = [BOS] + header_tokens + flat_measures + last_snapshot + [EOS]
-    print(full_tokens)
     try:
         continuation_score = tokens_to_score(full_tokens)
         cont_parts = list(continuation_score.parts)
@@ -240,17 +242,21 @@ def append_and_stream(
         final_score = copy.deepcopy(orig_score)
         final_orig_parts = list(final_score.parts)
 
-        total_new = last_snapshot.count(BAR) - n_ctx_bars
-        next_m_num = orig_last_m_num + 1
+        total_new = last_snapshot.count(BAR)
         for part_idx, orig_part in enumerate(final_orig_parts):
-            if part_idx >= len(cont_parts):
-                break
-            cont_measures = list(cont_parts[part_idx].getElementsByClass(m21.stream.Measure))
-            new_measures = cont_measures[n_ctx_bars:n_ctx_bars + total_new]
-            for new_m in new_measures[:num_bars]:
-                new_m.number = next_m_num
+            curr_m_num = orig_last_m_num + 1
+            if part_idx < len(cont_parts):
+                cont_measures = list(cont_parts[part_idx].getElementsByClass(m21.stream.Measure))
+                new_measures = cont_measures[n_ctx_bars:n_ctx_bars + total_new]
+            else:
+                new_measures = []
+            for i, new_m in enumerate(new_measures[:num_bars]):
+                new_m.number = curr_m_num + i
                 orig_part.append(new_m)
-                next_m_num += 1
+            for i in range(min(len(new_measures), num_bars), num_bars):
+                rest_m = m21.stream.Measure(number=curr_m_num + i)
+                rest_m.append(m21.note.Rest(quarterLength=4.0))
+                orig_part.append(rest_m)
 
         try:
             for part in final_score.parts:
