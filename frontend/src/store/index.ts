@@ -13,6 +13,7 @@ interface AppState {
   selection: MeasureSelection | null
   streamBar: number | null
   totalBars: number | null
+  streamMode: 'infill' | 'generate' | 'append' | null
 
   setXml: (xml: string) => void
   setLoading: (v: boolean) => void
@@ -20,6 +21,7 @@ interface AppState {
   setZoom: (v: number) => void
   setSelection: (s: MeasureSelection | null) => void
   setStreamProgress: (bar: number | null, total: number | null) => void
+  setStreamMode: (mode: 'infill' | 'generate' | 'append' | null) => void
 }
 
 export const useStore = create<AppState>((set) => ({
@@ -30,6 +32,7 @@ export const useStore = create<AppState>((set) => ({
   selection: null,
   streamBar: null,
   totalBars: null,
+  streamMode: null,
 
   setXml: (xml) => set({ currentXml: xml, error: null }),
   setLoading: (v) => set({ loading: v }),
@@ -37,4 +40,5 @@ export const useStore = create<AppState>((set) => ({
   setZoom: (v) => set({ zoom: Math.max(25, Math.min(300, v)) }),
   setSelection: (s) => set({ selection: s }),
   setStreamProgress: (bar, total) => set({ streamBar: bar, totalBars: total }),
+  setStreamMode: (mode) => set({ streamMode: mode }),
 }))

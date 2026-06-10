@@ -5,6 +5,8 @@ import { VerovioToolkit } from 'verovio/esm'
 let shared: VerovioToolkit | null = null
 let loadingPromise: Promise<VerovioToolkit> | null = null
 
+const PAGE_HEIGHT = 800
+
 async function loadVerovio(): Promise<VerovioToolkit> {
   if (shared) return shared
   if (loadingPromise) return loadingPromise
@@ -13,6 +15,41 @@ async function loadVerovio(): Promise<VerovioToolkit> {
     return shared
   })
   return loadingPromise
+}
+
+function applyOptions(tk: VerovioToolkit, pageWidth: number, scale: number): void {
+  tk.setOptions({
+    pageWidth,
+    pageHeight: PAGE_HEIGHT,
+    breaks: 'auto',
+    scale,
+    footer: 'none',
+    header: 'none',
+    spacingLinear: 0.2,
+  })
+}
+
+function loadScore(tk: VerovioToolkit, data: string): boolean {
+  return data.startsWith('__MXL__')
+    ? tk.loadZipDataBase64(data.slice(7))
+    : tk.loadData(data)
+}
+
+/** Returns the shared VerovioToolkit once WASM has loaded, or null before that. */
+export function getSharedToolkit(): VerovioToolkit | null {
+  return shared
+}
+
+/**
+ * Applies layout options, loads the score, and returns the page count.
+ * Returns 0 if the toolkit is not ready or the data fails to load.
+ * After this call, getSharedToolkit()!.renderToSVG(page) can be called directly.
+ */
+export function loadAndGetPageCount(data: string, pageWidth: number, scale: number): number {
+  if (!shared) return 0
+  applyOptions(shared, pageWidth, scale)
+  if (!loadScore(shared, data)) return 0
+  return shared.getPageCount()
 }
 
 /** Returns base64-encoded MIDI for the currently-loaded score. */
@@ -74,24 +111,8 @@ export function useVerovio() {
   function renderXml(data: string, pageWidth: number, scale: number): string[] {
     const tk = tkRef.current
     if (!tk) return []
-
-    tk.setOptions({
-      pageWidth,
-      pageHeight: 2970,
-      breaks: 'auto',
-      scale,
-      footer: 'none',
-      header: 'none',
-      spacingLinear: 0.2,
-    })
-
-    // MXL files are stored with a prefix so we know to use the ZIP loader
-    const loaded = data.startsWith('__MXL__')
-      ? tk.loadZipDataBase64(data.slice(7))
-      : tk.loadData(data)
-
-    if (!loaded) return []
-
+    applyOptions(tk, pageWidth, scale)
+    if (!loadScore(tk, data)) return []
     const pageCount = tk.getPageCount()
     return Array.from({ length: pageCount }, (_, i) => tk.renderToSVG(i + 1))
   }

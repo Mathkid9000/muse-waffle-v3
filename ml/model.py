@@ -386,7 +386,7 @@ class MusicTransformer(nn.Module):
         for i in range(max_new):
             idx_cond = idx[:, -max_ctx:]
             logits = self(idx_cond)[:, -1, :] / max(temperature, 1e-6)
-
+        
             if top_k > 0:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
                 logits[logits < v[:, [-1]]] = float("-inf")
@@ -409,7 +409,6 @@ class MusicTransformer(nn.Module):
             generated.append(next_token)
             idx = torch.cat([idx, next_t], dim=1)
 
-            # Yield snapshot after each completed measure (BAR token now included)
             if i % 2 == 0:
                 yield list(generated)
 

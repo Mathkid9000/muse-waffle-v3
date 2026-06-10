@@ -1,12 +1,22 @@
 import { useEffect, useState, useRef } from 'react'
-import { useVerovio } from '../../hooks/useVerovio'
+import { useVerovio, getSharedToolkit, loadAndGetPageCount } from '../../hooks/useVerovio'
 import { useStore } from '../../store'
 import styles from './ScoreViewer.module.css'
 import AppendBar from './AppendBar'
 
-// Matches Verovio measure elements by class (standard) or by the "m-" ID prefix (fallback).
-// querySelectorAll deduplicates, so elements matching both selectors appear exactly once.
 const MEASURE_SEL = 'g.measure'
+
+const svgParser = new DOMParser()
+
+function buildMeasureMap(svgs: string[]): Map<number, number> {
+  const map = new Map<number, number>()
+  let measureNum = 1
+  svgs.forEach((svg, pageIdx) => {
+    const count = svgParser.parseFromString(svg, 'image/svg+xml').querySelectorAll(MEASURE_SEL).length
+    for (let i = 0; i < count; i++) map.set(measureNum++, pageIdx)
+  })
+  return map
+}
 
 export default function ScoreViewer() {
   const { ready, renderXml } = useVerovio()
@@ -23,10 +33,55 @@ export default function ScoreViewer() {
   const zoomRef = useRef(zoom)
   zoomRef.current = zoom
 
+  const cachedPagesRef = useRef<string[]>([])
+  const measureToPageRef = useRef<Map<number, number>>(new Map())
+
   useEffect(() => {
-    if (!ready || !currentXml) { setPages([]); return }
+    if (!ready || !currentXml) {
+      cachedPagesRef.current = []
+      measureToPageRef.current = new Map()
+      setPages([])
+      return
+    }
+
     const w = outerRef.current?.clientWidth ?? 1000
-    setPages(renderXml(currentXml, w * 2.5, 40))
+    const { streamMode, selection: sel } = useStore.getState()
+    const tk = getSharedToolkit()
+
+    if (!tk || !streamMode || cachedPagesRef.current.length === 0) {
+      // Full render: initial load, not streaming, or cache empty (first streaming event)
+      const allPages = renderXml(currentXml, w * 2.5, 40)
+      cachedPagesRef.current = allPages
+      measureToPageRef.current = buildMeasureMap(allPages)
+      setPages(allPages)
+      return
+    }
+
+    // Incremental: loadAndGetPageCount applies options + loads data into the shared tk
+    const prevCount = cachedPagesRef.current.length
+    const newCount = loadAndGetPageCount(currentXml, w * 2.5, 40)
+    if (newCount === 0) return
+
+    let startPage: number
+    let endPage: number
+    if (streamMode === 'infill') {
+      const gapStart = sel?.start ?? 1
+      const gapPageIdx = measureToPageRef.current.get(gapStart) ?? prevCount - 1
+      startPage = gapPageIdx + 1  // convert 0-indexed map value to 1-indexed page
+      endPage = startPage
+    } else {
+      // generate/append: re-render from old last page through new last page
+      startPage = Math.max(1, prevCount)
+      endPage = newCount
+    }
+
+    const updated = [...cachedPagesRef.current]
+    while (updated.length < newCount) updated.push('')
+    for (let p = startPage; p <= endPage; p++) {
+      updated[p - 1] = tk.renderToSVG(p)
+    }
+    cachedPagesRef.current = updated
+    setPages([...updated])
   }, [ready, currentXml])
 
   // Inject selection highlight rects directly into the SVG DOM.

@@ -37,6 +37,7 @@ export default function AIPanel() {
   const streamBar = useStore((s) => s.streamBar)
   const totalBars = useStore((s) => s.totalBars)
   const setStreamProgress = useStore((s) => s.setStreamProgress)
+  const setStreamMode = useStore((s) => s.setStreamMode)
 
   // Infill range — kept in sync with score selection
   const startMeasure = selection?.start ?? 1
@@ -70,6 +71,7 @@ export default function AIPanel() {
       return
     }
     setLoading(true)
+    setStreamMode('infill')
     setStreamProgress(0, endMeasure - startMeasure + 1)
     try {
       for await (const evt of api.streamInfill({
@@ -88,6 +90,7 @@ export default function AIPanel() {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
       setLoading(false)
+      setStreamMode(null)
       setStreamProgress(null, null)
     }
   }
@@ -98,6 +101,7 @@ export default function AIPanel() {
       return
     }
     setLoading(true)
+    setStreamMode('generate')
     setStreamProgress(0, numBars)
     try {
       for await (const evt of api.streamGenerate({
@@ -118,6 +122,7 @@ export default function AIPanel() {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
       setLoading(false)
+      setStreamMode(null)
       setStreamProgress(null, null)
     }
   }
@@ -125,6 +130,7 @@ export default function AIPanel() {
   async function handleAppend() {
     if (!currentXml) return
     setLoading(true)
+    setStreamMode('append')
     setStreamProgress(0, appendBars)
     try {
       for await (const evt of api.streamAppend({
@@ -142,6 +148,7 @@ export default function AIPanel() {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
       setLoading(false)
+      setStreamMode(null)
       setStreamProgress(null, null)
     }
   }

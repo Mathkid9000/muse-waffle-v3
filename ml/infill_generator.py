@@ -278,6 +278,8 @@ def infill_and_export(
     return {"midi": midi_path, "xml": xml_out_path}
 
 
+import time
+
 def infill_and_stream(
     score,
     model_name: str,
@@ -314,6 +316,7 @@ def infill_and_stream(
         prefix, suffix, header, target_bars = extract_prefix_suffix(working_score, gap_start, gap_end)
 
         last_snapshot: list[int] = []
+        partial_score = copy.deepcopy(working_score)
 
         for snapshot in model.generate_infill_stream(
             prefix_tokens=prefix,
@@ -328,7 +331,6 @@ def infill_and_stream(
             last_snapshot = snapshot
             bar_count = snapshot.count(BAR)
 
-            partial_score = copy.deepcopy(working_score)
             merge_fill_into_score(partial_score, snapshot, gap_start, gap_end)
             try:
                 xml_str = score_to_xml_str(partial_score)
