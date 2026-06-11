@@ -223,7 +223,6 @@ def extract_part_clef(part: m21.stream.Part) -> int:
     for measure in part.getElementsByClass(m21.stream.Measure):
         for clef in measure.getElementsByClass(m21.clef.Clef):
             if clef.name in CLEFS:
-                print('Found clef: ', clef.name, CLEFS.index(clef.name))
                 return CLEFS.index(clef.name)
 
 
