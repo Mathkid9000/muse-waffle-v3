@@ -12,16 +12,16 @@ Vocabulary layout: (467 tokens)
   154-174  REST      (same 21 duration bins)
   175-187  KEY_SIG   (-6 to +6 sharps)
   188-193  TIME_SIG  (common meters)
-  194-197  CLEF
-  198-254  TEXT chars (printable ASCII 32-88, 57 values)
-  255-270  PART_0 to PART_15  (combined part+voice: part_idx*2 + voice_idx)
-  271-414  STEP_0 to STEP_143 (absolute offset within measure, 1/24 ql units)
-  415      GRACE  (next note/chord is a grace note; DUR carries its written duration)
-  416      FILL_START  (infill: end of prefix)
-  417      FILL_END    (infill: end of suffix, start of generation)
-  418      EMPTY_BAR   (infill: placeholder for empty measures)
-  419-434  TEMPO  (16 BPM buckets)
-  435-466  INSTR  (32 instrument categories; see INSTR_NAMES)
+  194-200  CLEF
+  201-257  TEXT chars (printable ASCII 32-88, 57 values)
+  258-273  PART_0 to PART_15  (combined part+voice: part_idx*2 + voice_idx)
+  274-417  STEP_0 to STEP_143 (absolute offset within measure, 1/24 ql units)
+  418      GRACE  (next note/chord is a grace note; DUR carries its written duration)
+  419      FILL_START  (infill: end of prefix)
+  420      FILL_END    (infill: end of suffix, start of generation)
+  421      EMPTY_BAR   (infill: placeholder for empty measures)
+  422-435  TEMPO  (16 BPM buckets)
+  436-469  INSTR  (32 instrument categories; see INSTR_NAMES)
 
 PART tokens encode both staff and voice: PART_{part*2 + voice}.
 Each token unambiguously identifies a single voice lane.  Supports up to
@@ -66,7 +66,7 @@ DURATIONS = [
 
 TIME_SIGS = ["2/4", "3/4", "4/4", "6/8", "3/8", "12/8"]
 
-CLEFS = [ "treble", "bass", "alto", "tenor" ]
+CLEFS = [ "treble", "bass", "alto", "tenor", "treble8vb", "treble8va", "bass8vb" ]
 
 MAX_REAL_PARTS      = 8
 MAX_VOICES_PER_PART = 2
@@ -128,7 +128,7 @@ REST_OFF = DUR_OFF  + len(DURATIONS) # 154
 KEY_OFF  = REST_OFF + len(DURATIONS) # 175
 TIME_OFF = KEY_OFF  + 13             # 188
 CLEF_OFF = TIME_OFF + 6              # 194
-TEXT_OFF = CLEF_OFF + 4              # 198  (ASCII 32-88 = 57 chars)
+TEXT_OFF = CLEF_OFF + 7              # 198  (ASCII 32-88 = 57 chars)
 PART_OFF = TEXT_OFF + 57             # 255
 STEP_OFF = PART_OFF + MAX_PARTS      # 271
 GRACE    = STEP_OFF + MAX_STEP       # 415
@@ -499,6 +499,12 @@ def tokens_to_score(tokens: list[int]):
             clef = m21.clef.AltoClef()
         elif clef_idx == 3:
             clef = m21.clef.TenorClef()
+        elif clef_idx == 4:
+            clef = m21.clef.Treble8vbClef()
+        elif clef_idx == 5:
+            clef = m21.clef.Treble8vaClef()
+        elif clef_idx == 6:
+            clef = m21.clef.Bass8vbClef()
         measure.insert(0, clef)
         
     try:

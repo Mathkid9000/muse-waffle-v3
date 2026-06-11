@@ -146,14 +146,14 @@ def _load_measure_sequences(
     for path in tqdm(paths, desc="Parsing scores..."):
         if max_sequences != 0 and len(sequences) >= max_sequences:
             break
-        try:
-            score = m21.converter.parse(path)
-            header = score_to_header_tokens(score)
-            measure_tokens = score_to_tokens_by_measure(score)
-            if measure_tokens and len(measure_tokens) >= 3:
-                sequences.append((header, measure_tokens))
-        except Exception as e:
-            log(f"  Skip {Path(path).name}: {e}")
+        # try:
+        score = m21.converter.parse(path)
+        header = score_to_header_tokens(score)
+        measure_tokens = score_to_tokens_by_measure(score)
+        if measure_tokens and len(measure_tokens) >= 3:
+            sequences.append((header, measure_tokens))
+        # except Exception as e:
+        #     log(f"  Skip {Path(path).name}: {e}")
 
     return sequences
 

@@ -4,7 +4,7 @@ from ml.dataset import load_cached_paths
 from ml.tokenizer import tokens_to_score
 import numpy as np
 
-paths = load_cached_paths()[10:11]
+paths = load_cached_paths()[1164:1165]
 sequences = _load_measure_sequences(paths, print)
 
 max_len = 2048
