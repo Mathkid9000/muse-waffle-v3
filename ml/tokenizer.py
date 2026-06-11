@@ -259,116 +259,6 @@ def _extract_measure_symbols(score):
     return key_toks, time_toks, tempo_toks
 
 
-def score_to_tokens(score) -> list[int]:
-    """music21 Score -> timestep-structured token list.
-
-    Events are sorted by (measure, offset, combined_idx).  A STEP token is
-    emitted when the offset changes; a PART token when the lane changes.  A TIE
-    token is appended after NOTE+DUR when the note carries a tie start/continue,
-    allowing the decoder to reconstruct tie connections.
-
-    The sequence opens with [BOS] followed by one INSTR token per part, then
-    measure content.  Each measure starts with [BAR] optionally followed by
-    KEY_SIG, TIME_SIG, and/or TEMPO tokens (only when present in that measure).
-    """
-    import music21 as m21
-
-    parts = list(score.parts)[:MAX_REAL_PARTS]
-    if not parts:
-        return [BOS, EOS]
-
-    events: list[tuple[int, float, int, list[int]]] = []
-    measure_durations: dict[int, float] = {}
-
-    for part_idx, part in enumerate(parts):
-        for measure in part.getElementsByClass(m21.stream.Measure):
-            m_num = measure.number if measure.number is not None else 0
-            ht = float(measure.highestTime)
-            measure_durations[m_num] = ht if ht > 0 else float(measure.barDuration.quarterLength)
-
-            if measure.voices:
-                voice_streams = [
-                    (vi, v.notesAndRests)
-                    for vi, v in enumerate(measure.voices)
-                    if vi < MAX_VOICES_PER_PART
-                ]
-            else:
-                voice_streams = [(0, measure.notesAndRests)]
-
-            for voice_idx, note_stream in voice_streams:
-                combined = part_idx * MAX_VOICES_PER_PART + voice_idx
-                for el in note_stream:
-                    offset    = float(el.offset)
-                    is_grace  = el.duration.quarterLength == 0
-
-                    if is_grace:
-                        dtype = el.duration.type
-                        written_ql = (m21.duration.Duration(dtype).quarterLength
-                                      if dtype and dtype != 'zero' else 0.25)
-                        dur_idx = _closest_dur_idx(written_ql if written_ql > 0 else 0.25)
-                    else:
-                        dur_idx = _closest_dur_idx(el.duration.quarterLength)
-
-                    if el.isRest:
-                        toks = [REST_OFF + dur_idx]
-                    elif el.isNote or el.isChord:
-                        note_list = [el] if el.isNote else list(el.notes)
-                        toks = []
-                        if is_grace:
-                            toks.append(GRACE)
-                        toks += [NOTE_OFF + n.pitch.midi for n in note_list]
-                        toks.append(DUR_OFF + dur_idx)
-                        if not is_grace and el.tie is not None and el.tie.type in ('start', 'continue'):
-                            toks.append(TIE)
-                    else:
-                        continue
-
-                    events.append((m_num, offset, combined, toks))
-
-    # Inject explicit whole-measure rests for active lanes absent from a measure.
-    active_lanes = {e[2] for e in events}
-    for m_num in list(measure_durations):
-        present = {e[2] for e in events if e[0] == m_num}
-        dur_idx = _closest_dur_idx(measure_durations[m_num])
-        for lane in active_lanes - present:
-            events.append((m_num, 0.0, lane, [REST_OFF + dur_idx]))
-
-    events.sort(key=lambda e: (e[0], e[1], e[2]))
-
-    key_toks, time_toks, tempo_toks = _extract_measure_symbols(score)
-
-    # BOS + one INSTR token per part
-    tokens: list[int] = [BOS] + score_to_header_tokens(score)
-    cur_measure = -1
-    cur_offset  = -1.0
-    cur_lane    = -1
-
-    for m_num, offset, combined, toks in events:
-        if m_num != cur_measure:
-            tokens.append(BAR)
-            cur_measure = m_num
-            # Emit global symbols for this measure
-            for sym_dict in (key_toks, time_toks, tempo_toks):
-                if m_num in sym_dict:
-                    tokens.append(sym_dict[m_num])
-            cur_offset  = -1.0
-            cur_lane    = -1
-
-        if offset != cur_offset:
-            tokens.append(STEP_OFF + _offset_to_step(offset))
-            cur_offset = offset
-            cur_lane   = -1
-
-        if combined != cur_lane:
-            tokens.append(PART_OFF + combined)
-            cur_lane = combined
-
-        tokens.extend(toks)
-
-    tokens.append(EOS)
-    return tokens
-
-
 def tokens_to_score(tokens: list[int]):
     """Timestep token list -> music21 Score.
 
@@ -527,8 +417,6 @@ def tokens_to_score(tokens: list[int]):
             # Reconstruct global measure symbols
             if m_num in measure_key_sigs:
                 measure.insert(0, m21.key.KeySignature(measure_key_sigs[m_num]))
-            if m_num in measure_time_sigs:
-                measure.insert(0, m21.meter.TimeSignature(TIME_SIGS[measure_time_sigs[m_num]]))
             if m_num in measure_tempos and part_idx == 0:
                 measure.insert(0, m21.tempo.MetronomeMark(number=measure_tempos[m_num]))
 
@@ -554,6 +442,13 @@ def tokens_to_score(tokens: list[int]):
         part = m21.stream.Part()
         part.append(m21.stream.Measure())
         score.append(part)
+
+    # Reconstruct time sigs
+    for part in score.parts:
+        measures = list(part.getElementsByClass(m21.stream.Measure))
+        for measure in measures:
+            if measure.measureNumber in measure_time_sigs:
+                part.insert(measure.offset, m21.meter.TimeSignature(TIME_SIGS[measure_time_sigs[measure.measureNumber]])) # janky hack
 
     # Assign clefs and instrument names to each part based on INSTR token.
     # Without an explicit clef Verovio defaults to treble, which mis-positions the
@@ -616,12 +511,12 @@ def tokens_to_score(tokens: list[int]):
         part.insert(0, instr_obj)
 
     # makeBeams needs at least one time signature per part; insert a default 4/4 if none decoded.
-    for part in score.parts:
-        measures = list(part.getElementsByClass(m21.stream.Measure))
-        if measures and not any(
-            list(m.getElementsByClass(m21.meter.TimeSignature)) for m in measures
-        ):
-            measures[0].insert(0, m21.meter.TimeSignature('4/4'))
+    # for part in score.parts:
+    #     measures = list(part.getElementsByClass(m21.stream.Measure))
+    #     if measures and not any(
+    #         list(m.getElementsByClass(m21.meter.TimeSignature)) for m in measures
+    #     ):
+    #         measures[0].insert(0, m21.meter.TimeSignature('4/4'))
 
     try:
         for part in score.parts:
@@ -739,14 +634,18 @@ def score_to_tokens_by_measure(score) -> dict[int, list[int]]:
             if m_num not in events_by_measure:
                 events_by_measure[m_num] = []
             ht = float(measure.highestTime)
-            measure_durations[m_num] = ht if ht > 0 else float(measure.barDuration.quarterLength)
+            measure_durations[m_num] = ht if ht > 0 else float(measure.duration.quarterLength)
 
             if measure.voices:
-                voice_streams = [
-                    (vi, v.notesAndRests)
-                    for vi, v in enumerate(measure.voices)
-                    if vi < MAX_VOICES_PER_PART
-                ]
+                voice_streams = []
+                found_v = 0
+                has_filled_voice = any([ (True if any([ (False if el.isRest else True) for el in v.notesAndRests ]) else False) for v in measure.voices ])
+                for v in measure.voices:
+                    els = v.notesAndRests
+                    if any([ (False if el.isRest else True) for el in els ]) or not has_filled_voice:
+                        voice_streams.append((found_v, els))
+                        found_v += 1
+                        if found_v >= MAX_VOICES_PER_PART: break
             else:
                 voice_streams = [(0, measure.notesAndRests)]
 
@@ -764,7 +663,7 @@ def score_to_tokens_by_measure(score) -> dict[int, list[int]]:
                     else:
                         dur_idx = _closest_dur_idx(el.duration.quarterLength)
 
-                    if el.isRest:
+                    if el.isRest and len([ 1 for o,c,t in events_by_measure[m_num] if o == offset and c == combined ]) == 0:
                         toks = [REST_OFF + dur_idx]
                     elif el.isNote or el.isChord:
                         note_list = [el] if el.isNote else list(el.notes)
@@ -781,12 +680,12 @@ def score_to_tokens_by_measure(score) -> dict[int, list[int]]:
                     events_by_measure[m_num].append((offset, combined, toks))
 
     # Inject explicit whole-measure rests for active lanes absent from a measure.
-    active_lanes = {e[1] for evts in events_by_measure.values() for e in evts}
-    for m_num, evts in events_by_measure.items():
-        present = {e[1] for e in evts}
-        dur_idx = _closest_dur_idx(measure_durations.get(m_num, 4.0))
-        for lane in active_lanes - present:
-            evts.append((0.0, lane, [REST_OFF + dur_idx]))
+    # active_lanes = {e[1] for evts in events_by_measure.values() for e in evts}
+    # for m_num, evts in events_by_measure.items():
+    #     present = {e[1] for e in evts}
+    #     dur_idx = _closest_dur_idx(measure_durations.get(m_num, 4.0))
+    #     for lane in active_lanes - present:
+    #         evts.append((0.0, lane, [REST_OFF + dur_idx]))
 
     key_toks, time_toks, tempo_toks = _extract_measure_symbols(score)
 

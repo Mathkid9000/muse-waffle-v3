@@ -111,6 +111,7 @@ else:
 
 
 # -- FIM round-trip via InfillDataset --------------------------------------
+
 print("\n" + "="*70)
 print("FIM ROUND-TRIP TEST  (using InfillDataset -- exactly what the model sees)")
 print("="*70)
@@ -202,4 +203,4 @@ def fim_roundtrip_test(seed: int | None = None):
     score.write("musicxml", fp=out_xml)
     print(f"  FIM round-trip score written to: {out_xml}")
 
-fim_roundtrip_test()
+# fim_roundtrip_test()
