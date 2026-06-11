@@ -520,55 +520,6 @@ def expand_embeddings_for_infill(
     return model
 
 
-def expand_embeddings_for_metadata(
-    model: MusicTransformer,
-    old_vocab_size: int = 415,
-) -> MusicTransformer:
-    """Expand model embeddings from 415 to 463 to add TEMPO and INSTR tokens.
-
-    New token initialisation:
-    - TEMPO tokens (415-430): mean of all existing embeddings (semantically novel)
-    - INSTR tokens (431-462): copy of BAR embedding (structural separator role)
-    """
-    from ml.tokenizer import BAR, VOCAB_SIZE
-
-    new_vocab_size = VOCAB_SIZE  # 463
-    d_model = model.cfg["d_model"]
-
-    if model.cfg["vocab_size"] >= new_vocab_size:
-        return model  # Already expanded
-
-    old_tok_emb = model.tok_emb.weight.data
-    mean_emb = old_tok_emb.mean(dim=0)
-    bar_emb  = old_tok_emb[BAR].clone()
-
-    new_tok_emb = nn.Embedding(new_vocab_size, d_model)
-    nn.init.normal_(new_tok_emb.weight, std=0.02)
-    new_tok_emb.weight.data[:old_vocab_size] = old_tok_emb
-
-    # TEMPO tokens <- mean embedding
-    for i in range(16):
-        new_tok_emb.weight.data[old_vocab_size + i] = mean_emb.clone()
-    # INSTR tokens <- BAR embedding
-    for i in range(32):
-        new_tok_emb.weight.data[old_vocab_size + 16 + i] = bar_emb.clone()
-
-    model.tok_emb = new_tok_emb
-
-    old_head = model.head.weight.data
-    new_head = nn.Linear(d_model, new_vocab_size, bias=False)
-    nn.init.normal_(new_head.weight, std=0.02)
-    new_head.weight.data[:old_vocab_size] = old_head
-    for i in range(16):
-        new_head.weight.data[old_vocab_size + i] = old_head.mean(dim=0).clone()
-    for i in range(32):
-        new_head.weight.data[old_vocab_size + 16 + i] = old_head[BAR].clone()
-
-    model.head = new_head
-    model.cfg["vocab_size"] = new_vocab_size
-    return model
-
-
 def build_model(name: str, cfg: dict | None = None, override_cfg=False):
     """Build a model with expanded vocabulary."""
     from ml.tokenizer import VOCAB_SIZE

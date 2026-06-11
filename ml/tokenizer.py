@@ -1,7 +1,7 @@
 """
 Converts music21 scores to integer token sequences and back.
 
-Vocabulary layout:
+Vocabulary layout: (467 tokens)
   0        PAD
   1        BOS
   2        EOS
@@ -12,15 +12,16 @@ Vocabulary layout:
   154-174  REST      (same 21 duration bins)
   175-187  KEY_SIG   (-6 to +6 sharps)
   188-193  TIME_SIG  (common meters)
-  194-250  TEXT chars (printable ASCII 32-88, 57 values)
-  251-266  PART_0 to PART_15  (combined part+voice: part_idx*2 + voice_idx)
-  267-410  STEP_0 to STEP_143 (absolute offset within measure, 1/24 ql units)
-  411      GRACE  (next note/chord is a grace note; DUR carries its written duration)
-  412      FILL_START  (infill: end of prefix)
-  413      FILL_END    (infill: end of suffix, start of generation)
-  414      EMPTY_BAR   (infill: placeholder for empty measures)
-  415-430  TEMPO  (16 BPM buckets)
-  431-462  INSTR  (32 instrument categories; see INSTR_NAMES)
+  194-197  CLEF
+  198-254  TEXT chars (printable ASCII 32-88, 57 values)
+  255-270  PART_0 to PART_15  (combined part+voice: part_idx*2 + voice_idx)
+  271-414  STEP_0 to STEP_143 (absolute offset within measure, 1/24 ql units)
+  415      GRACE  (next note/chord is a grace note; DUR carries its written duration)
+  416      FILL_START  (infill: end of prefix)
+  417      FILL_END    (infill: end of suffix, start of generation)
+  418      EMPTY_BAR   (infill: placeholder for empty measures)
+  419-434  TEMPO  (16 BPM buckets)
+  435-466  INSTR  (32 instrument categories; see INSTR_NAMES)
 
 PART tokens encode both staff and voice: PART_{part*2 + voice}.
 Each token unambiguously identifies a single voice lane.  Supports up to
@@ -47,6 +48,8 @@ Instrument tokens appear once per part right after BOS (before the first BAR):
 """
 
 from __future__ import annotations
+import music21 as m21
+from collections import defaultdict
 
 # 21 duration bins (quarter-lengths), sorted ascending.
 # Includes common triplet values (1/6, 1/3, 2/3, 4/3, 8/3) so tuplet notes
@@ -62,6 +65,8 @@ DURATIONS = [
 ]
 
 TIME_SIGS = ["2/4", "3/4", "4/4", "6/8", "3/8", "12/8"]
+
+CLEFS = [ "treble", "bass", "alto", "tenor" ]
 
 MAX_REAL_PARTS      = 8
 MAX_VOICES_PER_PART = 2
@@ -95,8 +100,8 @@ INSTR_NAMES = [
     "clarinet",       # 14
     "bassoon",        # 15
     "saxophone",      # 16
-    "horn",           # 17
-    "trumpet",        # 18
+    "trumpet",        # 17
+    "horn",           # 18
     "trombone",       # 19
     "tuba",           # 20
     "percussion",     # 21
@@ -122,19 +127,20 @@ DUR_OFF  = NOTE_OFF + 128            # 133
 REST_OFF = DUR_OFF  + len(DURATIONS) # 154
 KEY_OFF  = REST_OFF + len(DURATIONS) # 175
 TIME_OFF = KEY_OFF  + 13             # 188
-TEXT_OFF = TIME_OFF + 6              # 194  (ASCII 32-88 = 57 chars)
-PART_OFF = TEXT_OFF + 57             # 251
-STEP_OFF = PART_OFF + MAX_PARTS      # 267
-GRACE    = STEP_OFF + MAX_STEP       # 411
+CLEF_OFF = TIME_OFF + 6              # 194
+TEXT_OFF = CLEF_OFF + 4              # 198  (ASCII 32-88 = 57 chars)
+PART_OFF = TEXT_OFF + 57             # 255
+STEP_OFF = PART_OFF + MAX_PARTS      # 271
+GRACE    = STEP_OFF + MAX_STEP       # 415
 
 # Infill special tokens (for fill-in-the-middle generation)
-FILL_START = GRACE + 1               # 412 - marks start of fill region (prefix ends here)
-FILL_END   = FILL_START + 1          # 413 - marks end of suffix, start of generation
-EMPTY_BAR  = FILL_END + 1            # 414 - placeholder for empty measures in input
+FILL_START = GRACE + 1               # 416 - marks start of fill region (prefix ends here)
+FILL_END   = FILL_START + 1          # 417 - marks end of suffix, start of generation
+EMPTY_BAR  = FILL_END + 1            # 418 - placeholder for empty measures in input
 
-TEMPO_OFF = EMPTY_BAR + 1            # 415
-INSTR_OFF = TEMPO_OFF + N_TEMPO      # 431
-VOCAB_SIZE = INSTR_OFF + N_INSTR     # 463
+TEMPO_OFF = EMPTY_BAR + 1            # 419
+INSTR_OFF = TEMPO_OFF + N_TEMPO      # 436
+VOCAB_SIZE = INSTR_OFF + N_INSTR     # 467
 
 
 def _closest_dur_idx(qlen: float) -> int:
@@ -157,7 +163,6 @@ def bpm_to_tempo_idx(bpm: float) -> int:
 
 def instrument_to_idx(part) -> int:
     """Determine the INSTR category index (0-31) for a music21 Part."""
-    import music21 as m21
 
     instrs = list(part.getElementsByClass(m21.instrument.Instrument))
     cls_name = type(instrs[0]).__name__.lower() if instrs else ""
@@ -214,27 +219,47 @@ def instrument_to_idx(part) -> int:
     return 0  # other / unknown
 
 
+def extract_part_clef(part: m21.stream.Part) -> int:
+    for measure in part.getElementsByClass(m21.stream.Measure):
+        for clef in measure.getElementsByClass(m21.clef.Clef):
+            if clef.name in CLEFS:
+                print('Found clef: ', clef.name, CLEFS.index(clef.name))
+                return CLEFS.index(clef.name)
+
+
 def score_to_header_tokens(score) -> list[int]:
-    """Returns one INSTR token per part (in order), to be emitted right after BOS."""
+    """Returns one INSTR token and one CLEF token per part (in order), to be emitted right after BOS."""
     parts = list(score.parts)[:MAX_REAL_PARTS]
-    return [INSTR_OFF + instrument_to_idx(p) for p in parts]
+    header_toks = []
+    for p in parts:
+        header_toks.extend([INSTR_OFF + instrument_to_idx(p), CLEF_OFF + extract_part_clef(p)])
+
+    return header_toks
 
 
 def _extract_measure_symbols(score):
-    """Extract per-measure KEY_SIG, TIME_SIG, and TEMPO tokens from the first part.
+    """Extract per-measure KEY_SIG, TIME_SIG, CLEF, and TEMPO tokens from the first part.
 
     Returns three dicts mapping measure_number -> token_id.
     Only measures that actually contain the element are included.
     """
-    import music21 as m21
 
     parts = list(score.parts)
     if not parts:
-        return {}, {}, {}
+        return {}, {}, {}, {}
 
     key_toks: dict[int, int] = {}
     time_toks: dict[int, int] = {}
+    clef_toks: dict[(int, int), int] = {}
     tempo_toks: dict[int, int] = {}
+
+    # clefs
+    for part_idx, part in enumerate(parts):
+        for m_num, measure in enumerate(part.getElementsByClass(m21.stream.Measure)):
+            for c in measure.getElementsByClass(m21.clef.Clef):
+                if c.name in CLEFS:
+                    clef_toks[(part_idx, m_num)] = CLEF_OFF + CLEFS.index(c.name)
+                break
 
     for measure in parts[0].getElementsByClass(m21.stream.Measure):
         m_num = measure.number if measure.number is not None else 0
@@ -256,7 +281,7 @@ def _extract_measure_symbols(score):
                 tempo_toks[m_num] = TEMPO_OFF + bpm_to_tempo_idx(float(mm.number))
             break
 
-    return key_toks, time_toks, tempo_toks
+    return key_toks, time_toks, clef_toks, tempo_toks
 
 
 def tokens_to_score(tokens: list[int]):
@@ -266,8 +291,6 @@ def tokens_to_score(tokens: list[int]):
     Using a list (rather than a dict keyed by offset) prevents silent overwrites
     when two events in the same lane round to the same quantised step.
     """
-    import music21 as m21
-    from collections import defaultdict
 
     # lane_events[combined][m_num] = [(offset_ql, element), ...]
     lane_events: dict = defaultdict(lambda: defaultdict(list))
@@ -276,11 +299,12 @@ def tokens_to_score(tokens: list[int]):
     cur_measure   = 0
     cur_offset    = 0.0
     next_is_grace = False
-    part_instrs: list[int] = []   # INSTR index per part, in order
+    part_instrs: list[(int, int)] = []   # INSTR index per part, in order
 
     # Accumulate global symbols per measure for score reconstruction
     measure_key_sigs: dict[int, int] = {}    # measure -> sharps value
     measure_time_sigs: dict[int, int] = {}   # measure -> TIME_SIGS index
+    measure_clefs: dict[(int, int), int] = {}   # instrument idx + measure -> CLEFS index
     measure_tempos: dict[int, float] = {}    # measure -> BPM
 
     i = 0
@@ -291,10 +315,10 @@ def tokens_to_score(tokens: list[int]):
             i += 1
             continue
 
-        # Instrument header tokens — collect so we can assign clefs later
+        # Instrument header tokens
         if INSTR_OFF <= t < INSTR_OFF + N_INSTR:
-            part_instrs.append(t - INSTR_OFF)
-            i += 1
+            part_instrs.append((t - INSTR_OFF, tokens[i + 1] - CLEF_OFF))
+            i += 2
             continue
 
         if t == BAR:
@@ -419,6 +443,8 @@ def tokens_to_score(tokens: list[int]):
                 measure.insert(0, m21.key.KeySignature(measure_key_sigs[m_num]))
             if m_num in measure_tempos and part_idx == 0:
                 measure.insert(0, m21.tempo.MetronomeMark(number=measure_tempos[m_num]))
+            if (part_idx, m_num) in measure_clefs and part_idx == 0:
+                measure.insert(0, m21.tempo.MetronomeMark(number=measure_tempos[m_num]))
 
             if len(voices_data) > 1:
                 for voice_idx in sorted(voices_data.keys()):
@@ -450,14 +476,7 @@ def tokens_to_score(tokens: list[int]):
             if measure.measureNumber in measure_time_sigs:
                 part.insert(measure.offset, m21.meter.TimeSignature(TIME_SIGS[measure_time_sigs[measure.measureNumber]])) # janky hack
 
-    # Assign clefs and instrument names to each part based on INSTR token.
-    # Without an explicit clef Verovio defaults to treble, which mis-positions the
-    # key signature symbols for low-register instruments.
-    # partName (no partAbbreviation) → Verovio shows the name on the first system only.
-    _BASS_CLEF_INSTRS  = {9, 10, 15, 19, 20, 28, 29}  # cello/double_bass/bassoon/trombone/tuba/voice_bass/baritone
-    _TENOR_CLEF_INSTRS = {27}                           # voice_tenor
-    # Keyboard instruments occupy two staves (treble + bass) in the score.
-    _KEYBOARD_INSTRS   = {1, 2, 3, 11}                 # piano, harpsichord, organ, harp
+    # Reconstruct clefs and instrument names
     _INSTR_DISPLAY = [
         "Part", "Piano", "Harpsichord", "Organ", "Accordion",
         "Guitar", "Bass Guitar", "Violin", "Viola", "Cello",
@@ -467,57 +486,22 @@ def tokens_to_score(tokens: list[int]):
         "Soprano", "Mezzo-Soprano", "Alto", "Tenor",
         "Baritone", "Bass", "Voice", "Choir",
     ]
+    for part_idx, part in enumerate(score.parts):
+        measure = list(part.getElementsByClass(m21.stream.Measure))[0]
+        instrument_idx, clef_idx = part_instrs[part_idx]
+        instrument = m21.instrument.Instrument(instrumentName=_INSTR_DISPLAY[instrument_idx])
+        measure.insert(0, instrument)
 
-    # Re-order and expand part_instrs so it aligns with the model's output layout:
-    # non-keyboard instruments appear at the top of the score (lower part_idx),
-    # keyboard instruments occupy two consecutive staves at the bottom.
-    # The API sends one INSTR token per distinct instrument regardless of stave count,
-    # so we expand keyboard entries to two here.
-    _non_kb = [i for i in part_instrs if i not in _KEYBOARD_INSTRS]
-    _kb     = [i for i in part_instrs if i in _KEYBOARD_INSTRS]
-    _expanded_instrs = _non_kb + [i for kb in _kb for i in (kb, kb)]
-    # Pad with 0 ("Part") in case the model generated more parts than expected
-    while len(_expanded_instrs) < len(score.parts):
-        _expanded_instrs.append(0)
-
-    # Sentinel values for pitch-inferred names (negative = never a real INSTR index)
-    _INFERRED_SOPRANO, _INFERRED_ALTO, _INFERRED_TENOR, _INFERRED_BASS = -1, -2, -3, -4
-    _INFERRED_NAMES = {
-        _INFERRED_SOPRANO: "Soprano",
-        _INFERRED_ALTO:    "Alto",
-        _INFERRED_TENOR:   "Tenor",
-        _INFERRED_BASS:    "Bass",
-    }
-
-    for pi, part in enumerate(score.parts):
-        measures = list(part.getElementsByClass(m21.stream.Measure))
-        if not measures:
-            continue
-        instr_idx = _expanded_instrs[pi]
-
-        if instr_idx in _BASS_CLEF_INSTRS or instr_idx == _INFERRED_BASS:
-            clef_obj = m21.clef.BassClef()
-        elif instr_idx in _TENOR_CLEF_INSTRS:
-            clef_obj = m21.clef.TenorClef()
-        else:
-            clef_obj = m21.clef.TrebleClef()
-        measures[0].insert(0, clef_obj)
-
-        instr_obj = m21.instrument.Instrument()
-        instr_obj.partName = (
-            _INFERRED_NAMES.get(instr_idx)
-            or (_INSTR_DISPLAY[instr_idx] if 0 <= instr_idx < len(_INSTR_DISPLAY) else "Part")
-        )
-        part.insert(0, instr_obj)
-
-    # makeBeams needs at least one time signature per part; insert a default 4/4 if none decoded.
-    # for part in score.parts:
-    #     measures = list(part.getElementsByClass(m21.stream.Measure))
-    #     if measures and not any(
-    #         list(m.getElementsByClass(m21.meter.TimeSignature)) for m in measures
-    #     ):
-    #         measures[0].insert(0, m21.meter.TimeSignature('4/4'))
-
+        if clef_idx == 0:
+            clef = m21.clef.TrebleClef()
+        elif clef_idx == 1:
+            clef = m21.clef.BassClef()
+        elif clef_idx == 2:
+            clef = m21.clef.AltoClef()
+        elif clef_idx == 3:
+            clef = m21.clef.TenorClef()
+        measure.insert(0, clef)
+        
     try:
         for part in score.parts:
             part.makeBeams(inPlace=True)
@@ -545,7 +529,6 @@ def identify_empty_measures(score) -> list[tuple[int, int]]:
     in that measure. Returns a list of (start_measure, end_measure) tuples
     for contiguous empty regions (inclusive).
     """
-    import music21 as m21
 
     parts = list(score.parts)[:MAX_REAL_PARTS]
     print(parts)
@@ -617,7 +600,6 @@ def score_to_tokens_by_measure(score) -> dict[int, list[int]]:
     Each measure's tokens start with BAR followed by optional KEY_SIG, TIME_SIG,
     and TEMPO tokens (only when present), then STEP/PART/note content.
     """
-    import music21 as m21
 
     parts = list(score.parts)[:MAX_REAL_PARTS]
     if not parts:
@@ -687,7 +669,7 @@ def score_to_tokens_by_measure(score) -> dict[int, list[int]]:
     #     for lane in active_lanes - present:
     #         evts.append((0.0, lane, [REST_OFF + dur_idx]))
 
-    key_toks, time_toks, tempo_toks = _extract_measure_symbols(score)
+    key_toks, time_toks, _, tempo_toks = _extract_measure_symbols(score)
 
     # Convert events to tokens per measure
     measure_tokens: dict[int, list[int]] = {}
