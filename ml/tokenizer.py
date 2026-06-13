@@ -485,32 +485,37 @@ def tokens_to_score(tokens: list[int]):
         "Soprano", "Mezzo-Soprano", "Alto", "Tenor",
         "Baritone", "Bass", "Voice", "Choir",
     ]
-    for part_idx, part in enumerate(score.parts):
-        measure = list(part.getElementsByClass(m21.stream.Measure))[0]
-        instrument_idx, clef_idx = part_instrs[part_idx]
-        instrument = m21.instrument.Instrument(instrumentName=_INSTR_DISPLAY[instrument_idx])
-        measure.insert(0, instrument)
 
-        if clef_idx == 0:
-            clef = m21.clef.TrebleClef()
-        elif clef_idx == 1:
-            clef = m21.clef.BassClef()
-        elif clef_idx == 2:
-            clef = m21.clef.AltoClef()
-        elif clef_idx == 3:
-            clef = m21.clef.TenorClef()
-        elif clef_idx == 4:
-            clef = m21.clef.Treble8vbClef()
-        elif clef_idx == 5:
-            clef = m21.clef.Treble8vaClef()
-        elif clef_idx == 6:
-            clef = m21.clef.Bass8vbClef()
-        measure.insert(0, clef)
+    if len(part_instrs) > 0:
+        for part_idx, part in enumerate(score.parts):
+            if part_idx >= len(part_instrs): continue
+            measure = list(part.getElementsByClass(m21.stream.Measure))[0]
+            instrument_idx, clef_idx = part_instrs[part_idx]
+            instrument = m21.instrument.Instrument(instrumentName=_INSTR_DISPLAY[instrument_idx])
+            measure.insert(0, instrument)
+
+            if clef_idx == 0:
+                clef = m21.clef.TrebleClef()
+            elif clef_idx == 1:
+                clef = m21.clef.BassClef()
+            elif clef_idx == 2:
+                clef = m21.clef.AltoClef()
+            elif clef_idx == 3:
+                clef = m21.clef.TenorClef()
+            elif clef_idx == 4:
+                clef = m21.clef.Treble8vbClef()
+            elif clef_idx == 5:
+                clef = m21.clef.Treble8vaClef()
+            elif clef_idx == 6:
+                clef = m21.clef.Bass8vbClef()
+            measure.insert(0, clef)
         
     try:
         for part in score.parts:
-            part.makeBeams(inPlace=True)
-            part.makeAccidentals(inPlace=True)
+            for measure in part.getElementsByClass(m21.stream.Measure):
+                measure.makeBeams(inPlace=True)
+                measure.makeAccidentals(inPlace=True)
+                measure.makeNotation(inPlace=True)
     except Exception as e:
         print(f"makeBeams error: {e}")
 

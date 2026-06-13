@@ -4,13 +4,71 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable, Generator
 
-from ml.tokenizer import tokens_to_score, score_to_xml_str, BOS, EOS, BAR
+from ml.tokenizer import tokens_to_score, score_to_xml_str, BOS, EOS, BAR, INSTR_OFF, CLEF_OFF
 from ml.model import load_model
 
 OUTPUT_DIR = Path("output")
 
+# Instrument indices that use two staves (treble + bass).
+_KEYBOARD_INSTRS = {1, 2, 3, 4}  # piano, harpsichord, organ, accordion
+
+
+def _expand_instr_indices(instr_indices: list[int]) -> list[int]:
+    """Expand keyboard instruments to two entries (one per staff).
+
+    A single piano entry becomes two entries so the model receives separate
+    INSTR+CLEF header tokens for the treble and bass staves.
+    """
+    expanded: list[int] = []
+    for idx in instr_indices:
+        expanded.append(idx)
+        if idx in _KEYBOARD_INSTRS:
+            expanded.append(idx)  # second staff (bass)
+    return expanded
+
+
+def _sample_header_clefs(model, instr_indices: list[int], temperature: float, top_k: int, device: str) -> list[int]:
+    """Given instrument indices, build a full header by letting the model sample a CLEF
+    token after each INSTR token, as it was trained to do.
+
+    Returns interleaved [INSTR_0, CLEF_0, INSTR_1, CLEF_1, ...] header tokens.
+    """
+    import torch
+
+    model.eval()
+    max_ctx = model.cfg["max_seq_len"]
+    idx = torch.tensor([[BOS]], dtype=torch.long, device=device)
+    header_tokens: list[int] = []
+
+    instr_indices = sorted(instr_indices, reverse=True)
+
+    with torch.no_grad():
+        for instr_idx in instr_indices:
+            instr_tok = INSTR_OFF + instr_idx
+            idx = torch.cat([idx, torch.tensor([[instr_tok]], dtype=torch.long, device=device)], dim=1)
+            header_tokens.append(instr_tok)
+
+            # Sample the next token; the model should predict a CLEF token here.
+            logits = model(idx[:, -max_ctx:])[:, -1, :] / max(temperature, 1e-6)
+            if top_k > 0:
+                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits[logits < v[:, [-1]]] = -float("Inf")
+            probs = torch.softmax(logits, dim=-1)
+            next_t = torch.multinomial(probs, num_samples=1)
+            clef_tok = next_t.item()
+
+            # Clamp to valid CLEF range in case the model predicts something unexpected.
+            if not (CLEF_OFF <= clef_tok < CLEF_OFF + 7):
+                clef_tok = CLEF_OFF  # fall back to treble
+
+            header_tokens.append(clef_tok)
+            idx = torch.cat([idx, torch.tensor([[clef_tok]], dtype=torch.long, device=device)], dim=1)
+
+    return header_tokens
+
+
 def generate_and_export(
-    header_tokens: list[int],
+    instr_indices: list[int],
     first_bar_prefix: list[int] | None = None,
     target_bars: int = 16,
     max_new: int = 2000,
@@ -23,7 +81,7 @@ def generate_and_export(
     """Generate a new score from scratch using the generation model.
 
     Args:
-        header_tokens: Instrument header tokens (from score_to_header_tokens)
+        instr_indices: Instrument category indices (0-31, one per part).
         first_bar_prefix: Tokens to force after the header, e.g.
             [BAR, KEY_SIG_token, TIME_SIG_token, TEMPO_token]. Defaults to [BAR].
         target_bars: Total number of measures to generate
@@ -40,6 +98,10 @@ def generate_and_export(
     model, _ = load_model(model_name, device)
     log(f"Model loaded ({model.num_params():,} params)")
 
+    expanded = _expand_instr_indices(instr_indices)
+    header_tokens = _sample_header_clefs(model, expanded, temperature, top_k, device)
+    log(f"Expanded instruments: {expanded}, sampled header: {header_tokens}")
+
     forced = first_bar_prefix if first_bar_prefix is not None else [BAR]
 
     generated = model.generate_standard(
@@ -50,6 +112,7 @@ def generate_and_export(
         temperature=temperature,
         top_k=top_k,
         device=device,
+        max_parts=len(expanded),
     )
 
     full_tokens = [BOS] + header_tokens + forced + generated + [EOS]
@@ -77,7 +140,7 @@ def generate_and_export(
 
 
 def generate_and_stream(
-    header_tokens: list[int],
+    instr_indices: list[int],
     first_bar_prefix: list[int] | None = None,
     target_bars: int = 16,
     max_new: int = 2000,
@@ -96,9 +159,12 @@ def generate_and_stream(
     model, _ = load_model(model_name, device)
     log(f"Model loaded ({model.num_params():,} params)")
 
+    expanded = _expand_instr_indices(instr_indices)
+    header_tokens = _sample_header_clefs(model, expanded, temperature, top_k, device)
+    log(f"Expanded instruments: {expanded}, sampled header: {header_tokens}")
+
     forced = first_bar_prefix if first_bar_prefix is not None else [BAR]
     n_forced_bars = forced.count(BAR)
-    prev_bar_count = n_forced_bars
     last_snapshot: list[int] = []
 
     for snapshot in model.generate_standard_stream(
@@ -109,6 +175,7 @@ def generate_and_stream(
         temperature=temperature,
         top_k=top_k,
         device=device,
+        max_parts=len(expanded),
     ):
         last_snapshot = snapshot
         bar_count = n_forced_bars + snapshot.count(BAR)

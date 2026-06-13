@@ -25,6 +25,7 @@ export default function ScoreViewer() {
   const setZoom = useStore((s) => s.setZoom)
   const selection = useStore((s) => s.selection)
   const setSelection = useStore((s) => s.setSelection)
+  const streamMode = useStore((s) => s.streamMode)
 
   const [pages, setPages] = useState<string[]>([])
   const outerRef = useRef<HTMLDivElement>(null)
@@ -82,7 +83,7 @@ export default function ScoreViewer() {
     }
     cachedPagesRef.current = updated
     setPages([...updated])
-  }, [ready, currentXml])
+  }, [ready, currentXml, streamMode])
 
   // Inject selection highlight rects directly into the SVG DOM.
   // No data-measure stamp needed: we query measures by selector at runtime.

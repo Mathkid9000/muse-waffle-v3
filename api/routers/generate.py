@@ -15,15 +15,14 @@ logger = logging.getLogger(__name__)
 
 
 def _run_generate(body: GenerateRequest) -> str:
-    from ml.tokenizer import BAR, KEY_OFF, TIME_OFF, TEMPO_OFF, INSTR_OFF
+    from ml.tokenizer import BAR, KEY_OFF, TIME_OFF, TEMPO_OFF
     from ml.generation_generator import generate_and_export
 
-    header_tokens = [INSTR_OFF + i for i in body.instruments]
     first_bar_prefix = [BAR, KEY_OFF + body.key, TIME_OFF + body.time_sig, TEMPO_OFF + body.tempo]
 
     logs: list[str] = []
     result = generate_and_export(
-        header_tokens=header_tokens,
+        instr_indices=body.instruments,
         first_bar_prefix=first_bar_prefix,
         target_bars=body.num_bars,
         max_new=body.max_new,
@@ -55,10 +54,9 @@ async def generate(body: GenerateRequest):
 
 @router.post("/generate/stream")
 async def generate_stream(body: GenerateRequest):
-    from ml.tokenizer import BAR, KEY_OFF, TIME_OFF, TEMPO_OFF, INSTR_OFF
+    from ml.tokenizer import BAR, KEY_OFF, TIME_OFF, TEMPO_OFF
     from ml.generation_generator import generate_and_stream
 
-    header_tokens = [INSTR_OFF + i for i in body.instruments]
     first_bar_prefix = [BAR, KEY_OFF + body.key, TIME_OFF + body.time_sig, TEMPO_OFF + body.tempo]
 
     loop = asyncio.get_running_loop()
@@ -67,7 +65,7 @@ async def generate_stream(body: GenerateRequest):
     def run():
         try:
             for bar, xml, total in generate_and_stream(
-                header_tokens=header_tokens,
+                instr_indices=body.instruments,
                 first_bar_prefix=first_bar_prefix,
                 target_bars=body.num_bars,
                 max_new=body.max_new,

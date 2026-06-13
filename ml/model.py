@@ -234,6 +234,7 @@ class MusicTransformer(nn.Module):
         temperature: float = 0.9,
         top_k: int = 50,
         device: str = "cuda" if __import__("torch").cuda.is_available() else "cpu",
+        max_parts: int | None = None,
     ) -> list[int]:
         """Generate tokens from scratch using the standard autoregressive format.
 
@@ -259,7 +260,7 @@ class MusicTransformer(nn.Module):
             Generated measure tokens (without BOS/EOS; prepend header and
             wrap with BOS/EOS when constructing the full sequence)
         """
-        from ml.tokenizer import BOS, EOS, BAR
+        from ml.tokenizer import BOS, EOS, BAR, PART_OFF, MAX_PARTS, MAX_VOICES_PER_PART
 
         self.eval()
 
@@ -280,6 +281,10 @@ class MusicTransformer(nn.Module):
             if top_k > 0:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
                 logits[logits < v[:, [-1]]] = float("-inf")
+
+            if max_parts is not None:
+                valid_end = PART_OFF + max_parts * MAX_VOICES_PER_PART
+                logits[:, valid_end:PART_OFF + MAX_PARTS] = float("-inf")
 
             if bar_count < target_bars:
                 logits[:, EOS] = float("-inf")
@@ -312,9 +317,10 @@ class MusicTransformer(nn.Module):
         temperature: float = 0.9,
         top_k: int = 50,
         device: str = "cuda" if __import__("torch").cuda.is_available() else "cpu",
+        max_parts: int | None = None,
     ):
         """Like generate_standard but yields accumulated token list after each completed BAR."""
-        from ml.tokenizer import BOS, EOS, BAR
+        from ml.tokenizer import BOS, EOS, BAR, PART_OFF, MAX_PARTS, MAX_VOICES_PER_PART
 
         self.eval()
 
@@ -334,6 +340,10 @@ class MusicTransformer(nn.Module):
             if top_k > 0:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
                 logits[logits < v[:, [-1]]] = float("-inf")
+
+            if max_parts is not None:
+                valid_end = PART_OFF + max_parts * MAX_VOICES_PER_PART
+                logits[:, valid_end:PART_OFF + MAX_PARTS] = float("-inf")
 
             if bar_count < target_bars:
                 logits[:, EOS] = float("-inf")

@@ -20,14 +20,16 @@ export default function AppendBar() {
     if (!currentXml) return
     setLoading(true)
     try {
-      const res = await api.append({
+      for await (const evt of api.streamAppend({
         xml: currentXml,
         num_bars: numBars,
         temperature,
         top_k: topK,
         device,
-      })
-      setXml(res.xml)
+      })) {
+        if (evt.xml) setXml(evt.xml)
+        if (evt.done) break
+      }
       setExpanded(false)
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e))
