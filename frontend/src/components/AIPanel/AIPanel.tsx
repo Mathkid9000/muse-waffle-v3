@@ -42,8 +42,9 @@ export default function AIPanel() {
   // Infill range — kept in sync with score selection
   const startMeasure = selection?.start ?? 1
   const endMeasure = selection?.end ?? 1
-  function setStartMeasure(v: number) { setSelection({ start: v, end: Math.max(v, endMeasure) }) }
-  function setEndMeasure(v: number) { setSelection({ start: Math.min(startMeasure, v), end: v }) }
+  const selectedParts = selection?.parts ?? null
+  function setStartMeasure(v: number) { setSelection({ start: v, end: Math.max(v, endMeasure), parts: selectedParts }) }
+  function setEndMeasure(v: number) { setSelection({ start: Math.min(startMeasure, v), end: v, parts: selectedParts }) }
   const [temperature, setTemperature] = useState(0.9)
   const [topK, setTopK] = useState(50)
   const [device, setDevice] = useState('cpu')
@@ -78,6 +79,7 @@ export default function AIPanel() {
         xml: currentXml,
         start_measure: startMeasure,
         end_measure: endMeasure,
+        parts: selectedParts,
         temperature,
         top_k: topK,
         device,
@@ -199,7 +201,12 @@ export default function AIPanel() {
       {tab === 'infill' && (
         <div className={styles.section}>
           <p className={styles.hint}>
-            Enter the measure range to fill with the AI model.
+            Click a staff in the score to select it, then drag to extend the measure range.
+          </p>
+          <p className={styles.hint}>
+            {selectedParts
+              ? `Staves: ${selectedParts.map((p) => p + 1).join(', ')}`
+              : 'Staves: all'}
           </p>
           <div className={styles.row}>
             <label className={styles.label}>

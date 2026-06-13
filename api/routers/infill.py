@@ -14,12 +14,18 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-def _mark_measures_empty(score, start: int, end: int) -> None:
-    """Replace note content in [start, end] with a hidden rest; preserve time/key/tempo."""
+def _mark_measures_empty(score, start: int, end: int, parts: list[int] | None = None) -> None:
+    """Replace note content in [start, end] with a hidden rest; preserve time/key/tempo.
+
+    If *parts* is given, only those 0-indexed part indices are blanked; the rest keep
+    their content so the model can use them as cross-staff context.
+    """
     import music21 as m21
 
     _structural = (m21.key.KeySignature, m21.meter.TimeSignature, m21.tempo.MetronomeMark, m21.clef.Clef)
-    for part in score.parts:
+    for idx, part in enumerate(score.parts):
+        if parts is not None and idx not in parts:
+            continue
         for measure in part.getElementsByClass(m21.stream.Measure):
             m_num = measure.number if measure.number is not None else 0
             if start <= m_num <= end:
@@ -37,7 +43,7 @@ def _run_infill(body: InfillRequest) -> str:
     from ml.infill_generator import infill_and_export
 
     score = m21.converter.parseData(body.xml, format="musicxml")
-    _mark_measures_empty(score, body.start_measure, body.end_measure)
+    _mark_measures_empty(score, body.start_measure, body.end_measure, body.parts)
 
     logs: list[str] = []
     result = infill_and_export(
@@ -48,6 +54,8 @@ def _run_infill(body: InfillRequest) -> str:
         top_k=body.top_k,
         log=logs.append,
         device=body.device,
+        gaps=[(body.start_measure, body.end_measure)],
+        target_parts=body.parts,
     )
 
     xml_path = result.get("xml", "")
@@ -80,7 +88,7 @@ async def infill_stream(body: InfillRequest):
     def run():
         try:
             score = m21.converter.parseData(body.xml, format="musicxml")
-            _mark_measures_empty(score, body.start_measure, body.end_measure)
+            _mark_measures_empty(score, body.start_measure, body.end_measure, body.parts)
             for bar, xml, total in infill_and_stream(
                 score=score,
                 model_name=body.model_name,
@@ -88,6 +96,8 @@ async def infill_stream(body: InfillRequest):
                 temperature=body.temperature,
                 top_k=body.top_k,
                 device=body.device,
+                gaps=[(body.start_measure, body.end_measure)],
+                target_parts=body.parts,
             ):
                 asyncio.run_coroutine_threadsafe(q.put(("data", bar, xml, total)), loop).result()
             asyncio.run_coroutine_threadsafe(q.put(("done",)), loop).result()

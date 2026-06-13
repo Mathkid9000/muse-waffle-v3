@@ -5,6 +5,7 @@ import styles from './ScoreViewer.module.css'
 import AppendBar from './AppendBar'
 
 const MEASURE_SEL = 'g.measure'
+const STAFF_SEL = 'g.staff'
 
 const svgParser = new DOMParser()
 
@@ -31,6 +32,7 @@ export default function ScoreViewer() {
   const outerRef = useRef<HTMLDivElement>(null)
   const innerRef = useRef<HTMLDivElement>(null)
   const dragStartRef = useRef<number | null>(null)
+  const dragStartStaffRef = useRef<number | null>(null)
   const zoomRef = useRef(zoom)
   zoomRef.current = zoom
 
@@ -86,7 +88,7 @@ export default function ScoreViewer() {
   }, [ready, currentXml, streamMode])
 
   // Inject selection highlight rects directly into the SVG DOM.
-  // No data-measure stamp needed: we query measures by selector at runtime.
+  // When selection.parts is set, highlight only those staff rows within each measure.
   useEffect(() => {
     const inner = innerRef.current
     if (!inner) return
@@ -96,30 +98,47 @@ export default function ScoreViewer() {
     const measures = inner.querySelectorAll<SVGGraphicsElement>(MEASURE_SEL)
     const ns = 'http://www.w3.org/2000/svg'
 
+    function addRect(parent: SVGGraphicsElement, bb: DOMRect | { x: number; y: number; width: number; height: number }) {
+      const rect = document.createElementNS(ns, 'rect')
+      rect.setAttribute('x', String(bb.x))
+      rect.setAttribute('y', String(bb.y))
+      rect.setAttribute('width', String(bb.width))
+      rect.setAttribute('height', String(bb.height))
+      rect.setAttribute('fill', 'rgba(26,115,232,0.18)')
+      rect.setAttribute('stroke', 'rgba(26,115,232,0.7)')
+      rect.setAttribute('stroke-width', '4')
+      rect.setAttribute('class', 'mw-sel')
+      rect.setAttribute('pointer-events', 'none')
+      parent.insertBefore(rect, parent.firstChild)
+    }
+
     for (let m = selection.start; m <= selection.end; m++) {
       const g = measures[m - 1]
       if (!g) continue
       try {
-        const bb = g.getBBox()
-        const rect = document.createElementNS(ns, 'rect')
-        rect.setAttribute('x', String(bb.x))
-        rect.setAttribute('y', String(bb.y))
-        rect.setAttribute('width', String(bb.width))
-        rect.setAttribute('height', String(bb.height))
-        rect.setAttribute('fill', 'rgba(26,115,232,0.18)')
-        rect.setAttribute('stroke', 'rgba(26,115,232,0.7)')
-        rect.setAttribute('stroke-width', '4')
-        rect.setAttribute('class', 'mw-sel')
-        rect.setAttribute('pointer-events', 'none')
-        g.insertBefore(rect, g.firstChild)
+        if (!selection.parts) {
+          // Highlight entire measure
+          addRect(g, g.getBBox())
+        } else {
+          // Highlight only selected staves within this measure
+          const staffEls = g.querySelectorAll<SVGGraphicsElement>(STAFF_SEL)
+          for (const partIdx of selection.parts) {
+            const staffEl = staffEls[partIdx]
+            if (!staffEl) continue
+            try {
+              addRect(g, staffEl.getBBox())
+            } catch { /* off-screen */ }
+          }
+        }
       } catch { /* getBBox unavailable off-screen */ }
     }
   }, [selection, pages])
 
-  // Returns the 1-based measure index for a mouse event.
+  // Returns the 1-based measure index and the 0-based staff index for a mouse event.
+  // staffIdx is null when the click doesn't land on a specific staff (e.g. barlines).
   // 1. Tries closest() — works when the click lands on a note/rest/barline child.
   // 2. Falls back to geometric hit-test — works when clicking empty staff space.
-  function measureAt(e: React.MouseEvent): number | null {
+  function measureAndStaffAt(e: React.MouseEvent): { measure: number; staffIdx: number | null } | null {
     const target = e.target
     if (!(target instanceof Element)) return null
     const inner = innerRef.current
@@ -129,22 +148,27 @@ export default function ScoreViewer() {
     if (allMeasures.length === 0) return null
 
     // Fast path: clicked element is inside a measure group
-    const direct = target.closest<Element>(MEASURE_SEL)
-    if (direct) {
-      const idx = Array.from(allMeasures).indexOf(direct as SVGGraphicsElement)
-      return idx >= 0 ? idx + 1 : null
+    const directMeasure = target.closest<Element>(MEASURE_SEL)
+    if (directMeasure) {
+      const mIdx = Array.from(allMeasures).indexOf(directMeasure as SVGGraphicsElement)
+      if (mIdx < 0) return null
+      const directStaff = target.closest<Element>(STAFF_SEL)
+      let staffIdx: number | null = null
+      if (directStaff && directMeasure.contains(directStaff)) {
+        const staffEls = Array.from(directMeasure.querySelectorAll(STAFF_SEL))
+        const si = staffEls.indexOf(directStaff as Element)
+        if (si >= 0) staffIdx = si
+      }
+      return { measure: mIdx + 1, staffIdx }
     }
 
     // Geometric fallback: map pointer into SVG coordinates and test bounding boxes.
-    // getScreenCTM() is unreliable when CSS zoom is applied; instead derive the transform
-    // from getBoundingClientRect() (zoom-aware) and the SVG viewBox.
     let svg = target.closest('svg') as SVGSVGElement | null
     if (!svg && target instanceof SVGSVGElement) svg = target
     if (!svg) return null
 
-
     const svgRect = svg.getBoundingClientRect()
-    const vb = (svg.querySelector(".definition-scale") as SVGSVGElement).viewBox.baseVal
+    const vb = (svg.querySelector('.definition-scale') as SVGSVGElement)?.viewBox?.baseVal
     if (!vb || svgRect.width === 0 || svgRect.height === 0) return null
 
     const scaleX = vb.width / svgRect.width
@@ -155,9 +179,21 @@ export default function ScoreViewer() {
     for (let i = 0; i < allMeasures.length; i++) {
       if (!svg.contains(allMeasures[i])) continue
       try {
-        const bb = allMeasures[i].getBBox()
-        if (x >= bb.x && x <= bb.x + bb.width && y >= bb.y && y <= bb.y + bb.height) {
-          return i + 1
+        const mBB = allMeasures[i].getBBox()
+        if (x >= mBB.x && x <= mBB.x + mBB.width && y >= mBB.y && y <= mBB.y + mBB.height) {
+          // Found the measure — try to narrow down to a specific staff
+          const staffEls = allMeasures[i].querySelectorAll<SVGGraphicsElement>(STAFF_SEL)
+          let staffIdx: number | null = null
+          for (let s = 0; s < staffEls.length; s++) {
+            try {
+              const sBB = staffEls[s].getBBox()
+              if (y >= sBB.y && y <= sBB.y + sBB.height) {
+                staffIdx = s
+                break
+              }
+            } catch { /* off-screen */ }
+          }
+          return { measure: i + 1, staffIdx }
         }
       } catch { }
     }
@@ -166,28 +202,38 @@ export default function ScoreViewer() {
   }
 
   function onMouseDown(e: React.MouseEvent) {
-    const m = measureAt(e)
-    if (m === null) {
+    const hit = measureAndStaffAt(e)
+    if (hit === null) {
       setSelection(null)
+      dragStartRef.current = null
+      dragStartStaffRef.current = null
       return
     }
     e.preventDefault()
-    dragStartRef.current = m
-    setSelection({ start: m, end: m })
+    dragStartRef.current = hit.measure
+    dragStartStaffRef.current = hit.staffIdx
+    // If the score has only one staff, treat as "all staves" (no per-staff selection)
+    const inner = innerRef.current
+    const firstMeasure = inner?.querySelector<Element>(MEASURE_SEL)
+    const staffCount = firstMeasure ? firstMeasure.querySelectorAll(STAFF_SEL).length : 0
+    const parts = staffCount > 1 && hit.staffIdx !== null ? [hit.staffIdx] : null
+    setSelection({ start: hit.measure, end: hit.measure, parts })
   }
 
   function onMouseMove(e: React.MouseEvent) {
     if (dragStartRef.current === null || !(e.buttons & 1)) return
-    const m = measureAt(e)
-    if (m === null) return
+    const hit = measureAndStaffAt(e)
+    if (hit === null) return
     setSelection({
-      start: Math.min(dragStartRef.current, m),
-      end: Math.max(dragStartRef.current, m),
+      start: Math.min(dragStartRef.current, hit.measure),
+      end: Math.max(dragStartRef.current, hit.measure),
+      parts: useStore.getState().selection?.parts ?? null,
     })
   }
 
   function onMouseUp() {
     dragStartRef.current = null
+    dragStartStaffRef.current = null
   }
 
   function onWheel(e: React.WheelEvent) {

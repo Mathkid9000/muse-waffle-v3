@@ -72,7 +72,8 @@ def merge_fill_into_score(
     fill_tokens: list[int],
     gap_start: int,
     gap_end: int,
-    color='red'
+    color='red',
+    target_parts: list[int] | None = None,
 ):
     """Insert generated tokens back into the score at correct measure positions.
 
@@ -119,6 +120,8 @@ def merge_fill_into_score(
 
     # Insert into original score
     for part_idx, part in enumerate(score.parts):
+        if target_parts is not None and part_idx not in target_parts:
+            continue
         if part_idx not in fill_measures:
             continue
 
@@ -179,6 +182,8 @@ def infill_and_export(
     top_k: int = 50,
     log: Callable[[str], None] = print,
     device: str = "cpu",
+    gaps: list[tuple[int, int]] | None = None,
+    target_parts: list[int] | None = None,
 ) -> dict[str, str]:
     """Main entry point for infill generation.
 
@@ -198,10 +203,9 @@ def infill_and_export(
     """
     import torch
 
-    # log(f"Loading partial XML: {xml_path}")
-    # score, gaps = load_partial_xml(xml_path)
-    gaps = identify_empty_measures(score)
-    
+    if gaps is None:
+        gaps = identify_empty_measures(score)
+
     if not gaps:
         log("No empty measures detected. Nothing to fill.")
         return {"midi": "", "xml": ""}
@@ -239,7 +243,7 @@ def infill_and_export(
         log(f"  Generated: {fill_tokens}")
 
         # Merge into score
-        merge_fill_into_score(score, fill_tokens, gap_start, gap_end)
+        merge_fill_into_score(score, fill_tokens, gap_start, gap_end, target_parts=target_parts)
         log(f"  Merged fill content into measures {gap_start}-{gap_end}")
 
     # Export results
@@ -288,6 +292,8 @@ def infill_and_stream(
     top_k: int = 50,
     log: Callable[[str], None] = print,
     device: str = "cpu",
+    gaps: list[tuple[int, int]] | None = None,
+    target_parts: list[int] | None = None,
 ) -> Generator[tuple[int, str, int], None, None]:
     """Stream partial MusicXML as each fill measure is generated.
 
@@ -296,7 +302,8 @@ def infill_and_stream(
     """
     import copy
 
-    gaps = identify_empty_measures(score)
+    if gaps is None:
+        gaps = identify_empty_measures(score)
     if not gaps:
         log("No empty measures detected.")
         return
@@ -331,7 +338,7 @@ def infill_and_stream(
             last_snapshot = snapshot
             bar_count = snapshot.count(BAR)
 
-            merge_fill_into_score(partial_score, snapshot, gap_start, gap_end)
+            merge_fill_into_score(partial_score, snapshot, gap_start, gap_end, target_parts=target_parts)
             try:
                 xml_str = score_to_xml_str(partial_score)
                 log(f"Infill stream: gap {i+1} bar {bar_count} of {target_bars}")
@@ -342,7 +349,7 @@ def infill_and_stream(
         # Final emit for this gap with complete last measure
         final_snapshot = last_snapshot
         final_score = copy.deepcopy(working_score)
-        merge_fill_into_score(final_score, final_snapshot, gap_start, gap_end)
+        merge_fill_into_score(final_score, final_snapshot, gap_start, gap_end, target_parts=target_parts)
         try:
             xml_str = score_to_xml_str(final_score)
             gap_bars = gap_end - gap_start + 1
@@ -352,7 +359,7 @@ def infill_and_stream(
             log(f"Infill final stream XML error: {e}")
 
         # Update working_score so subsequent gaps see filled content
-        merge_fill_into_score(working_score, final_snapshot, gap_start, gap_end)
+        merge_fill_into_score(working_score, final_snapshot, gap_start, gap_end, target_parts=target_parts)
 
 
 def create_test_partial_xml(output_path: str, empty_measures: list[int] = None):

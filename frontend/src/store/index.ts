@@ -3,6 +3,8 @@ import { create } from 'zustand'
 export interface MeasureSelection {
   start: number
   end: number
+  /** 0-indexed part/staff indices to target; null means all staves. */
+  parts: number[] | null
 }
 
 interface AppState {

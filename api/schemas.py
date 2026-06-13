@@ -39,6 +39,10 @@ class InfillRequest(BaseModel):
         return _decode_xml(v)
     start_measure: int = Field(..., ge=1, description="First measure of the gap (inclusive)")
     end_measure: int = Field(..., ge=1, description="Last measure of the gap (inclusive)")
+    parts: list[int] | None = Field(
+        None,
+        description="0-indexed part indices to fill; None fills all parts",
+    )
     temperature: float = Field(0.9, ge=0.1, le=2.0)
     top_k: int = Field(50, ge=1, le=200)
     model_name: str = Field("INFILL-D768-H8-L8", description="Infill model checkpoint name")

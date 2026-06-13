@@ -4,6 +4,8 @@ export interface InfillRequest {
   xml: string
   start_measure: number
   end_measure: number
+  /** 0-indexed part indices to fill; omit or null to fill all parts. */
+  parts?: number[] | null
   temperature?: number
   top_k?: number
   model_name?: string

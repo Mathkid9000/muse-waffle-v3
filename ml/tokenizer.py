@@ -480,10 +480,45 @@ def tokens_to_score(tokens: list[int]):
         "Part", "Piano", "Harpsichord", "Organ", "Accordion",
         "Guitar", "Bass Guitar", "Violin", "Viola", "Cello",
         "Double Bass", "Harp", "Flute", "Oboe", "Clarinet",
-        "Bassoon", "Saxophone", "Horn", "Trumpet", "Trombone",
+        "Bassoon", "Saxophone", "Trumpet", "Horn", "Trombone",
         "Tuba", "Percussion", "Timpani", "Celesta",
         "Soprano", "Mezzo-Soprano", "Alto", "Tenor",
         "Baritone", "Bass", "Voice", "Choir",
+    ]
+    # GM MIDI program numbers corresponding to each instrument index (matches INSTR_NAMES order)
+    _INSTR_MIDI = [
+        0,   # 0  other        → acoustic grand piano
+        0,   # 1  piano        → acoustic grand piano
+        6,   # 2  harpsichord  → harpsichord
+        19,  # 3  organ        → church organ
+        21,  # 4  accordion    → accordion
+        25,  # 5  guitar       → acoustic guitar (steel)
+        33,  # 6  bass_guitar  → electric bass (finger)
+        40,  # 7  violin       → violin
+        41,  # 8  viola        → viola
+        42,  # 9  cello        → cello
+        43,  # 10 double_bass  → contrabass
+        46,  # 11 harp         → orchestral harp
+        73,  # 12 flute        → flute
+        68,  # 13 oboe         → oboe
+        71,  # 14 clarinet     → clarinet
+        70,  # 15 bassoon      → bassoon
+        65,  # 16 saxophone    → alto sax
+        56,  # 17 trumpet      → trumpet
+        60,  # 18 horn         → french horn
+        57,  # 19 trombone     → trombone
+        58,  # 20 tuba         → tuba
+        0,   # 21 percussion   → (uses MIDI channel 9; program ignored)
+        47,  # 22 timpani      → timpani
+        8,   # 23 celesta      → celesta
+        52,  # 24 voice_soprano → choir aahs
+        52,  # 25 voice_mezzo  → choir aahs
+        52,  # 26 voice_alto   → choir aahs
+        52,  # 27 voice_tenor  → choir aahs
+        52,  # 28 voice_baritone → choir aahs
+        52,  # 29 voice_bass   → choir aahs
+        52,  # 30 voice        → choir aahs
+        52,  # 31 choir        → choir aahs
     ]
 
     if len(part_instrs) > 0:
@@ -492,6 +527,7 @@ def tokens_to_score(tokens: list[int]):
             measure = list(part.getElementsByClass(m21.stream.Measure))[0]
             instrument_idx, clef_idx = part_instrs[part_idx]
             instrument = m21.instrument.Instrument(instrumentName=_INSTR_DISPLAY[instrument_idx])
+            instrument.midiProgram = _INSTR_MIDI[instrument_idx]
             measure.insert(0, instrument)
 
             if clef_idx == 0:
