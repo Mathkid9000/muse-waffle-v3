@@ -514,10 +514,9 @@ def tokens_to_score(tokens: list[int]):
         for part in score.parts:
             for measure in part.getElementsByClass(m21.stream.Measure):
                 measure.makeBeams(inPlace=True)
-                measure.makeAccidentals(inPlace=True)
-                measure.makeNotation(inPlace=True)
+            part.makeAccidentals(inPlace=True, overrideStatus=True)
     except Exception as e:
-        print(f"makeBeams error: {e}")
+        print(f"makeBeams/makeAccidentals error: {e}")
 
     return score
 

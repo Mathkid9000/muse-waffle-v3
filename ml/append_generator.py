@@ -117,6 +117,7 @@ def append_and_export(
     try:
         for part in orig_score.parts:
             part.makeBeams(inPlace=True)
+            part.makeAccidentals(inPlace=True, overrideStatus=True)
     except Exception as e:
         log(f"makeBeams skipped: {e}")
 
@@ -227,6 +228,11 @@ def append_and_stream(
                     rest_m.append(m21.note.Rest(quarterLength=4.0))
                     orig_part.append(rest_m)
 
+            try:
+                for part in partial_score.parts:
+                    part.makeAccidentals(inPlace=True, overrideStatus=True)
+            except Exception:
+                pass
             xml_out = score_to_xml_str(partial_score)
             # log(f"Streamed {new_bars} new bar(s) of {num_bars}")
             yield (new_bars, xml_out, num_bars)
@@ -261,6 +267,7 @@ def append_and_stream(
         try:
             for part in final_score.parts:
                 part.makeBeams(inPlace=True)
+                part.makeAccidentals(inPlace=True, overrideStatus=True)
         except Exception:
             pass
 
