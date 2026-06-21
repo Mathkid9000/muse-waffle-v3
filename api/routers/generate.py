@@ -64,7 +64,7 @@ async def generate_stream(body: GenerateRequest):
 
     def run():
         try:
-            for bar, xml, total in generate_and_stream(
+            for bar, xml, total, num_instr in generate_and_stream(
                 instr_indices=body.instruments,
                 first_bar_prefix=first_bar_prefix,
                 target_bars=body.num_bars,
@@ -74,7 +74,7 @@ async def generate_stream(body: GenerateRequest):
                 device=body.device,
                 model_name=body.model_name,
             ):
-                asyncio.run_coroutine_threadsafe(q.put(("data", bar, xml, total)), loop).result()
+                asyncio.run_coroutine_threadsafe(q.put(("data", bar, xml, total, num_instr)), loop).result()
             asyncio.run_coroutine_threadsafe(q.put(("done",)), loop).result()
         except Exception as e:
             logger.error("Generate stream error:\n%s", traceback.format_exc())
@@ -92,8 +92,8 @@ async def generate_stream(body: GenerateRequest):
                 yield f"data: {json.dumps({'error': item[1]})}\n\n"
                 break
             else:
-                _, bar, xml, total = item
-                yield f"data: {json.dumps({'xml': xml, 'bar': bar, 'total': total})}\n\n"
+                _, bar, xml, total, instr_num = item
+                yield f"data: {json.dumps({'xml': xml, 'bar': bar, 'total': total, 'instr_num': instr_num})}\n\n"
 
     return StreamingResponse(
         event_gen(),

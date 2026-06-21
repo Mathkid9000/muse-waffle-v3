@@ -184,7 +184,7 @@ def generate_and_stream(
         score = tokens_to_score(full_tokens)
         xml_str = score_to_xml_str(score)
         log(f"Streamed bar {bar_count} of {target_bars}")
-        yield (bar_count, xml_str, target_bars)
+        yield (bar_count, xml_str, target_bars, len(header_tokens) // 2)
 
     # Always emit the final complete score (last measure now has its notes)
     full_tokens = [BOS] + header_tokens + forced + last_snapshot + [EOS]
@@ -193,6 +193,6 @@ def generate_and_stream(
         xml_str = score_to_xml_str(score)
         final_bar = n_forced_bars + last_snapshot.count(BAR)
         log(f"Stream complete: {final_bar} bars")
-        yield (final_bar, xml_str, target_bars)
+        yield (final_bar, xml_str, target_bars, len(header_tokens) // 2)
     except Exception as e:
         log(f"Final stream XML export error: {e}")

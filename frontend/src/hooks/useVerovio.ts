@@ -5,7 +5,8 @@ import { VerovioToolkit } from 'verovio/esm'
 let shared: VerovioToolkit | null = null
 let loadingPromise: Promise<VerovioToolkit> | null = null
 
-const PAGE_HEIGHT = 800
+const PAGE_HEIGHT_PER_INSTRUMENT = 140
+const PAGE_MARGIN = 120
 
 async function loadVerovio(): Promise<VerovioToolkit> {
   if (shared) return shared
@@ -17,10 +18,10 @@ async function loadVerovio(): Promise<VerovioToolkit> {
   return loadingPromise
 }
 
-function applyOptions(tk: VerovioToolkit, pageWidth: number, scale: number): void {
+function applyOptions(tk: VerovioToolkit, pageWidth: number, scale: number, instr_num: number): void {
   tk.setOptions({
     pageWidth,
-    pageHeight: PAGE_HEIGHT,
+    pageHeight: PAGE_HEIGHT_PER_INSTRUMENT * instr_num + PAGE_MARGIN * 2,
     breaks: 'auto',
     scale,
     footer: 'none',
@@ -45,9 +46,9 @@ export function getSharedToolkit(): VerovioToolkit | null {
  * Returns 0 if the toolkit is not ready or the data fails to load.
  * After this call, getSharedToolkit()!.renderToSVG(page) can be called directly.
  */
-export function loadAndGetPageCount(data: string, pageWidth: number, scale: number): number {
+export function loadAndGetPageCount(data: string, pageWidth: number, scale: number, instr_num: number): number {
   if (!shared) return 0
-  applyOptions(shared, pageWidth, scale)
+  applyOptions(shared, pageWidth, scale, instr_num)
   if (!loadScore(shared, data)) return 0
   return shared.getPageCount()
 }
@@ -108,10 +109,10 @@ export function useVerovio() {
     })
   }, [])
 
-  function renderXml(data: string, pageWidth: number, scale: number): string[] {
+  function renderXml(data: string, pageWidth: number, scale: number, instr_num: number): string[] {
     const tk = tkRef.current
     if (!tk) return []
-    applyOptions(tk, pageWidth, scale)
+    applyOptions(tk, pageWidth, scale, instr_num)
     if (!loadScore(tk, data)) return []
     const pageCount = tk.getPageCount()
     return Array.from({ length: pageCount }, (_, i) => tk.renderToSVG(i + 1))

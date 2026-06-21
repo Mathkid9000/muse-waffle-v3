@@ -27,11 +27,13 @@ const TEMPO_LABELS = [
 export default function AIPanel() {
   const [tab, setTab] = useState<Tab>('infill')
   const currentXml = useStore((s) => s.currentXml)
+  const scoreData = useStore((s) => s.scoreData)
   const loading = useStore((s) => s.loading)
   const error = useStore((s) => s.error)
   const selection = useStore((s) => s.selection)
   const setSelection = useStore((s) => s.setSelection)
   const setXml = useStore((s) => s.setXml)
+  const setScoreData = useStore((s) => s.setScoreData)
   const setLoading = useStore((s) => s.setLoading)
   const setError = useStore((s) => s.setError)
   const streamBar = useStore((s) => s.streamBar)
@@ -105,6 +107,10 @@ export default function AIPanel() {
     setLoading(true)
     setStreamMode('generate')
     setStreamProgress(0, numBars)
+
+    setScoreData({  numInstruments: 0 })
+    let newScoreData = {  numInstruments: 0 }
+
     try {
       for await (const evt of api.streamGenerate({
         instruments: selectedInstrs,
@@ -117,6 +123,11 @@ export default function AIPanel() {
         device: genDevice,
       })) {
         if (evt.xml) setXml(evt.xml)
+        if (evt.instr_num) {
+          newScoreData.numInstruments = evt.instr_num
+          console.log("NUM INSTRUMENT:", newScoreData)
+          setScoreData(newScoreData)
+        }
         if (evt.bar != null && evt.total != null) setStreamProgress(evt.bar, evt.total)
         if (evt.done) break
       }

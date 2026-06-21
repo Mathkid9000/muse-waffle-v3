@@ -22,6 +22,7 @@ function buildMeasureMap(svgs: string[]): Map<number, number> {
 export default function ScoreViewer() {
   const { ready, renderXml } = useVerovio()
   const currentXml = useStore((s) => s.currentXml)
+  const scoreData = useStore((s) => s.scoreData)
   const zoom = useStore((s) => s.zoom)
   const setZoom = useStore((s) => s.setZoom)
   const selection = useStore((s) => s.selection)
@@ -53,7 +54,7 @@ export default function ScoreViewer() {
 
     if (!tk || !streamMode || cachedPagesRef.current.length === 0) {
       // Full render: initial load, not streaming, or cache empty (first streaming event)
-      const allPages = renderXml(currentXml, w * 2.5, 40)
+      const allPages = renderXml(currentXml, w * 2.5, 40, scoreData.numInstruments)
       cachedPagesRef.current = allPages
       measureToPageRef.current = buildMeasureMap(allPages)
       setPages(allPages)
@@ -62,7 +63,7 @@ export default function ScoreViewer() {
 
     // Incremental: loadAndGetPageCount applies options + loads data into the shared tk
     const prevCount = cachedPagesRef.current.length
-    const newCount = loadAndGetPageCount(currentXml, w * 2.5, 40)
+    const newCount = loadAndGetPageCount(currentXml, w * 2.5, 40, scoreData.numInstruments)
     if (newCount === 0) return
 
     let startPage: number
