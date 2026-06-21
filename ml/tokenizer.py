@@ -204,8 +204,8 @@ def instrument_to_idx(part) -> int:
     if "saxophone" in name or "saxophon" in name:             return 16
 
     # Brass
-    if "horn" in name:                                         return 17
-    if "trumpet" in name or "cornet" in name:                 return 18
+    if "trumpet" in name or "cornet" in name:                 return 17
+    if "horn" in name:                                         return 18
     if "trombone" in name:                                     return 19
     if "tuba" in name:                                         return 20
 
@@ -224,6 +224,7 @@ def extract_part_clef(part: m21.stream.Part) -> int:
         for clef in measure.getElementsByClass(m21.clef.Clef):
             if clef.name in CLEFS:
                 return CLEFS.index(clef.name)
+    return 0  # default to treble clef
 
 
 def score_to_header_tokens(score) -> list[int]:
@@ -442,8 +443,15 @@ def tokens_to_score(tokens: list[int]):
                 measure.insert(0, m21.key.KeySignature(measure_key_sigs[m_num]))
             if m_num in measure_tempos and part_idx == 0:
                 measure.insert(0, m21.tempo.MetronomeMark(number=measure_tempos[m_num]))
-            if (part_idx, m_num) in measure_clefs and part_idx == 0:
-                measure.insert(0, m21.tempo.MetronomeMark(number=measure_tempos[m_num]))
+            if (part_idx, m_num) in measure_clefs:
+                clef_idx = measure_clefs[(part_idx, m_num)]
+                clef_map = [
+                    m21.clef.TrebleClef, m21.clef.BassClef, m21.clef.AltoClef,
+                    m21.clef.TenorClef, m21.clef.Treble8vbClef, m21.clef.Treble8vaClef,
+                    m21.clef.Bass8vbClef,
+                ]
+                if 0 <= clef_idx < len(clef_map):
+                    measure.insert(0, clef_map[clef_idx]())
 
             if len(voices_data) > 1:
                 for voice_idx in sorted(voices_data.keys()):
@@ -576,7 +584,6 @@ def identify_empty_measures(score) -> list[tuple[int, int]]:
     """
 
     parts = list(score.parts)[:MAX_REAL_PARTS]
-    print(parts)
     if not parts:
         return []
 
@@ -586,8 +593,6 @@ def identify_empty_measures(score) -> list[tuple[int, int]]:
         for measure in part.getElementsByClass(m21.stream.Measure):
             m_num = measure.number if measure.number is not None else 0
             all_measure_nums.add(m_num)
-
-    print(all_measure_nums)
 
     if not all_measure_nums:
         return []
@@ -604,11 +609,12 @@ def identify_empty_measures(score) -> list[tuple[int, int]]:
                 break
             measure = measures[0]
             notes_and_rests = list(measure.flatten().notesAndRests)
+            if len(notes_and_rests) == 0:
+                continue  # truly empty measure, still possibly empty across parts
             if len(notes_and_rests) != 1:
                 is_empty = False
                 break
             el = notes_and_rests[0]
-            print(f"{el}, {el.isRest}, {el.style.hideObjectOnPrint}")
             if not el.isRest:
                 is_empty = False
                 break

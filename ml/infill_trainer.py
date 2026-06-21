@@ -21,7 +21,6 @@ from ml.trainer import _train_loop
 def create_fim_example(
     header_tokens: list[int],
     measure_tokens: dict[int, list[int]],
-    gap_ratio: float = 0.15,
     min_gap: int = 1,
     max_gap: int = 4,
     max_context_measures: int = 16,
@@ -31,7 +30,6 @@ def create_fim_example(
     Args:
         header_tokens: Instrument header tokens for this score
         measure_tokens: Dict mapping measure number to tokens for that measure
-        gap_ratio: Target ratio of gap measures to total measures
         min_gap: Minimum number of measures to use as gap
         max_gap: Maximum number of measures to use as gap
         max_context_measures: Max measures of prefix/suffix context to include

@@ -4,3 +4,4 @@ env.env
 todo.txt
 .claude
 *__pycache__
+notebooks/

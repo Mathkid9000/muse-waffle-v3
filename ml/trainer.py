@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import json
+import math
 import random
 from pathlib import Path
 from typing import Callable
@@ -172,12 +173,20 @@ def _train_loop(
     fim_ratio: float = 0.0,
     fim_example_fn=None,
     resume_optimizer: bool = False,
+    accumulation_steps: int = 1,
+    use_amp: bool = True,
+    warmup_ratio: float = 0.05,
 ):
     """Core training loop shared by all model trainers.
 
     Handles val split persistence, sequence loading, dataset creation,
     optimizer setup, epoch loop, checkpointing, and the on_epoch callback.
     Saves checkpoints to model_paths(name)["weights"] / ["optimizer"].
+
+    Training features:
+        - Linear LR warmup (warmup_ratio of total steps) + cosine decay
+        - Automatic mixed precision (AMP) when use_amp=True and on CUDA
+        - Gradient accumulation over accumulation_steps mini-batches
     """
     paths = model_paths(name)
     paths["dir"].mkdir(parents=True, exist_ok=True)
@@ -213,12 +222,33 @@ def _train_loop(
     val_loader = DataLoader(val_set,   batch_size=batch_size, shuffle=False, drop_last=False)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.1)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-5)
+
+    # LR schedule: linear warmup then cosine decay
+    total_steps = epochs * len(loader)
+    warmup_steps = int(total_steps * warmup_ratio)
+
+    def lr_lambda(step):
+        if step < warmup_steps:
+            return step / max(warmup_steps, 1)
+        progress = (step - warmup_steps) / max(total_steps - warmup_steps, 1)
+        return max(1e-5 / lr, 0.5 * (1.0 + math.cos(math.pi * progress)))
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
     if paths["optimizer"].exists() and resume_optimizer:
         optimizer.load_state_dict(torch.load(paths["optimizer"], map_location=device, weights_only=False))
         log("Resumed optimizer state from previous session.")
     model.to(device)
+
+    # AMP setup (only effective on CUDA)
+    amp_enabled = use_amp and device == "cuda"
+    scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
+    amp_dtype = torch.float16
+
+    if amp_enabled:
+        log("Mixed-precision training enabled (float16).")
+    if accumulation_steps > 1:
+        log(f"Gradient accumulation: {accumulation_steps} steps (effective batch = {batch_size * accumulation_steps}).")
 
     for epoch in range(1, epochs + 1):
         if stop_flag[0]:
@@ -228,30 +258,38 @@ def _train_loop(
         model.train()
         epoch_loss = 0.0
         batches    = 0
+        optimizer.zero_grad()
 
-        for x, y, loss_mask in tqdm(loader, desc=f"{name.capitalize()} Epoch {epoch}"):
+        for step, (x, y, loss_mask) in enumerate(tqdm(loader, desc=f"{name.capitalize()} Epoch {epoch}")):
             if stop_flag[0]:
                 break
 
             x, y, loss_mask = x.to(device), y.to(device), loss_mask.to(device)
-            logits = model(x)
 
-            logits_flat = logits.view(-1, logits.size(-1))
-            y_flat      = y.view(-1)
-            mask_flat   = loss_mask.view(-1)
+            with torch.amp.autocast(device, dtype=amp_dtype, enabled=amp_enabled):
+                logits = model(x)
+                logits_flat = logits.view(-1, logits.size(-1))
+                y_flat      = y.view(-1)
+                mask_flat   = loss_mask.view(-1)
 
-            loss_per_token = nn.functional.cross_entropy(
-                logits_flat, y_flat, ignore_index=PAD, reduction='none'
-            )
-            masked_loss = loss_per_token * mask_flat
-            loss = masked_loss.sum() / (mask_flat.sum() + 1e-8)
+                loss_per_token = nn.functional.cross_entropy(
+                    logits_flat, y_flat, ignore_index=PAD, reduction='none'
+                )
+                masked_loss = loss_per_token * mask_flat
+                loss = masked_loss.sum() / (mask_flat.sum() + 1e-8)
+                loss = loss / accumulation_steps
 
-            optimizer.zero_grad()
-            loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
+            scaler.scale(loss).backward()
 
-            epoch_loss += loss.item()
+            if (step + 1) % accumulation_steps == 0 or (step + 1) == len(loader):
+                scaler.unscale_(optimizer)
+                nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
+                scheduler.step()
+
+            epoch_loss += loss.item() * accumulation_steps
             batches    += 1
 
         avg_loss = epoch_loss / max(batches, 1)
@@ -263,21 +301,21 @@ def _train_loop(
         with torch.no_grad():
             for x, y, loss_mask in val_loader:
                 x, y, loss_mask = x.to(device), y.to(device), loss_mask.to(device)
-                logits = model(x)
 
-                logits_flat = logits.view(-1, logits.size(-1))
-                y_flat      = y.view(-1)
-                mask_flat   = loss_mask.view(-1)
+                with torch.amp.autocast(device, dtype=amp_dtype, enabled=amp_enabled):
+                    logits = model(x)
+                    logits_flat = logits.view(-1, logits.size(-1))
+                    y_flat      = y.view(-1)
+                    mask_flat   = loss_mask.view(-1)
 
-                loss_per_token = nn.functional.cross_entropy(
-                    logits_flat, y_flat, ignore_index=PAD, reduction='none'
-                )
-                masked_loss = loss_per_token * mask_flat
-                val_loss   += (masked_loss.sum() / (mask_flat.sum() + 1e-8)).item()
-                val_batches += 1
+                    loss_per_token = nn.functional.cross_entropy(
+                        logits_flat, y_flat, ignore_index=PAD, reduction='none'
+                    )
+                    masked_loss = loss_per_token * mask_flat
+                    val_loss   += (masked_loss.sum() / (mask_flat.sum() + 1e-8)).item()
+                    val_batches += 1
 
         avg_val_loss = val_loss / max(val_batches, 1)
-        scheduler.step()
         on_epoch(epoch, avg_loss, avg_val_loss)
 
         torch.save(model.state_dict(), paths["weights"])

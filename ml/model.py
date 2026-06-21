@@ -108,6 +108,15 @@ class MusicTransformer(nn.Module):
         self.head    = nn.Linear(d, cfg["vocab_size"], bias=False)
         self.apply(self._init_weights)
 
+        # Scale residual projections by 1/sqrt(2*n_layers) for stable deep training
+        residual_scale = 1.0 / math.sqrt(2 * cfg["n_layers"])
+        for block in self.blocks:
+            nn.init.normal_(block.attn.proj.weight, std=0.02 * residual_scale)
+            nn.init.normal_(block.mlp[-2].weight, std=0.02 * residual_scale)
+
+        # Weight tying: share embedding and output head weights
+        self.head.weight = self.tok_emb.weight
+
     def _init_weights(self, m: nn.Module):
         if isinstance(m, (nn.Linear, nn.Embedding)):
             nn.init.normal_(m.weight, std=0.02)
@@ -215,7 +224,6 @@ class MusicTransformer(nn.Module):
 
             if next_token == BAR:
                 bar_count += 1
-                print(f'Written {bar_count} bars of {target_bars}')
                 if bar_count > target_bars:
                     break  # next measure starting — all target measures are complete
 
@@ -298,7 +306,6 @@ class MusicTransformer(nn.Module):
 
             if next_token == BAR:
                 bar_count += 1
-                print(f'Written {bar_count} bars of {target_bars}')
                 if bar_count > target_bars:
                     break
 
@@ -427,7 +434,6 @@ class MusicTransformer(nn.Module):
 
 def append_epoch_to_config(name: str, cfg: dict, training_loss, val_loss):
     if cfg is None:
-        print("Will not overwrite config with null config")
         return
 
     if 'epoches' not in cfg:
@@ -443,7 +449,6 @@ def load_model(
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
 ) -> tuple[MusicTransformer, dict]:
     paths = model_paths(name)
-    print(paths)
     config_path = paths["config"]
     if not config_path.exists() and name == "infill":
         legacy = CHECKPOINT_DIR / "config.json"
