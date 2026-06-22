@@ -5,8 +5,8 @@ import { VerovioToolkit } from 'verovio/esm'
 let shared: VerovioToolkit | null = null
 let loadingPromise: Promise<VerovioToolkit> | null = null
 
-const PAGE_HEIGHT_PER_INSTRUMENT = 140
-const PAGE_MARGIN = 120
+const PAGE_HEIGHT_PER_INSTRUMENT = 160
+const PAGE_MARGIN = 140
 
 async function loadVerovio(): Promise<VerovioToolkit> {
   if (shared) return shared
@@ -51,6 +51,19 @@ export function loadAndGetPageCount(data: string, pageWidth: number, scale: numb
   applyOptions(shared, pageWidth, scale, instr_num)
   if (!loadScore(shared, data)) return 0
   return shared.getPageCount()
+}
+
+/**
+ * Counts staves in the score's first measure — used as the instrument count when
+ * opening a file, since each instrument in this app occupies exactly one staff.
+ */
+export async function countInstruments(data: string): Promise<number> {
+  const tk = await loadVerovio()
+  applyOptions(tk, 1000, 40, 1)
+  if (!loadScore(tk, data)) return 1
+  const doc = new DOMParser().parseFromString(tk.renderToSVG(1), 'image/svg+xml')
+  const count = doc.querySelector('g.measure')?.querySelectorAll('g.staff').length ?? 0
+  return count > 0 ? count : 1
 }
 
 /** Returns base64-encoded MIDI for the currently-loaded score. */

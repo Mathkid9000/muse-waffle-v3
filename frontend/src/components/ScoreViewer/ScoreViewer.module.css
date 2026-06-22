@@ -1,9 +1,18 @@
 .outer {
+  position: relative;
   height: 100%;
   overflow: auto;
   background: #2d2d2d;
   cursor: crosshair;
   user-select: none;
+}
+
+.marquee {
+  position: absolute;
+  pointer-events: none;
+  background: rgba(26, 115, 232, 0.12);
+  border: 1px solid rgba(26, 115, 232, 0.7);
+  z-index: 10;
 }
 
 .pages {

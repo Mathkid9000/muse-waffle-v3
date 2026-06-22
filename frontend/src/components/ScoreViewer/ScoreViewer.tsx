@@ -30,10 +30,12 @@ export default function ScoreViewer() {
   const streamMode = useStore((s) => s.streamMode)
 
   const [pages, setPages] = useState<string[]>([])
+  const [marquee, setMarquee] = useState<{ left: number; top: number; width: number; height: number } | null>(null)
   const outerRef = useRef<HTMLDivElement>(null)
   const innerRef = useRef<HTMLDivElement>(null)
-  const dragStartRef = useRef<number | null>(null)
-  const dragStartStaffRef = useRef<number | null>(null)
+  const dragStartClientRef = useRef<{ x: number; y: number } | null>(null)
+  const rectCacheRef = useRef<Array<{ measure: number; staff: number; rect: DOMRect }>>([])
+  const staffCountRef = useRef(0)
   const zoomRef = useRef(zoom)
   zoomRef.current = zoom
 
@@ -202,39 +204,95 @@ export default function ScoreViewer() {
     return null
   }
 
+  // Cache a client-space rect for every staff in every measure, so the drag
+  // marquee can hit-test without thrashing layout on each mousemove.
+  function buildRectCache() {
+    const inner = innerRef.current
+    const cache: Array<{ measure: number; staff: number; rect: DOMRect }> = []
+    if (!inner) {
+      rectCacheRef.current = cache
+      staffCountRef.current = 0
+      return
+    }
+    const measures = inner.querySelectorAll<SVGGraphicsElement>(MEASURE_SEL)
+    let staffCount = 0
+    measures.forEach((m, mIdx) => {
+      const staffEls = m.querySelectorAll<SVGGraphicsElement>(STAFF_SEL)
+      if (mIdx === 0) staffCount = staffEls.length
+      staffEls.forEach((s, sIdx) => {
+        cache.push({ measure: mIdx + 1, staff: sIdx, rect: s.getBoundingClientRect() })
+      })
+    })
+    rectCacheRef.current = cache
+    staffCountRef.current = staffCount
+  }
+
   function onMouseDown(e: React.MouseEvent) {
+    e.preventDefault()
+    dragStartClientRef.current = { x: e.clientX, y: e.clientY }
+    buildRectCache()
+    setMarquee(null)
+
+    // Immediate single-click feedback (drag may override this on mousemove).
     const hit = measureAndStaffAt(e)
     if (hit === null) {
       setSelection(null)
-      dragStartRef.current = null
-      dragStartStaffRef.current = null
       return
     }
-    e.preventDefault()
-    dragStartRef.current = hit.measure
-    dragStartStaffRef.current = hit.staffIdx
-    // If the score has only one staff, treat as "all staves" (no per-staff selection)
-    const inner = innerRef.current
-    const firstMeasure = inner?.querySelector<Element>(MEASURE_SEL)
-    const staffCount = firstMeasure ? firstMeasure.querySelectorAll(STAFF_SEL).length : 0
+    const staffCount = staffCountRef.current
     const parts = staffCount > 1 && hit.staffIdx !== null ? [hit.staffIdx] : null
     setSelection({ start: hit.measure, end: hit.measure, parts })
   }
 
   function onMouseMove(e: React.MouseEvent) {
-    if (dragStartRef.current === null || !(e.buttons & 1)) return
-    const hit = measureAndStaffAt(e)
-    if (hit === null) return
-    setSelection({
-      start: Math.min(dragStartRef.current, hit.measure),
-      end: Math.max(dragStartRef.current, hit.measure),
-      parts: useStore.getState().selection?.parts ?? null,
-    })
+    const start = dragStartClientRef.current
+    if (!start || !(e.buttons & 1)) return
+
+    const boxLeft = Math.min(start.x, e.clientX)
+    const boxRight = Math.max(start.x, e.clientX)
+    const boxTop = Math.min(start.y, e.clientY)
+    const boxBottom = Math.max(start.y, e.clientY)
+
+    // Below the threshold this is still a click, not a drag — leave the
+    // mousedown selection in place and don't draw the marquee.
+    if (boxRight - boxLeft < 4 && boxBottom - boxTop < 4) return
+
+    const outer = outerRef.current
+    if (outer) {
+      const o = outer.getBoundingClientRect()
+      setMarquee({
+        left: boxLeft - o.left + outer.scrollLeft,
+        top: boxTop - o.top + outer.scrollTop,
+        width: boxRight - boxLeft,
+        height: boxBottom - boxTop,
+      })
+    }
+
+    const measureSet = new Set<number>()
+    const staffSet = new Set<number>()
+    for (const { measure, staff, rect } of rectCacheRef.current) {
+      const overlaps = rect.right >= boxLeft && rect.left <= boxRight && rect.bottom >= boxTop && rect.top <= boxBottom
+      if (overlaps) {
+        measureSet.add(measure)
+        staffSet.add(staff)
+      }
+    }
+
+    if (measureSet.size === 0) {
+      setSelection(null)
+      return
+    }
+    const start1 = Math.min(...measureSet)
+    const end1 = Math.max(...measureSet)
+    const staffCount = staffCountRef.current
+    const parts = staffSet.size === 0 || staffSet.size === staffCount ? null : [...staffSet].sort((a, b) => a - b)
+    setSelection({ start: start1, end: end1, parts })
   }
 
   function onMouseUp() {
-    dragStartRef.current = null
-    dragStartStaffRef.current = null
+    dragStartClientRef.current = null
+    rectCacheRef.current = []
+    setMarquee(null)
   }
 
   function onWheel(e: React.WheelEvent) {
@@ -285,6 +343,12 @@ export default function ScoreViewer() {
           ))}
           <AppendBar />
         </div>
+      )}
+      {marquee && (
+        <div
+          className={styles.marquee}
+          style={{ left: marquee.left, top: marquee.top, width: marquee.width, height: marquee.height }}
+        />
       )}
     </div>
   )

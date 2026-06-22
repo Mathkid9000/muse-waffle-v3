@@ -1,5 +1,6 @@
 import { useRef } from 'react'
 import { useStore } from '../../store'
+import { countInstruments } from '../../hooks/useVerovio'
 import styles from './Toolbar.module.css'
 
 export default function Toolbar() {
@@ -7,8 +8,15 @@ export default function Toolbar() {
   const currentXml = useStore((s) => s.currentXml)
   const zoom = useStore((s) => s.zoom)
   const setXml = useStore((s) => s.setXml)
+  const setScoreData = useStore((s) => s.setScoreData)
   const setError = useStore((s) => s.setError)
   const setZoom = useStore((s) => s.setZoom)
+
+  async function loadScoreXml(xml: string) {
+    const numInstruments = await countInstruments(xml)
+    setScoreData({ numInstruments })
+    setXml(xml)
+  }
 
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
@@ -21,13 +29,13 @@ export default function Toolbar() {
         const bytes = new Uint8Array(buf)
         let binary = ''
         for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i])
-        setXml('__MXL__' + btoa(binary))
+        loadScoreXml('__MXL__' + btoa(binary))
       }
       reader.onerror = () => setError('Failed to read file.')
       reader.readAsArrayBuffer(file)
     } else {
       reader.onload = (ev) => {
-        if (typeof ev.target?.result === 'string') setXml(ev.target.result)
+        if (typeof ev.target?.result === 'string') loadScoreXml(ev.target.result)
       }
       reader.onerror = () => setError('Failed to read file.')
       reader.readAsText(file)
