@@ -13,8 +13,9 @@ from pathlib import Path
 from typing import Callable
 
 from ml.tokenizer import (
-    identify_empty_measures, extract_prefix_suffix_tokens,
+    identify_empty_measures, extract_prefix_suffix_tokens, gap_measure_tokens,
     tokens_to_score, score_to_xml_str, score_to_header_tokens,
+    MAX_REAL_PARTS,
     BAR, BOS, EOS
 )
 from ml.model import load_model
@@ -45,26 +46,39 @@ def extract_prefix_suffix(
     score,
     gap_start: int,
     gap_end: int,
-) -> tuple[list[int], list[int], list[int], int]:
-    """Extract prefix, suffix, and header tokens around a gap.
+    target_parts: list[int] | None = None,
+) -> tuple[list[int], list[int], list[int], int, list[int]]:
+    """Extract prefix, suffix, header, and kept-staff gap tokens around a gap.
 
     Args:
         score: music21 Score object
         gap_start: First measure of gap (inclusive)
         gap_end: Last measure of gap (inclusive)
+        target_parts: Real part indices being regenerated. When given, the gap
+            measures restricted to the OTHER (kept) staves are returned as
+            kept_gap so the model has vertical context.
 
     Returns:
-        (prefix_tokens, suffix_tokens, header_tokens, target_bars)
-        - prefix_tokens: Content before gap
-        - suffix_tokens: Content after gap
+        (prefix_tokens, suffix_tokens, header_tokens, target_bars, kept_gap_tokens)
+        - prefix_tokens: Content before gap (all staves)
+        - suffix_tokens: Content after gap (all staves)
         - header_tokens: Instrument header for this score
         - target_bars: Number of bars to generate (gap size)
+        - kept_gap_tokens: Gap measures restricted to kept staves (empty for
+          full-staff infill)
     """
     prefix, suffix = extract_prefix_suffix_tokens(score, gap_start, gap_end)
     header = score_to_header_tokens(score)
     target_bars = gap_end - gap_start + 1
 
-    return prefix, suffix, header, target_bars
+    kept_gap: list[int] = []
+    if target_parts is not None:
+        n_parts = len(list(score.parts)[:MAX_REAL_PARTS])
+        kept_parts = set(range(n_parts)) - set(target_parts)
+        if kept_parts:
+            kept_gap = gap_measure_tokens(score, gap_start, gap_end, part_filter=kept_parts)
+
+    return prefix, suffix, header, target_bars, kept_gap
 
 
 def merge_fill_into_score(
@@ -105,14 +119,32 @@ def merge_fill_into_score(
     if not fill_score.parts:
         return
 
-    # Get measures from the fill score
+    # Map each generated part to an ORIGINAL part index.
+    # tokens_to_score compacts parts to sorted part_idx order, so when only a
+    # subset of staves is generated the i-th generated part corresponds to the
+    # i-th (ascending) target part. For full-staff infill (target_parts is None)
+    # this is just identity 0,1,2,...
+    gen_parts = list(fill_score.parts)
+    if target_parts is not None:
+        dest_indices = sorted(target_parts)
+    else:
+        dest_indices = list(range(len(gen_parts)))
+
+    if len(gen_parts) != len(dest_indices):
+        print(f"[infill] warning: model generated {len(gen_parts)} part(s) but "
+              f"{len(dest_indices)} were expected; mapping the first "
+              f"{min(len(gen_parts), len(dest_indices))} by position.")
+
+    # fill_measures[original_part_idx][measure_number] = generated measure
     fill_measures = {}
-    for part_idx, part in enumerate(fill_score.parts):
-        for measure in part.getElementsByClass(m21.stream.Measure):
+    for i, gen_part in enumerate(gen_parts):
+        if i >= len(dest_indices):
+            break
+        orig_idx = dest_indices[i]
+        fill_measures[orig_idx] = {}
+        for measure in gen_part.getElementsByClass(m21.stream.Measure):
             m_num = measure.number if measure.number is not None else 1
-            if part_idx not in fill_measures:
-                fill_measures[part_idx] = {}
-            fill_measures[part_idx][m_num] = measure
+            fill_measures[orig_idx][m_num] = measure
 
     # Map generated measure numbers to target gap positions
     # Generated measures are numbered 1, 2, 3... but we need gap_start, gap_start+1, etc.
@@ -222,9 +254,11 @@ def infill_and_export(
     for i, (gap_start, gap_end) in enumerate(gaps):
         log(f"Processing gap {i+1}/{len(gaps)}: measures {gap_start}-{gap_end}")
 
-        # Extract prefix, suffix and instrument header
-        prefix, suffix, header, target_bars = extract_prefix_suffix(score, gap_start, gap_end)
-        log(f"  Prefix: {len(prefix)} tokens, Suffix: {len(suffix)} tokens, Header: {header}, Target: {target_bars} bars")
+        # Extract prefix, suffix, instrument header, and kept-staff gap context
+        prefix, suffix, header, target_bars, kept_gap = extract_prefix_suffix(
+            score, gap_start, gap_end, target_parts=target_parts)
+        log(f"  Prefix: {len(prefix)} tokens, Suffix: {len(suffix)} tokens, "
+            f"Kept-gap: {len(kept_gap)} tokens, Header: {header}, Target: {target_bars} bars")
 
         # Generate fill content
         fill_tokens = model.generate_infill(
@@ -236,6 +270,8 @@ def infill_and_export(
             temperature=temperature,
             top_k=top_k,
             device=device,
+            kept_gap_tokens=kept_gap,
+            target_parts=target_parts,
         )
 
         generated_bars = fill_tokens.count(BAR)
@@ -320,7 +356,8 @@ def infill_and_stream(
 
     for i, (gap_start, gap_end) in enumerate(gaps):
         log(f"Processing gap {i+1}/{len(gaps)}: measures {gap_start}-{gap_end}")
-        prefix, suffix, header, target_bars = extract_prefix_suffix(working_score, gap_start, gap_end)
+        prefix, suffix, header, target_bars, kept_gap = extract_prefix_suffix(
+            working_score, gap_start, gap_end, target_parts=target_parts)
 
         last_snapshot: list[int] = []
         partial_score = copy.deepcopy(working_score)
@@ -334,6 +371,8 @@ def infill_and_stream(
             temperature=temperature,
             top_k=top_k,
             device=device,
+            kept_gap_tokens=kept_gap,
+            target_parts=target_parts,
         ):
             last_snapshot = snapshot
             bar_count = snapshot.count(BAR)

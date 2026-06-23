@@ -15,6 +15,8 @@ from tqdm import tqdm
 from ml.tokenizer import (
     score_to_tokens_by_measure, score_to_header_tokens,
     text_to_tokens,
+    _collect_events_by_measure, _emit_measure_tokens,
+    MAX_REAL_PARTS,
     BOS, EOS, PAD,
     NOTE_OFF, KEY_OFF,
 )
@@ -72,7 +74,7 @@ class MusicDataset(Dataset):
 
     def __init__(
         self,
-        sequences: list[tuple[list[int], dict[int, list[int]]]],
+        sequences: list[tuple],
         max_len: int = 512,
         fim_ratio: float = 0.0,
         transpose_range: int = 6,
@@ -80,26 +82,39 @@ class MusicDataset(Dataset):
     ):
         """
         Args:
-            sequences: List of (header_tokens, measure_tokens) tuples
+            sequences: List of (header_tokens, measure_tokens, collected, n_parts)
+                tuples as produced by _load_measure_sequences. Legacy
+                (header_tokens, measure_tokens) tuples are also accepted.
             max_len: Maximum sequence length (tokens)
             fim_ratio: Proportion of examples that use FIM format
             transpose_range: Max semitone shift for pitch augmentation (0 to disable)
-            fim_example_fn: Callable(header, measures) -> (seq, loss_start) | None
+            fim_example_fn: Callable(header, measures, collected, n_parts, max_len)
+                -> (seq, loss_start) | None
         """
         self.max_len = max_len
         self.fim_ratio = fim_ratio
         self.transpose_range = transpose_range
         self.fim_example_fn = fim_example_fn
-        self.sequences = [(h, m) for h, m in sequences if len(m) >= 3]
+        # Normalise to 4-tuples; tolerate legacy 2-tuples (collected=None, n_parts=1).
+        norm = []
+        for seq in sequences:
+            if len(seq) == 2:
+                h, m = seq
+                norm.append((h, m, None, 1))
+            else:
+                norm.append(seq)
+        self.sequences = [t for t in norm if len(t[1]) >= 3]
 
     def __len__(self):
         return len(self.sequences)
 
     def __getitem__(self, idx: int):
-        header_tokens, measure_tokens = self.sequences[idx]
+        header_tokens, measure_tokens, collected, n_parts = self.sequences[idx]
 
         if self.fim_ratio > 0 and self.fim_example_fn is not None and random.random() < self.fim_ratio:
-            result = self.fim_example_fn(header_tokens, measure_tokens)
+            result = self.fim_example_fn(
+                header_tokens, measure_tokens, collected, n_parts, max_len=self.max_len,
+            )
             if result is not None:
                 seq, loss_start = result
             else:
@@ -139,8 +154,14 @@ def _load_measure_sequences(
     paths: list[str],
     log: Callable[[str], None],
     max_sequences: int = 0,
-) -> list[tuple[list[int], dict[int, list[int]]]]:
-    """Load scores and convert to (header_tokens, measure_tokens) tuples."""
+) -> list[tuple[list[int], dict[int, list[int]], tuple, int]]:
+    """Load scores into (header_tokens, measure_tokens, collected, n_parts) tuples.
+
+    `collected` is the raw output of `_collect_events_by_measure` (events plus
+    global-symbol dicts); it lets the FIM example generator re-emit token streams
+    for arbitrary staff subsets (partial-staff infill) without re-parsing music21.
+    `n_parts` is the number of real parts (staves) in the score.
+    """
     import music21 as m21
 
     sequences = []
@@ -150,9 +171,12 @@ def _load_measure_sequences(
         # try:
         score = m21.converter.parse(path)
         header = score_to_header_tokens(score)
-        measure_tokens = score_to_tokens_by_measure(score)
-        if measure_tokens and len(measure_tokens) >= 3:
-            sequences.append((header, measure_tokens))
+        collected = _collect_events_by_measure(score)
+        events_by_measure = collected[0]
+        if events_by_measure and len(events_by_measure) >= 3:
+            measure_tokens = _emit_measure_tokens(*collected)
+            n_parts = len(list(score.parts)[:MAX_REAL_PARTS])
+            sequences.append((header, measure_tokens, collected, n_parts))
         # except Exception as e:
         #     log(f"  Skip {Path(path).name}: {e}")
 

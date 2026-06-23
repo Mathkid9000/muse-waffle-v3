@@ -1,7 +1,7 @@
 """
 Converts music21 scores to integer token sequences and back.
 
-Vocabulary layout: (467 tokens)
+Vocabulary layout: (471 tokens)
   0        PAD
   1        BOS
   2        EOS
@@ -18,10 +18,17 @@ Vocabulary layout: (467 tokens)
   274-417  STEP_0 to STEP_143 (absolute offset within measure, 1/24 ql units)
   418      GRACE  (next note/chord is a grace note; DUR carries its written duration)
   419      FILL_START  (infill: end of prefix)
-  420      FILL_END    (infill: end of suffix, start of generation)
+  420      FILL_END    (infill: end of suffix; start of kept-staff gap context)
   421      EMPTY_BAR   (infill: placeholder for empty measures)
-  422-435  TEMPO  (16 BPM buckets)
-  436-469  INSTR  (32 instrument categories; see INSTR_NAMES)
+  422-437  TEMPO  (16 BPM buckets)
+  438-469  INSTR  (32 instrument categories; see INSTR_NAMES)
+  470      FILL_GEN    (infill: end of kept-staff gap context; start of generation)
+
+Infill (fill-in-the-middle) sequence format:
+  [BOS] header prefix [FILL_START] suffix [FILL_END] kept_gap [FILL_GEN] target_gap [EOS]
+  where kept_gap holds the gap measures restricted to the staves being KEPT (context),
+  and target_gap holds the gap measures restricted to the staves being regenerated
+  (the loss/generation region). For full-staff infill kept_gap is empty.
 
 PART tokens encode both staff and voice: PART_{part*2 + voice}.
 Each token unambiguously identifies a single voice lane.  Supports up to
@@ -138,9 +145,14 @@ FILL_START = GRACE + 1               # 416 - marks start of fill region (prefix 
 FILL_END   = FILL_START + 1          # 417 - marks end of suffix, start of generation
 EMPTY_BAR  = FILL_END + 1            # 418 - placeholder for empty measures in input
 
-TEMPO_OFF = EMPTY_BAR + 1            # 419
-INSTR_OFF = TEMPO_OFF + N_TEMPO      # 436
-VOCAB_SIZE = INSTR_OFF + N_INSTR     # 467
+TEMPO_OFF = EMPTY_BAR + 1            # 422
+INSTR_OFF = TEMPO_OFF + N_TEMPO      # 438
+
+# FILL_GEN is appended at the END of the vocab so adding it does not shift any
+# existing token id (only one new embedding/head row).  It separates the kept-staff
+# gap context from the generation region in the FIM format.
+FILL_GEN  = INSTR_OFF + N_INSTR      # 470 - end of kept-staff gap context, start of generation
+VOCAB_SIZE = FILL_GEN + 1            # 471
 
 
 def _closest_dur_idx(qlen: float) -> int:
@@ -644,21 +656,22 @@ def identify_empty_measures(score) -> list[tuple[int, int]]:
     return gaps
 
 
-def score_to_tokens_by_measure(score) -> dict[int, list[int]]:
-    """music21 Score -> dict mapping measure number to tokens for that measure.
+def _collect_events_by_measure(score):
+    """Walk a score once and return raw per-measure events plus global symbols.
 
-    Returns tokens for each measure separately (without BOS/EOS).
-    Each measure's tokens start with BAR followed by optional KEY_SIG, TIME_SIG,
-    and TEMPO tokens (only when present), then STEP/PART/note content.
+    Returns (events_by_measure, key_toks, time_toks, tempo_toks) where
+    events_by_measure maps measure_number -> list of (offset, combined_lane, toks)
+    and combined_lane = part_idx * MAX_VOICES_PER_PART + voice_idx.
+
+    This is the expensive (music21-walking) half of tokenization.  Splitting it
+    out lets callers re-emit tokens for arbitrary part subsets cheaply via
+    _emit_measure_tokens, which is what partial-staff FIM relies on.
     """
-
     parts = list(score.parts)[:MAX_REAL_PARTS]
     if not parts:
-        return {}
+        return {}, {}, {}, {}
 
-    # Collect events by measure
     events_by_measure: dict[int, list[tuple[float, int, list[int]]]] = {}
-    measure_durations: dict[int, float] = {}
 
     for part_idx, part in enumerate(parts):
         for measure in part.getElementsByClass(m21.stream.Measure):
@@ -666,8 +679,6 @@ def score_to_tokens_by_measure(score) -> dict[int, list[int]]:
 
             if m_num not in events_by_measure:
                 events_by_measure[m_num] = []
-            ht = float(measure.highestTime)
-            measure_durations[m_num] = ht if ht > 0 else float(measure.duration.quarterLength)
 
             if measure.voices:
                 voice_streams = []
@@ -712,21 +723,38 @@ def score_to_tokens_by_measure(score) -> dict[int, list[int]]:
 
                     events_by_measure[m_num].append((offset, combined, toks))
 
-    # Inject explicit whole-measure rests for active lanes absent from a measure.
-    # active_lanes = {e[1] for evts in events_by_measure.values() for e in evts}
-    # for m_num, evts in events_by_measure.items():
-    #     present = {e[1] for e in evts}
-    #     dur_idx = _closest_dur_idx(measure_durations.get(m_num, 4.0))
-    #     for lane in active_lanes - present:
-    #         evts.append((0.0, lane, [REST_OFF + dur_idx]))
-
     key_toks, time_toks, _, tempo_toks = _extract_measure_symbols(score)
 
-    # Convert events to tokens per measure
+    return events_by_measure, key_toks, time_toks, tempo_toks
+
+
+def _emit_measure_tokens(
+    events_by_measure, key_toks, time_toks, tempo_toks,
+    part_filter: set[int] | None = None,
+    measure_nums: list[int] | None = None,
+) -> dict[int, list[int]]:
+    """Assemble per-measure token lists from collected events (cheap, pure-python).
+
+    Args:
+        part_filter: if given, only events whose real part index
+            (combined_lane // MAX_VOICES_PER_PART) is in the set are emitted.
+            BAR + global symbols are still emitted for every measure, so a measure
+            with no events for the filtered staves becomes a bare [BAR] (+ symbols).
+        measure_nums: explicit list of measure numbers to emit (in order). Defaults
+            to all measures present in events_by_measure (sorted). Numbers absent
+            from events_by_measure still produce a bare [BAR] (+ symbols).
+    """
+    if measure_nums is None:
+        measure_nums = sorted(events_by_measure.keys())
+
     measure_tokens: dict[int, list[int]] = {}
 
-    for m_num in sorted(events_by_measure.keys()):
-        events = sorted(events_by_measure[m_num], key=lambda e: (e[0], e[1]))
+    for m_num in measure_nums:
+        events = events_by_measure.get(m_num, [])
+        if part_filter is not None:
+            events = [e for e in events if (e[1] // MAX_VOICES_PER_PART) in part_filter]
+        events = sorted(events, key=lambda e: (e[0], e[1]))
+
         tokens: list[int] = [BAR]
 
         # Emit global symbols for this measure
@@ -752,6 +780,45 @@ def score_to_tokens_by_measure(score) -> dict[int, list[int]]:
         measure_tokens[m_num] = tokens
 
     return measure_tokens
+
+
+def score_to_tokens_by_measure(
+    score, part_filter: set[int] | None = None,
+) -> dict[int, list[int]]:
+    """music21 Score -> dict mapping measure number to tokens for that measure.
+
+    Returns tokens for each measure separately (without BOS/EOS).
+    Each measure's tokens start with BAR followed by optional KEY_SIG, TIME_SIG,
+    and TEMPO tokens (only when present), then STEP/PART/note content.
+
+    Args:
+        part_filter: optional set of real part indices to keep; events from other
+            parts are dropped (BAR + global symbols still emitted).
+    """
+    events_by_measure, key_toks, time_toks, tempo_toks = _collect_events_by_measure(score)
+    if not events_by_measure:
+        return {}
+    return _emit_measure_tokens(
+        events_by_measure, key_toks, time_toks, tempo_toks, part_filter=part_filter,
+    )
+
+
+def gap_measure_tokens(
+    score, gap_start: int, gap_end: int, part_filter: set[int] | None = None,
+) -> list[int]:
+    """Flat token list for gap measures [gap_start, gap_end], restricted to part_filter.
+
+    Always emits a [BAR] (+ global symbols) for every measure in the range, even
+    when the filtered staves are empty there, so kept/target gap blocks stay
+    measure-aligned and BAR counting at generation time is exact.
+    """
+    events_by_measure, key_toks, time_toks, tempo_toks = _collect_events_by_measure(score)
+    measure_nums = list(range(gap_start, gap_end + 1))
+    mt = _emit_measure_tokens(
+        events_by_measure, key_toks, time_toks, tempo_toks,
+        part_filter=part_filter, measure_nums=measure_nums,
+    )
+    return [t for m_num in measure_nums for t in mt[m_num]]
 
 
 def score_to_tokens_with_gaps(score) -> tuple[list[int], list[tuple[int, int]]]:

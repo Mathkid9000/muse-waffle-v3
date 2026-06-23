@@ -27,3 +27,4 @@ diffs = [ i for i, x in enumerate(np.absolute(x - y).flatten().tolist()) if x > 
 print(f"Analyzed score ({idx}): {paths[0]}")
 print(f"SCORE IN ({len(x):04d} tokens) / SCORE OUT ({len(y):04d} tokens)")
 print(f"Diffs found: {len(diffs)}")
+print(x.flatten().tolist()[:1000])

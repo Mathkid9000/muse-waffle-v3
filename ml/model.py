@@ -33,6 +33,23 @@ def model_paths(name: str) -> dict[str, Path]:
     }
 
 
+def _disallowed_part_token_ids(target_parts: list[int] | None) -> list[int]:
+    """PART token ids that should be masked so generation only writes target staves.
+
+    Returns the PART token ids whose real part index (combined // voices) is NOT in
+    target_parts. Empty list when target_parts is None (no restriction).
+    """
+    if target_parts is None:
+        return []
+    from ml.tokenizer import PART_OFF, MAX_PARTS, MAX_VOICES_PER_PART
+    allowed = set(target_parts)
+    return [
+        PART_OFF + combined
+        for combined in range(MAX_PARTS)
+        if (combined // MAX_VOICES_PER_PART) not in allowed
+    ]
+
+
 # Legacy aliases — app.py still imports these directly
 CONFIG_FILE = model_paths("infill")["config"]
 WEIGHTS_FILE = model_paths("infill")["weights"]
@@ -171,11 +188,15 @@ class MusicTransformer(nn.Module):
         temperature: float = 1.0,
         top_k: int = 50,
         device: str = "cuda" if __import__("torch").cuda.is_available() else "cpu",
+        kept_gap_tokens: list[int] | None = None,
+        target_parts: list[int] | None = None,
     ) -> list[int]:
         """Generate tokens to fill a gap using FIM (fill-in-the-middle) approach.
 
-        Constructs: [BOS] + header + prefix + [FILL_START] + suffix + [FILL_END]
-        Then generates autoregressively until EOS or target bar count is reached.
+        Constructs the prompt
+            [BOS] + header + prefix + [FILL_START] + suffix + [FILL_END]
+                  + kept_gap + [FILL_GEN]
+        then generates autoregressively until EOS or target bar count is reached.
 
         Args:
             prefix_tokens: Tokens before the gap (without BOS)
@@ -186,19 +207,27 @@ class MusicTransformer(nn.Module):
             temperature: Sampling temperature
             top_k: Top-k sampling parameter
             device: Device to run on
+            kept_gap_tokens: Gap measures restricted to the kept staves (vertical
+                context for partial-staff infill). None/empty for full-staff infill.
+            target_parts: Real part indices being regenerated. When given, PART
+                tokens for any other staff are masked so the model only writes the
+                target staves.
 
         Returns:
             Generated fill tokens (without special markers)
         """
-        from ml.tokenizer import BOS, EOS, BAR, FILL_START, FILL_END
+        from ml.tokenizer import BOS, EOS, BAR, FILL_START, FILL_END, FILL_GEN
 
         self.eval()
 
-        # Build FIM prompt: [BOS] + header + prefix + [FILL_START] + suffix + [FILL_END]
-        hdr = header_tokens or []
-        prompt = [BOS] + hdr + prefix_tokens + [FILL_START] + suffix_tokens + [FILL_END]
+        hdr  = header_tokens or []
+        kept = kept_gap_tokens or []
+        prompt = ([BOS] + hdr + prefix_tokens + [FILL_START] + suffix_tokens
+                  + [FILL_END] + kept + [FILL_GEN])
         idx = torch.tensor([prompt], dtype=torch.long, device=device)
         max_ctx = self.cfg["max_seq_len"]
+
+        part_mask = _disallowed_part_token_ids(target_parts)
 
         generated: list[int] = []
         bar_count = 0
@@ -210,6 +239,10 @@ class MusicTransformer(nn.Module):
             if top_k > 0:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
                 logits[logits < v[:, [-1]]] = float("-inf")
+
+            # Restrict PART tokens to the target staves (partial-staff infill).
+            if part_mask:
+                logits[:, part_mask] = float("-inf")
 
             # Prevent EOS until the target number of bars has been generated
             if bar_count < target_bars:
@@ -386,16 +419,22 @@ class MusicTransformer(nn.Module):
         temperature: float = 1.0,
         top_k: int = 50,
         device: str = "cuda" if __import__("torch").cuda.is_available() else "cpu",
+        kept_gap_tokens: list[int] | None = None,
+        target_parts: list[int] | None = None,
     ):
         """Like generate_infill but yields accumulated token list after each completed BAR."""
-        from ml.tokenizer import BOS, EOS, BAR, FILL_START, FILL_END
+        from ml.tokenizer import BOS, EOS, BAR, FILL_START, FILL_END, FILL_GEN
 
         self.eval()
 
-        hdr = header_tokens or []
-        prompt = [BOS] + hdr + prefix_tokens + [FILL_START] + suffix_tokens + [FILL_END]
+        hdr  = header_tokens or []
+        kept = kept_gap_tokens or []
+        prompt = ([BOS] + hdr + prefix_tokens + [FILL_START] + suffix_tokens
+                  + [FILL_END] + kept + [FILL_GEN])
         idx = torch.tensor([prompt], dtype=torch.long, device=device)
         max_ctx = self.cfg["max_seq_len"]
+
+        part_mask = _disallowed_part_token_ids(target_parts)
 
         generated: list[int] = []
         bar_count = 0
@@ -403,10 +442,13 @@ class MusicTransformer(nn.Module):
         for i in range(max_new):
             idx_cond = idx[:, -max_ctx:]
             logits = self(idx_cond)[:, -1, :] / max(temperature, 1e-6)
-        
+
             if top_k > 0:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
                 logits[logits < v[:, [-1]]] = float("-inf")
+
+            if part_mask:
+                logits[:, part_mask] = float("-inf")
 
             if bar_count < target_bars:
                 logits[:, EOS] = float("-inf")
