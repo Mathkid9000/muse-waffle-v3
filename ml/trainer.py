@@ -19,13 +19,23 @@ from ml.tokenizer import (
     MAX_REAL_PARTS,
     BOS, EOS, PAD,
     NOTE_OFF, KEY_OFF,
+    CSYM_ROOT_OFF, CSYM_BASS_OFF,
 )
 from ml.model import MusicTransformer, model_paths, WEIGHTS_FILE
+from ml.preprocess import build_or_open_cache, _path_key, DEFAULT_CACHE_DIR
 
 _NOTE_END = NOTE_OFF + 128
 _KEY_END  = KEY_OFF  + 13
 
 VAL_RATIO = 0.05
+
+
+def _make_split(keys: list[str]) -> tuple[list[str], list[str]]:
+    """Shuffle keys and split off VAL_RATIO for validation. Returns (val, train)."""
+    shuffled = list(keys)
+    random.shuffle(shuffled)
+    n_val = max(1, int(len(shuffled) * VAL_RATIO))
+    return shuffled[-n_val:], shuffled[:-n_val]
 
 
 def _transpose_tokens(tokens: list[int], semitones: int) -> list[int]:
@@ -45,6 +55,10 @@ def _transpose_tokens(tokens: list[int], semitones: int) -> list[int]:
             old_sharps = (t - KEY_OFF) - 6
             new_sharps = ((old_sharps + semitones * 7) + 6) % 12 - 6
             result.append(KEY_OFF + new_sharps + 6)
+        elif CSYM_ROOT_OFF <= t < CSYM_ROOT_OFF + 12:
+            result.append(CSYM_ROOT_OFF + (t - CSYM_ROOT_OFF + semitones) % 12)
+        elif CSYM_BASS_OFF <= t < CSYM_BASS_OFF + 12:
+            result.append(CSYM_BASS_OFF + (t - CSYM_BASS_OFF + semitones) % 12)
         else:
             result.append(t)
     return result
@@ -82,9 +96,10 @@ class MusicDataset(Dataset):
     ):
         """
         Args:
-            sequences: List of (header_tokens, measure_tokens, collected, n_parts)
-                tuples as produced by _load_measure_sequences. Legacy
-                (header_tokens, measure_tokens) tuples are also accepted.
+            sequences: either an in-memory list of
+                (header_tokens, measure_tokens, collected, n_parts) tuples (legacy
+                2-tuples are also accepted), OR a map-style provider (e.g. a
+                CachedMeasureStore / SubsetView) yielding the same 4-tuples lazily.
             max_len: Maximum sequence length (tokens)
             fim_ratio: Proportion of examples that use FIM format
             transpose_range: Max semitone shift for pitch augmentation (0 to disable)
@@ -95,15 +110,21 @@ class MusicDataset(Dataset):
         self.fim_ratio = fim_ratio
         self.transpose_range = transpose_range
         self.fim_example_fn = fim_example_fn
-        # Normalise to 4-tuples; tolerate legacy 2-tuples (collected=None, n_parts=1).
-        norm = []
-        for seq in sequences:
-            if len(seq) == 2:
-                h, m = seq
-                norm.append((h, m, None, 1))
-            else:
-                norm.append(seq)
-        self.sequences = [t for t in norm if len(t[1]) >= 3]
+        if isinstance(sequences, list):
+            # Legacy in-memory path: normalise to 4-tuples (tolerate 2-tuples) and
+            # drop scores with fewer than 3 measures.
+            norm = []
+            for seq in sequences:
+                if len(seq) == 2:
+                    h, m = seq
+                    norm.append((h, m, None, 1))
+                else:
+                    norm.append(seq)
+            self.sequences = [t for t in norm if len(t[1]) >= 3]
+        else:
+            # Cache-backed provider: already 4-tuples, already length-filtered at
+            # cache-build time. Accessed lazily via __getitem__.
+            self.sequences = sequences
 
     def __len__(self):
         return len(self.sequences)
@@ -200,6 +221,8 @@ def _train_loop(
     accumulation_steps: int = 1,
     use_amp: bool = True,
     warmup_ratio: float = 0.05,
+    cache_dir=None,
+    cache_workers: int = 1,
 ):
     """Core training loop shared by all model trainers.
 
@@ -215,31 +238,34 @@ def _train_loop(
     paths = model_paths(name)
     paths["dir"].mkdir(parents=True, exist_ok=True)
 
+    # Parse every score exactly once into the on-disk token cache (shared across
+    # models, incremental), then stream tokenized records from it — no music21 in
+    # the epoch loop. The val split is persisted by cache key (resolved path).
+    cache_dir = cache_dir or DEFAULT_CACHE_DIR
+    log(f"Building/opening token cache for {name} ({len(data_paths)} scores)...")
+    store = build_or_open_cache(data_paths, cache_dir=cache_dir, n_workers=cache_workers, log=log)
+
+    all_keys = [k for k in (_path_key(p) for p in data_paths) if store.has(k)]
+    if not all_keys:
+        raise RuntimeError("No sequences in token cache — run 'Download Dataset' first.")
+
     val_split_file = paths["val_split"]
     if resume_optimizer and val_split_file.exists():
-        saved_val        = set(json.loads(val_split_file.read_text()))
-        val_data_paths   = [p for p in data_paths if str(p) in saved_val]
-        train_data_paths = [p for p in data_paths if str(p) not in saved_val]
-        log(f"Loaded preserved val split: {len(val_data_paths)} val / {len(train_data_paths)} train paths.")
+        saved_val  = set(json.loads(val_split_file.read_text()))
+        val_keys   = [k for k in all_keys if k in saved_val]
+        train_keys = [k for k in all_keys if k not in saved_val]
+        if not val_keys:  # old-format or mismatched split — recreate
+            val_keys, train_keys = _make_split(all_keys)
+            val_split_file.write_text(json.dumps(val_keys))
+        log(f"Loaded preserved val split: {len(val_keys)} val / {len(train_keys)} train.")
     else:
-        shuffled = list(data_paths)
-        random.shuffle(shuffled)
-        n_val            = max(1, int(len(shuffled) * VAL_RATIO))
-        val_data_paths   = shuffled[-n_val:]
-        train_data_paths = shuffled[:-n_val]
-        val_split_file.write_text(json.dumps([str(p) for p in val_data_paths]))
-        log(f"Created val split: {len(val_data_paths)} val / {len(train_data_paths)} train paths.")
-
-    log(f"Parsing scores for {name} training...")
-    train_sequences = _load_measure_sequences(train_data_paths, log)
-    val_sequences   = _load_measure_sequences(val_data_paths,   log)
-    if not train_sequences:
-        raise RuntimeError("No sequences loaded — run 'Download Dataset' first.")
-    log(f"Loaded {len(train_sequences)} train / {len(val_sequences)} val scores.")
+        val_keys, train_keys = _make_split(all_keys)
+        val_split_file.write_text(json.dumps(val_keys))
+        log(f"Created val split: {len(val_keys)} val / {len(train_keys)} train.")
 
     max_len   = model.cfg["max_seq_len"]
-    train_set = MusicDataset(train_sequences, max_len, fim_ratio, transpose_range=6, fim_example_fn=fim_example_fn)
-    val_set   = MusicDataset(val_sequences,   max_len, fim_ratio, transpose_range=6, fim_example_fn=fim_example_fn)
+    train_set = MusicDataset(store.subset_view(train_keys), max_len, fim_ratio, transpose_range=6, fim_example_fn=fim_example_fn)
+    val_set   = MusicDataset(store.subset_view(val_keys),   max_len, fim_ratio, transpose_range=6, fim_example_fn=fim_example_fn)
     log(f"Dataset: {len(train_set)} train / {len(val_set)} val (max_len={max_len}, fim_ratio={fim_ratio})")
 
     loader     = DataLoader(train_set, batch_size=batch_size, shuffle=True,  drop_last=False)

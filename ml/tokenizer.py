@@ -1,7 +1,7 @@
 """
 Converts music21 scores to integer token sequences and back.
 
-Vocabulary layout: (471 tokens)
+Vocabulary layout: (522 tokens)
   0        PAD
   1        BOS
   2        EOS
@@ -23,6 +23,10 @@ Vocabulary layout: (471 tokens)
   422-437  TEMPO  (16 BPM buckets)
   438-469  INSTR  (32 instrument categories; see INSTR_NAMES)
   470      FILL_GEN    (infill: end of kept-staff gap context; start of generation)
+  471      HARMONY     (chord-symbol lane marker, analogous to a PART token)
+  472-483  CSYM_ROOT   (chord-symbol root pitch class, 12)
+  484-509  CSYM_KIND   (chord quality; see CHORD_KINDS)
+  510-521  CSYM_BASS   (chord-symbol bass pitch class, slash chords only, 12)
 
 Infill (fill-in-the-middle) sequence format:
   [BOS] header prefix [FILL_START] suffix [FILL_END] kept_gap [FILL_GEN] target_gap [EOS]
@@ -135,15 +139,15 @@ REST_OFF = DUR_OFF  + len(DURATIONS) # 154
 KEY_OFF  = REST_OFF + len(DURATIONS) # 175
 TIME_OFF = KEY_OFF  + 13             # 188
 CLEF_OFF = TIME_OFF + 6              # 194
-TEXT_OFF = CLEF_OFF + 7              # 198  (ASCII 32-88 = 57 chars)
-PART_OFF = TEXT_OFF + 57             # 255
-STEP_OFF = PART_OFF + MAX_PARTS      # 271
-GRACE    = STEP_OFF + MAX_STEP       # 415
+TEXT_OFF = CLEF_OFF + 7              # 201  (ASCII 32-88 = 57 chars)
+PART_OFF = TEXT_OFF + 57             # 258
+STEP_OFF = PART_OFF + MAX_PARTS      # 274
+GRACE    = STEP_OFF + MAX_STEP       # 418
 
 # Infill special tokens (for fill-in-the-middle generation)
-FILL_START = GRACE + 1               # 416 - marks start of fill region (prefix ends here)
-FILL_END   = FILL_START + 1          # 417 - marks end of suffix, start of generation
-EMPTY_BAR  = FILL_END + 1            # 418 - placeholder for empty measures in input
+FILL_START = GRACE + 1               # 419 - marks start of fill region (prefix ends here)
+FILL_END   = FILL_START + 1          # 420 - marks end of suffix, start of generation
+EMPTY_BAR  = FILL_END + 1            # 421 - placeholder for empty measures in input
 
 TEMPO_OFF = EMPTY_BAR + 1            # 422
 INSTR_OFF = TEMPO_OFF + N_TEMPO      # 438
@@ -152,7 +156,93 @@ INSTR_OFF = TEMPO_OFF + N_TEMPO      # 438
 # existing token id (only one new embedding/head row).  It separates the kept-staff
 # gap context from the generation region in the FIM format.
 FILL_GEN  = INSTR_OFF + N_INSTR      # 470 - end of kept-staff gap context, start of generation
-VOCAB_SIZE = FILL_GEN + 1            # 471
+
+# --- Chord-symbol tokens (lead-sheet harmony) -------------------------------
+# Appended at the very end so no existing token id shifts.  A chord symbol is
+# emitted on a dedicated "harmony lane" within a measure as:
+#     [HARMONY] [CSYM_ROOT + pc] [CSYM_KIND + k] (CSYM_BASS + pc)?
+# HARMONY marks the lane (analogous to a PART token); CSYM_BASS is only emitted
+# for slash chords (bass pitch-class differs from root).  Kind strings are
+# music21/MusicXML chordKind values, so encode is an identity map and decode can
+# pass them straight to harmony.ChordSymbol(kind=...).
+CHORD_KINDS = [
+    "major", "minor", "augmented", "diminished",
+    "dominant", "major-seventh", "minor-seventh", "diminished-seventh",
+    "augmented-seventh", "half-diminished", "major-minor",
+    "major-sixth", "minor-sixth",
+    "dominant-ninth", "major-ninth", "minor-ninth",
+    "dominant-11th", "major-11th", "minor-11th",
+    "dominant-13th", "major-13th", "minor-13th",
+    "suspended-second", "suspended-fourth",
+    "power", "other",
+]
+N_CHORD_KINDS = len(CHORD_KINDS)
+
+HARMONY       = FILL_GEN + 1                    # 471 - harmony-lane marker
+CSYM_ROOT_OFF = HARMONY + 1                     # 472 - root pitch class (12)
+CSYM_KIND_OFF = CSYM_ROOT_OFF + 12              # 484 - chord quality (N_CHORD_KINDS)
+CSYM_BASS_OFF = CSYM_KIND_OFF + N_CHORD_KINDS   # bass pitch class (12, slash chords)
+
+VOCAB_SIZE = CSYM_BASS_OFF + 12
+
+# Sentinel combined-lane id for chord-symbol events (NOT a token); sorts before
+# note lanes (0..15) so harmony is emitted before notes at the same step.
+HARMONY_LANE = -2
+
+# music21 chordKind -> CHORD_KINDS index (with aliases for less common spellings).
+_KIND_TO_IDX = {k: i for i, k in enumerate(CHORD_KINDS)}
+_KIND_ALIASES = {
+    "dominant-seventh": "dominant",
+    "minor-major": "major-minor",
+    "minor-major-seventh": "major-minor",
+    "pedal": "power",
+    "none": "other",
+    "": "major",
+}
+_OTHER_KIND_IDX = _KIND_TO_IDX["other"]
+
+
+def _chord_kind_idx(kind: str | None) -> int:
+    kind = kind or ""
+    if kind in _KIND_TO_IDX:
+        return _KIND_TO_IDX[kind]
+    return _KIND_TO_IDX.get(_KIND_ALIASES.get(kind, ""), _OTHER_KIND_IDX)
+
+
+def chordsym_to_tokens(cs) -> list[int] | None:
+    """harmony.ChordSymbol -> [CSYM_ROOT, CSYM_KIND, (CSYM_BASS)] or None.
+
+    Returns None for no-chord / unparseable symbols (e.g. N.C.).
+    """
+    try:
+        root = cs.root()
+        if root is None:
+            return None
+        root_pc = root.pitchClass
+        toks = [CSYM_ROOT_OFF + root_pc,
+                CSYM_KIND_OFF + _chord_kind_idx(getattr(cs, "chordKind", None))]
+        bass = cs.bass()
+        if bass is not None and bass.pitchClass != root_pc:
+            toks.append(CSYM_BASS_OFF + bass.pitchClass)
+        return toks
+    except Exception:
+        return None
+
+
+def make_chordsym(root_pc: int, kind_idx: int, bass_pc: int | None = None):
+    """Reconstruct a harmony.ChordSymbol from decoded token fields (or None)."""
+    try:
+        kwargs = {"root": m21.pitch.Pitch(midi=60 + root_pc).name}
+        kind = CHORD_KINDS[kind_idx] if 0 <= kind_idx < N_CHORD_KINDS else "other"
+        if kind != "other":
+            kwargs["kind"] = kind
+        if bass_pc is not None:
+            kwargs["bass"] = m21.pitch.Pitch(midi=60 + bass_pc).name
+        cs = m21.harmony.ChordSymbol(**kwargs)
+        cs.duration = m21.duration.Duration(0)
+        return cs
+    except Exception:
+        return None
 
 
 def _closest_dur_idx(qlen: float) -> int:
@@ -318,6 +408,7 @@ def tokens_to_score(tokens: list[int]):
     measure_time_sigs: dict[int, int] = {}   # measure -> TIME_SIGS index
     measure_clefs: dict[(int, int), int] = {}   # instrument idx + measure -> CLEFS index
     measure_tempos: dict[int, float] = {}    # measure -> BPM
+    measure_chord_syms: dict = defaultdict(list)  # measure -> [(offset_ql, ChordSymbol), ...]
 
     i = 0
     while i < len(tokens):
@@ -370,6 +461,27 @@ def tokens_to_score(tokens: list[int]):
         if STEP_OFF <= t < STEP_OFF + MAX_STEP:
             cur_offset = (t - STEP_OFF) * STEP_SIZE
             i += 1
+            continue
+
+        # Chord symbol: [HARMONY] [CSYM_ROOT] [CSYM_KIND] (CSYM_BASS)?
+        if t == HARMONY:
+            i += 1
+            continue
+
+        if CSYM_ROOT_OFF <= t < CSYM_ROOT_OFF + 12:
+            root_pc = t - CSYM_ROOT_OFF
+            i += 1
+            kind_idx = _OTHER_KIND_IDX
+            if i < len(tokens) and CSYM_KIND_OFF <= tokens[i] < CSYM_KIND_OFF + N_CHORD_KINDS:
+                kind_idx = tokens[i] - CSYM_KIND_OFF
+                i += 1
+            bass_pc = None
+            if i < len(tokens) and CSYM_BASS_OFF <= tokens[i] < CSYM_BASS_OFF + 12:
+                bass_pc = tokens[i] - CSYM_BASS_OFF
+                i += 1
+            cs = make_chordsym(root_pc, kind_idx, bass_pc)
+            if cs is not None:
+                measure_chord_syms[cur_measure].append((cur_offset, cs))
             continue
 
         if PART_OFF <= t < PART_OFF + MAX_PARTS:
@@ -446,6 +558,8 @@ def tokens_to_score(tokens: list[int]):
         all_measures: set[int] = set()
         for v_data in voices_data.values():
             all_measures.update(v_data.keys())
+        if part_idx == 0:
+            all_measures.update(measure_chord_syms.keys())
 
         for m_num in sorted(all_measures):
             measure = m21.stream.Measure(number=m_num)
@@ -479,6 +593,11 @@ def tokens_to_score(tokens: list[int]):
                 pairs = voices_data[voice_idx].get(m_num, [])
                 for offset_ql, el in sorted(pairs, key=lambda x: x[0]):
                     measure.insert(offset_ql, el)
+
+            # Chord symbols belong to the top staff.
+            if part_idx == 0:
+                for offset_ql, cs in measure_chord_syms.get(m_num, []):
+                    measure.insert(offset_ql, cs)
 
             part.append(measure)
         score.append(part)
@@ -680,6 +799,14 @@ def _collect_events_by_measure(score):
             if m_num not in events_by_measure:
                 events_by_measure[m_num] = []
 
+            # Chord symbols (lead-sheet harmony) ride on a dedicated harmony lane.
+            # Collect them once, from the top staff, where they conventionally live.
+            if part_idx == 0:
+                for cs in measure.getElementsByClass(m21.harmony.ChordSymbol):
+                    cs_toks = chordsym_to_tokens(cs)
+                    if cs_toks:
+                        events_by_measure[m_num].append((float(cs.offset), HARMONY_LANE, cs_toks))
+
             if measure.voices:
                 voice_streams = []
                 found_v = 0
@@ -696,6 +823,10 @@ def _collect_events_by_measure(score):
             for voice_idx, note_stream in voice_streams:
                 combined = part_idx * MAX_VOICES_PER_PART + voice_idx
                 for el in note_stream:
+                    # ChordSymbol subclasses Chord; it is handled on the harmony
+                    # lane above and must not be tokenized as literal notes here.
+                    if isinstance(el, m21.harmony.Harmony):
+                        continue
                     offset = float(el.offset)
                     is_grace = el.duration.quarterLength == 0
 
@@ -752,7 +883,11 @@ def _emit_measure_tokens(
     for m_num in measure_nums:
         events = events_by_measure.get(m_num, [])
         if part_filter is not None:
-            events = [e for e in events if (e[1] // MAX_VOICES_PER_PART) in part_filter]
+            # Chord symbols (harmony lane) ride with the top staff (part 0).
+            events = [
+                e for e in events
+                if (0 if e[1] == HARMONY_LANE else e[1] // MAX_VOICES_PER_PART) in part_filter
+            ]
         events = sorted(events, key=lambda e: (e[0], e[1]))
 
         tokens: list[int] = [BAR]
@@ -772,7 +907,7 @@ def _emit_measure_tokens(
                 cur_lane = -1
 
             if combined != cur_lane:
-                tokens.append(PART_OFF + combined)
+                tokens.append(HARMONY if combined == HARMONY_LANE else PART_OFF + combined)
                 cur_lane = combined
 
             tokens.extend(toks)

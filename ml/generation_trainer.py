@@ -25,6 +25,7 @@ def train_generation(
     on_epoch: Callable[[int, float, float], None],
     stop_flag: list[bool],
     resume_optimizer: bool = False,
+    cache_workers: int = 1,
 ):
     """Train model on pure standard autoregressive generation (no FIM).
 
@@ -46,4 +47,5 @@ def train_generation(
         fim_ratio=0.0,
         fim_example_fn=None,
         resume_optimizer=resume_optimizer,
+        cache_workers=cache_workers,
     )

@@ -14,6 +14,33 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
+def _ordinal_to_measure_numbers(score, start: int, end: int) -> tuple[int, int]:
+    """Translate 1-based visual/ordinal measure positions into music21 measure.number values.
+
+    The frontend selects measures by their position in the rendered score: Verovio draws
+    every measure — including a pickup/anacrusis — in document order, so the user's Nth
+    selected measure is the Nth measure element. music21, however, numbers a pickup measure
+    0 (implicit="yes"), so ``measure.number`` and the visual ordinal diverge once a pickup
+    (or any measure-length anomaly that shifts numbering) is present. Map by position using
+    the first part's measure list so the rest of the pipeline — which keys on measure.number —
+    blanks and fills exactly the measures the user clicked.
+    """
+    import music21 as m21
+
+    if not score.parts:
+        return start, end
+    measures = list(score.parts[0].getElementsByClass(m21.stream.Measure))
+    if not measures:
+        return start, end
+    nums = [m.number if m.number is not None else 0 for m in measures]
+
+    def at(ordinal: int) -> int:
+        idx = min(max(ordinal - 1, 0), len(nums) - 1)
+        return nums[idx]
+
+    return at(start), at(end)
+
+
 def _mark_measures_empty(score, start: int, end: int, parts: list[int] | None = None) -> None:
     """Replace note content in [start, end] with a hidden rest; preserve time/key/tempo.
 
@@ -43,7 +70,8 @@ def _run_infill(body: InfillRequest) -> str:
     from ml.infill_generator import infill_and_export
 
     score = m21.converter.parseData(body.xml, format="musicxml")
-    _mark_measures_empty(score, body.start_measure, body.end_measure, body.parts)
+    start, end = _ordinal_to_measure_numbers(score, body.start_measure, body.end_measure)
+    _mark_measures_empty(score, start, end, body.parts)
 
     logs: list[str] = []
     result = infill_and_export(
@@ -54,7 +82,7 @@ def _run_infill(body: InfillRequest) -> str:
         top_k=body.top_k,
         log=logs.append,
         device=body.device,
-        gaps=[(body.start_measure, body.end_measure)],
+        gaps=[(start, end)],
         target_parts=body.parts,
     )
 
@@ -88,7 +116,8 @@ async def infill_stream(body: InfillRequest):
     def run():
         try:
             score = m21.converter.parseData(body.xml, format="musicxml")
-            _mark_measures_empty(score, body.start_measure, body.end_measure, body.parts)
+            start, end = _ordinal_to_measure_numbers(score, body.start_measure, body.end_measure)
+            _mark_measures_empty(score, start, end, body.parts)
             for bar, xml, total in infill_and_stream(
                 score=score,
                 model_name=body.model_name,
@@ -96,7 +125,7 @@ async def infill_stream(body: InfillRequest):
                 temperature=body.temperature,
                 top_k=body.top_k,
                 device=body.device,
-                gaps=[(body.start_measure, body.end_measure)],
+                gaps=[(start, end)],
                 target_parts=body.parts,
             ):
                 asyncio.run_coroutine_threadsafe(q.put(("data", bar, xml, total)), loop).result()

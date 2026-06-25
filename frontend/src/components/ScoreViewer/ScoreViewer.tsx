@@ -30,12 +30,13 @@ export default function ScoreViewer() {
   const streamMode = useStore((s) => s.streamMode)
 
   const [pages, setPages] = useState<string[]>([])
-  const [marquee, setMarquee] = useState<{ left: number; top: number; width: number; height: number } | null>(null)
   const outerRef = useRef<HTMLDivElement>(null)
   const innerRef = useRef<HTMLDivElement>(null)
+  const marqueeRef = useRef<HTMLDivElement>(null)
   const dragStartClientRef = useRef<{ x: number; y: number } | null>(null)
   const rectCacheRef = useRef<Array<{ measure: number; staff: number; rect: DOMRect }>>([])
   const staffCountRef = useRef(0)
+  const lastSelKeyRef = useRef<string>('')
   const zoomRef = useRef(zoom)
   zoomRef.current = zoom
 
@@ -227,11 +228,16 @@ export default function ScoreViewer() {
     staffCountRef.current = staffCount
   }
 
+  function hideMarquee() {
+    if (marqueeRef.current) marqueeRef.current.style.display = 'none'
+  }
+
   function onMouseDown(e: React.MouseEvent) {
     e.preventDefault()
     dragStartClientRef.current = { x: e.clientX, y: e.clientY }
+    lastSelKeyRef.current = ''
     buildRectCache()
-    setMarquee(null)
+    hideMarquee()
 
     // Immediate single-click feedback (drag may override this on mousemove).
     const hit = measureAndStaffAt(e)
@@ -257,42 +263,54 @@ export default function ScoreViewer() {
     // mousedown selection in place and don't draw the marquee.
     if (boxRight - boxLeft < 4 && boxBottom - boxTop < 4) return
 
+    // Draw the marquee imperatively (no React re-render) so it tracks the
+    // cursor smoothly without churning the SVG highlight on every event.
     const outer = outerRef.current
-    if (outer) {
+    const mq = marqueeRef.current
+    if (outer && mq) {
       const o = outer.getBoundingClientRect()
-      setMarquee({
-        left: boxLeft - o.left + outer.scrollLeft,
-        top: boxTop - o.top + outer.scrollTop,
-        width: boxRight - boxLeft,
-        height: boxBottom - boxTop,
-      })
+      mq.style.display = 'block'
+      mq.style.left = `${boxLeft - o.left + outer.scrollLeft}px`
+      mq.style.top = `${boxTop - o.top + outer.scrollTop}px`
+      mq.style.width = `${boxRight - boxLeft}px`
+      mq.style.height = `${boxBottom - boxTop}px`
     }
 
-    const measureSet = new Set<number>()
+    // Hit-test cached rects (cheap arithmetic, no layout). Only write the
+    // selection when the covered measure/staff set actually changes, so the
+    // highlight effect doesn't reflow the SVG while dragging within a measure.
+    let start1 = Infinity
+    let end1 = -Infinity
     const staffSet = new Set<number>()
     for (const { measure, staff, rect } of rectCacheRef.current) {
       const overlaps = rect.right >= boxLeft && rect.left <= boxRight && rect.bottom >= boxTop && rect.top <= boxBottom
       if (overlaps) {
-        measureSet.add(measure)
+        if (measure < start1) start1 = measure
+        if (measure > end1) end1 = measure
         staffSet.add(staff)
       }
     }
 
-    if (measureSet.size === 0) {
-      setSelection(null)
+    if (start1 === Infinity) {
+      if (lastSelKeyRef.current !== 'none') {
+        lastSelKeyRef.current = 'none'
+        setSelection(null)
+      }
       return
     }
-    const start1 = Math.min(...measureSet)
-    const end1 = Math.max(...measureSet)
     const staffCount = staffCountRef.current
     const parts = staffSet.size === 0 || staffSet.size === staffCount ? null : [...staffSet].sort((a, b) => a - b)
-    setSelection({ start: start1, end: end1, parts })
+    const key = `${start1}-${end1}-${parts ? parts.join(',') : 'all'}`
+    if (key !== lastSelKeyRef.current) {
+      lastSelKeyRef.current = key
+      setSelection({ start: start1, end: end1, parts })
+    }
   }
 
   function onMouseUp() {
     dragStartClientRef.current = null
     rectCacheRef.current = []
-    setMarquee(null)
+    hideMarquee()
   }
 
   function onWheel(e: React.WheelEvent) {
@@ -344,12 +362,7 @@ export default function ScoreViewer() {
           <AppendBar />
         </div>
       )}
-      {marquee && (
-        <div
-          className={styles.marquee}
-          style={{ left: marquee.left, top: marquee.top, width: marquee.width, height: marquee.height }}
-        />
-      )}
+      <div ref={marqueeRef} className={styles.marquee} style={{ display: 'none' }} />
     </div>
   )
 }

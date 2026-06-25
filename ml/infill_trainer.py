@@ -137,6 +137,7 @@ def train_infill(
     stop_flag: list[bool],
     fim_ratio: float = 0.5,
     resume_optimizer: bool = False,
+    cache_workers: int = 1,
 ):
     """Train model with mixed standard + FIM objectives.
 
@@ -159,4 +160,5 @@ def train_infill(
         fim_ratio=fim_ratio,
         fim_example_fn=create_fim_example,
         resume_optimizer=resume_optimizer,
+        cache_workers=cache_workers,
     )

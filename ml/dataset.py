@@ -1,105 +1,37 @@
-"""Downloads and caches the OpenScore/Lieder dataset from GitHub."""
+"""Backwards-compatible facade over the multi-source dataset registry.
 
-import os
-import json
-import time
-import requests
+Historically this module *was* the OpenScore downloader.  That logic now lives in
+``ml.datasets`` (one module per source) behind the :class:`DatasetSource`
+interface, so new corpora (PDMX, Wikifonia, ...) can be added without touching
+callers.  These thin wrappers preserve the original import surface
+(``download_dataset``, ``load_cached_paths``, ``dataset_status``) used by the
+notebooks, ``similarity.py`` and the round-trip tests.
+
+For multi-source workflows use ``ml.datasets`` directly:
+
+    from ml.datasets import download_sources, load_paths, dataset_status
+    download_sources(["wikifonia"])
+    paths = load_paths(["openscore", "pdmx"])   # or load_paths() for all
+"""
+
+from __future__ import annotations
+
 from pathlib import Path
-from typing import Callable, Optional
-from dotenv import load_dotenv
-from tqdm import tqdm
 
-load_dotenv(dotenv_path='env.env')
-REPO = "OpenScore/Lieder"
-BRANCH = "main"
-API_TREE = f"https://api.github.com/repos/{REPO}/git/trees/{BRANCH}?recursive=1"
-RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}"
-STORAGE_DIR = Path(os.getenv('STORAGE_DIR'))
-DATA_DIR = STORAGE_DIR / Path("data/openscore")
-MANIFEST = DATA_DIR / "manifest.json"
-
-HEADERS = {"Accept": "application/vnd.github+json"}
+from ml.datasets import load_paths
+from ml.datasets import dataset_status as _registry_status
+from ml.datasets.registry import SOURCES
 
 
-def _get_token() -> dict:
-    token = os.getenv("GITHUB_TOKEN")
-    if token:
-        return {**HEADERS, "Authorization": f"Bearer {token}"}
-    return HEADERS
+def download_dataset(log, progress, max_files: int = 200) -> int:
+    """Download the OpenScore corpus (legacy default source)."""
+    return SOURCES["openscore"].download(log, progress, max_files=max_files)
 
 
-def fetch_file_list(log: Callable[[str], None]) -> list[dict]:
-    log("Fetching file tree from GitHub API...")
-    resp = requests.get(API_TREE, headers=_get_token(), timeout=30)
-    if resp.status_code == 403:
-        raise RuntimeError("GitHub API rate-limited. Set GITHUB_TOKEN env var to increase limits.")
-    resp.raise_for_status()
-    tree = resp.json().get("tree", [])
-    mxl_files = [
-        {"path": item["path"], "url": f"{RAW_BASE}/{item['path']}"}
-        for item in tree
-        if item["path"].endswith(".mxl") or item["path"].endswith(".xml")
-    ]
-    log(f"Found {len(mxl_files)} score files.")
-    return mxl_files
-
-
-def download_dataset(
-    log: Callable[[str], None],
-    progress: Callable[[int, int], None],
-    max_files: int = 200,
-) -> int:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-    if MANIFEST.exists():
-        with open(MANIFEST) as f:
-            cached = json.load(f)
-        if max_files == len(cached):
-            log(f"Cache found: {len(cached)} files already downloaded.")
-            return len(cached)
-
-    files = fetch_file_list(log)
-    files = files[:max_files]
-    downloaded = []
-
-    for i, item in tqdm(enumerate(files), total=len(files), desc="Downloading"):
-        dest = DATA_DIR / item["path"].replace("/", "_")
-        progress(i, len(files))
-        if dest.exists():
-            downloaded.append(str(Path("data/openscore") / item["path"].replace("/", "_")))
-            continue
-        try:
-            resp = requests.get(item["url"], headers=_get_token(), timeout=20)
-            resp.raise_for_status()
-            dest.write_bytes(resp.content)
-            downloaded.append(str(Path("data/openscore") / item["path"].replace("/", "_")))
-            time.sleep(0.05)
-        except Exception as e:
-            log(f"  Skip {item['path']}: {e}")
-
-    with open(MANIFEST, "w") as f:
-        json.dump(downloaded, f, indent=2)
-
-    progress(len(files), len(files))
-    log(f"Dataset cached: {len(downloaded)} files in {DATA_DIR}/")
-    return len(downloaded)
-
-
-def load_cached_paths() -> list[str]:
-    if not MANIFEST.exists():
-        return []
-    with open(MANIFEST) as f:
-        paths = json.load(f)
-
-    for i, path in enumerate(paths):
-        paths[i] = STORAGE_DIR / path
-
-    return paths
-
+def load_cached_paths() -> list[Path]:
+    """All cached score paths, merged across every downloaded source."""
+    return load_paths()
 
 
 def dataset_status() -> str:
-    if not MANIFEST.exists():
-        return "Not downloaded"
-    paths = load_cached_paths()
-    return f"{len(paths)} files cached in {DATA_DIR}/"
+    return _registry_status()
