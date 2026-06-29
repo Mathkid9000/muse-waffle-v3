@@ -1,7 +1,7 @@
 .outer {
   position: relative;
   height: 100%;
-  overflow: auto;
+  overflow: hidden;
   background: #2d2d2d;
   cursor: crosshair;
   user-select: none;
@@ -21,6 +21,9 @@
   align-items: center;
   padding: 20px;
   gap: 20px;
+  /* Camera transform anchors at the viewport top-left so pan/zoom math is exact. */
+  transform-origin: 0 0;
+  will-change: transform;
 }
 
 .page {

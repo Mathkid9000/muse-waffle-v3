@@ -24,7 +24,8 @@ export default function ScoreViewer() {
   const currentXml = useStore((s) => s.currentXml)
   const scoreData = useStore((s) => s.scoreData)
   const zoom = useStore((s) => s.zoom)
-  const setZoom = useStore((s) => s.setZoom)
+  const panX = useStore((s) => s.panX)
+  const panY = useStore((s) => s.panY)
   const selection = useStore((s) => s.selection)
   const setSelection = useStore((s) => s.setSelection)
   const streamMode = useStore((s) => s.streamMode)
@@ -39,6 +40,9 @@ export default function ScoreViewer() {
   const lastSelKeyRef = useRef<string>('')
   const zoomRef = useRef(zoom)
   zoomRef.current = zoom
+  // True while a Ctrl+right-drag pan gesture is in progress (transform is updated
+  // imperatively during the drag, then committed to the store on release).
+  const panningRef = useRef(false)
 
   const cachedPagesRef = useRef<string[]>([])
   const measureToPageRef = useRef<Map<number, number>>(new Map())
@@ -138,6 +142,39 @@ export default function ScoreViewer() {
     }
   }, [selection, pages])
 
+  // Wheel: Ctrl/Cmd + wheel zooms toward the cursor; plain wheel pans the camera.
+  // Registered manually (not via React's onWheel) so the listener is non-passive and
+  // preventDefault() actually suppresses native page scroll / browser zoom.
+  useEffect(() => {
+    const outer = outerRef.current
+    if (!outer) return
+    function onWheel(e: WheelEvent) {
+      e.preventDefault()
+      const rect = outer!.getBoundingClientRect()
+      const ox = e.clientX - rect.left
+      const oy = e.clientY - rect.top
+      const { zoomTo, setPan, panX, panY } = useStore.getState()
+      if (e.ctrlKey || e.metaKey) {
+        const prev = zoomRef.current
+        const next = Math.round(prev * (e.deltaY < 0 ? 1.1 : 1 / 1.1))
+        if (next !== prev) zoomTo(next, ox, oy)
+      } else {
+        setPan(panX - e.deltaX, panY - e.deltaY)
+      }
+    }
+    outer.addEventListener('wheel', onWheel, { passive: false })
+    return () => outer.removeEventListener('wheel', onWheel)
+  }, [])
+
+  // Keep the store's viewport size in sync so the toolbar can zoom around the center.
+  useEffect(() => {
+    const outer = outerRef.current
+    if (!outer) return
+    const ro = new ResizeObserver(() => useStore.getState().setViewport(outer.clientWidth, outer.clientHeight))
+    ro.observe(outer)
+    return () => ro.disconnect()
+  }, [])
+
   // Returns the 1-based measure index and the 0-based staff index for a mouse event.
   // staffIdx is null when the click doesn't land on a specific staff (e.g. barlines).
   // 1. Tries closest() — works when the click lands on a note/rest/barline child.
@@ -233,6 +270,13 @@ export default function ScoreViewer() {
   }
 
   function onMouseDown(e: React.MouseEvent) {
+    // Ctrl + right button: pan the camera instead of selecting.
+    if (e.button === 1) {
+      startPan(e)
+      return
+    }
+    // Only the left button drives selection.
+    if (e.button !== 0) return
     e.preventDefault()
     dragStartClientRef.current = { x: e.clientX, y: e.clientY }
     lastSelKeyRef.current = ''
@@ -270,8 +314,8 @@ export default function ScoreViewer() {
     if (outer && mq) {
       const o = outer.getBoundingClientRect()
       mq.style.display = 'block'
-      mq.style.left = `${boxLeft - o.left + outer.scrollLeft}px`
-      mq.style.top = `${boxTop - o.top + outer.scrollTop}px`
+      mq.style.left = `${boxLeft - o.left}px`
+      mq.style.top = `${boxTop - o.top}px`
       mq.style.width = `${boxRight - boxLeft}px`
       mq.style.height = `${boxBottom - boxTop}px`
     }
@@ -313,34 +357,44 @@ export default function ScoreViewer() {
     hideMarquee()
   }
 
-  function onWheel(e: React.WheelEvent) {
-    if (!e.ctrlKey && !e.metaKey) return
+  // Ctrl + right-drag pans the camera. The transform is updated imperatively on the
+  // inner element during the gesture (no React re-render per move), then committed to
+  // the store on release. Window listeners ensure the gesture ends even if the cursor
+  // leaves the viewport.
+  function startPan(e: React.MouseEvent) {
     e.preventDefault()
-    const outer = outerRef.current
-    if (!outer) return
+    panningRef.current = true
+    const { panX: px0, panY: py0 } = useStore.getState()
+    const sx = e.clientX
+    const sy = e.clientY
+    let last = { x: px0, y: py0 }
+    if (outerRef.current) outerRef.current.style.cursor = 'grabbing'
 
-    const rect = outer.getBoundingClientRect()
-    const cy = e.clientY - rect.top
-    const prevZoom = zoomRef.current
-    const delta = e.deltaY < 0 ? 10 : -10
-    const newZoom = Math.max(25, Math.min(300, prevZoom + delta))
-    if (newZoom === prevZoom) return
-
-    const newScrollTop = (outer.scrollTop + cy) * (newZoom / prevZoom) - cy
-    setZoom(newZoom)
-    requestAnimationFrame(() => {
-      if (outer) outer.scrollTop = Math.max(0, newScrollTop)
-    })
+    const onMove = (ev: MouseEvent) => {
+      last = { x: px0 + (ev.clientX - sx), y: py0 + (ev.clientY - sy) }
+      if (innerRef.current) {
+        innerRef.current.style.transform = `translate(${last.x}px, ${last.y}px) scale(${zoomRef.current / 100})`
+      }
+    }
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+      panningRef.current = false
+      if (outerRef.current) outerRef.current.style.cursor = ''
+      useStore.getState().setPan(last.x, last.y)
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
   }
 
   return (
     <div
       ref={outerRef}
       className={styles.outer}
-      onWheel={onWheel}
       onMouseDown={onMouseDown}
       onMouseMove={onMouseMove}
       onMouseUp={onMouseUp}
+      onContextMenu={(e) => { if (e.ctrlKey || e.metaKey) e.preventDefault() }}
     >
       {!currentXml ? (
         <div className={styles.emptyState}>
@@ -354,7 +408,7 @@ export default function ScoreViewer() {
         <div
           ref={innerRef}
           className={styles.pages}
-          style={{ zoom: zoom / 100 }}
+          style={{ transform: `translate(${panX}px, ${panY}px) scale(${zoom / 100})` }}
         >
           {pages.map((svg, i) => (
             <div key={i} className={styles.page} dangerouslySetInnerHTML={{ __html: svg }} />

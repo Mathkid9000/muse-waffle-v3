@@ -10,7 +10,13 @@ export default function Toolbar() {
   const setXml = useStore((s) => s.setXml)
   const setScoreData = useStore((s) => s.setScoreData)
   const setError = useStore((s) => s.setError)
-  const setZoom = useStore((s) => s.setZoom)
+  const zoomTo = useStore((s) => s.zoomTo)
+  const resetCamera = useStore((s) => s.resetCamera)
+  const viewportW = useStore((s) => s.viewportW)
+  const viewportH = useStore((s) => s.viewportH)
+
+  // Toolbar zoom anchors at the viewport center (the wheel anchors at the cursor).
+  const zoomStep = (delta: number) => zoomTo(zoom + delta, viewportW / 2, viewportH / 2)
 
   async function loadScoreXml(xml: string) {
     const numInstruments = await countInstruments(xml)
@@ -65,9 +71,9 @@ export default function Toolbar() {
           Download
         </button>
         <div className={styles.zoom}>
-          <button className={styles.zoomBtn} onClick={() => setZoom(zoom - 10)} disabled={zoom <= 25} title="Zoom out (Ctrl+Scroll)">−</button>
-          <span className={styles.zoomLabel} title="Double-click to reset" onDoubleClick={() => setZoom(100)} style={{ cursor: 'default' }}>{zoom}%</span>
-          <button className={styles.zoomBtn} onClick={() => setZoom(zoom + 10)} disabled={zoom >= 300} title="Zoom in (Ctrl+Scroll)">+</button>
+          <button className={styles.zoomBtn} onClick={() => zoomStep(-10)} disabled={zoom <= 25} title="Zoom out (Ctrl+Scroll)">−</button>
+          <span className={styles.zoomLabel} title="Double-click to reset" onDoubleClick={() => resetCamera()} style={{ cursor: 'default' }}>{zoom}%</span>
+          <button className={styles.zoomBtn} onClick={() => zoomStep(10)} disabled={zoom >= 300} title="Zoom in (Ctrl+Scroll)">+</button>
         </div>
       </div>
       <input
