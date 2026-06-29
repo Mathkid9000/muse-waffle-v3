@@ -200,7 +200,7 @@ def merge_fill_into_score(
     try:
         for part in score.parts:
             part.makeBeams(inPlace=True)
-            part.makeAccidentals(inPlace=True)
+            part.makeAccidentals(inPlace=True, overrideStatus=True)
     except Exception as e:
         print(f"makeBeams error: {e}")
 
