@@ -166,6 +166,24 @@ export default function AIPanel() {
     }
   }
 
+  async function handleEdit() {
+    setLoading(true)
+    try {
+      const output = await api.editRmMeasure({
+        xml: currentXml!,
+        start_measure: 3,
+        end_measure: 4
+      })
+      setXml(output['xml'])
+
+      console.log(output,'success')
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setLoading(false)
+    }
+  }
+
   function toggleInstr(idx: number) {
     setSelectedInstrs((prev) =>
       prev.includes(idx) ? prev.filter((i) => i !== idx) : [...prev, idx]
@@ -177,186 +195,199 @@ export default function AIPanel() {
     if (streamBar != null && totalBars != null) {
       return `${verb} bar ${streamBar} of ${totalBars}…`
     }
-    return `${verb}…`
+    return `${verb}...`
   }
 
   return (
-    <div className={styles.panel}>
-      <div className={styles.tabs}>
-        <button
-          className={tab === 'infill' ? styles.activeTab : styles.tab}
-          onClick={() => setTab('infill')}
-        >
-          AI Fill
-        </button>
-        <button
-          className={tab === 'generate' ? styles.activeTab : styles.tab}
-          onClick={() => setTab('generate')}
-        >
-          Generate New
-        </button>
-        <button
-          className={tab === 'append' ? styles.activeTab : styles.tab}
-          onClick={() => setTab('append')}
-        >
-          Append
-        </button>
-      </div>
-
-      {error && (
-        <div className={styles.error} onClick={() => setError(null)}>
-          {error}
+    <>
+      <div className={styles.panel}>
+        <div className={styles.tabs}>
+          <button
+            className={tab === 'infill' ? styles.activeTab : styles.tab}
+            onClick={() => setTab('infill')}
+          >
+            AI Fill
+          </button>
+          <button
+            className={tab === 'generate' ? styles.activeTab : styles.tab}
+            onClick={() => setTab('generate')}
+          >
+            Generate New
+          </button>
+          <button
+            className={tab === 'append' ? styles.activeTab : styles.tab}
+            onClick={() => setTab('append')}
+          >
+            Append
+          </button>
         </div>
-      )}
 
-      {tab === 'infill' && (
-        <div className={styles.section}>
-          <p className={styles.hint}>
-            Click a staff in the score to select it, then drag to extend the measure range.
-          </p>
-          <p className={styles.hint}>
-            {selectedParts
-              ? `Staves: ${selectedParts.map((p) => p + 1).join(', ')}`
-              : 'Staves: all'}
-          </p>
-          <div className={styles.row}>
-            <label className={styles.label}>
-              From
-              <input
-                type="number" min="1" value={startMeasure}
-                onChange={(e) => setStartMeasure(Math.max(1, +e.target.value))}
-              />
-            </label>
-            <label className={styles.label}>
-              To
-              <input
-                type="number" min="1" value={endMeasure}
-                onChange={(e) => setEndMeasure(Math.max(1, +e.target.value))}
-              />
-            </label>
+        {error && (
+          <div className={styles.error} onClick={() => setError(null)}>
+            {error}
           </div>
-          <label className={styles.label}>Temperature
-            <input type="range" min="0.1" max="2" step="0.05"
-              value={temperature} onChange={(e) => setTemperature(+e.target.value)} />
-            <span>{temperature.toFixed(2)}</span>
-          </label>
-          <label className={styles.label}>Top-K
-            <input type="range" min="1" max="200" step="1"
-              value={topK} onChange={(e) => setTopK(+e.target.value)} />
-            <span>{topK}</span>
-          </label>
-          <label className={styles.label}>Device
-            <select value={device} onChange={(e) => setDevice(e.target.value)}>
-              <option value="cpu">CPU</option>
-              <option value="cuda">CUDA</option>
-            </select>
-          </label>
-          <button
-            className={styles.runBtn}
-            onClick={handleInfill}
-            disabled={loading || !currentXml}
-          >
-            {progressLabel('Filling') ?? 'Fill Measures'}
-          </button>
-        </div>
-      )}
+        )}
 
-      {tab === 'generate' && (
-        <div className={styles.section}>
-          <fieldset className={styles.fieldset}>
-            <legend>Instruments</legend>
-            <div className={styles.instrGrid}>
-              {INSTR_NAMES.map((name, idx) => (
-                <label key={idx} className={styles.instrLabel}>
-                  <input
-                    type="checkbox"
-                    checked={selectedInstrs.includes(idx)}
-                    onChange={() => toggleInstr(idx)}
-                  />
-                  {name}
-                </label>
-              ))}
+        {tab === 'infill' && (
+          <div className={styles.section}>
+            <p className={styles.hint}>
+              Click a staff in the score to select it, then drag to extend the measure range.
+            </p>
+            <p className={styles.hint}>
+              {selectedParts
+                ? `Staves: ${selectedParts.map((p) => p + 1).join(', ')}`
+                : 'Staves: all'}
+            </p>
+            <div className={styles.row}>
+              <label className={styles.label}>
+                From
+                <input
+                  type="number" min="1" value={startMeasure}
+                  onChange={(e) => setStartMeasure(Math.max(1, +e.target.value))}
+                />
+              </label>
+              <label className={styles.label}>
+                To
+                <input
+                  type="number" min="1" value={endMeasure}
+                  onChange={(e) => setEndMeasure(Math.max(1, +e.target.value))}
+                />
+              </label>
             </div>
-          </fieldset>
-          <label className={styles.label}>Key
-            <select value={key} onChange={(e) => setKey(+e.target.value)}>
-              {KEY_LABELS.map((k, i) => <option key={i} value={i}>{k}</option>)}
-            </select>
-          </label>
-          <label className={styles.label}>Time Signature
-            <select value={timeSig} onChange={(e) => setTimeSig(+e.target.value)}>
-              {TIME_SIG_LABELS.map((t, i) => <option key={i} value={i}>{t}</option>)}
-            </select>
-          </label>
-          <label className={styles.label}>Tempo (BPM)
-            <select value={tempo} onChange={(e) => setTempo(+e.target.value)}>
-              {TEMPO_LABELS.map((t, i) => <option key={i} value={i}>{t}</option>)}
-            </select>
-          </label>
-          <label className={styles.label}>Bars
-            <input type="number" min="1" max="128" value={numBars}
-              onChange={(e) => setNumBars(+e.target.value)} />
-          </label>
-          <label className={styles.label}>Temperature
-            <input type="range" min="0.1" max="2" step="0.05"
-              value={genTemp} onChange={(e) => setGenTemp(+e.target.value)} />
-            <span>{genTemp.toFixed(2)}</span>
-          </label>
-          <label className={styles.label}>Top-K
-            <input type="range" min="1" max="200" step="1"
-              value={genTopK} onChange={(e) => setGenTopK(+e.target.value)} />
-            <span>{genTopK}</span>
-          </label>
-          <label className={styles.label}>Device
-            <select value={genDevice} onChange={(e) => setGenDevice(e.target.value)}>
-              <option value="cpu">CPU</option>
-              <option value="cuda">CUDA</option>
-            </select>
-          </label>
-          <button
-            className={styles.runBtn}
-            onClick={handleGenerate}
-            disabled={loading}
-          >
-            {progressLabel('Generating') ?? 'Generate Score'}
-          </button>
-        </div>
-      )}
+            <label className={styles.label}>Temperature
+              <input type="range" min="0.1" max="2" step="0.05"
+                value={temperature} onChange={(e) => setTemperature(+e.target.value)} />
+              <span>{temperature.toFixed(2)}</span>
+            </label>
+            <label className={styles.label}>Top-K
+              <input type="range" min="1" max="200" step="1"
+                value={topK} onChange={(e) => setTopK(+e.target.value)} />
+              <span>{topK}</span>
+            </label>
+            <label className={styles.label}>Device
+              <select value={device} onChange={(e) => setDevice(e.target.value)}>
+                <option value="cpu">CPU</option>
+                <option value="cuda">CUDA</option>
+              </select>
+            </label>
+            <button
+              className={styles.runBtn}
+              onClick={handleInfill}
+              disabled={loading || !currentXml}
+            >
+              {progressLabel('Filling') ?? 'Fill Measures'}
+            </button>
+          </div>
+        )}
 
-      {tab === 'append' && (
+        {tab === 'generate' && (
+          <div className={styles.section}>
+            <fieldset className={styles.fieldset}>
+              <legend>Instruments</legend>
+              <div className={styles.instrGrid}>
+                {INSTR_NAMES.map((name, idx) => (
+                  <label key={idx} className={styles.instrLabel}>
+                    <input
+                      type="checkbox"
+                      checked={selectedInstrs.includes(idx)}
+                      onChange={() => toggleInstr(idx)}
+                    />
+                    {name}
+                  </label>
+                ))}
+              </div>
+            </fieldset>
+            <label className={styles.label}>Key
+              <select value={key} onChange={(e) => setKey(+e.target.value)}>
+                {KEY_LABELS.map((k, i) => <option key={i} value={i}>{k}</option>)}
+              </select>
+            </label>
+            <label className={styles.label}>Time Signature
+              <select value={timeSig} onChange={(e) => setTimeSig(+e.target.value)}>
+                {TIME_SIG_LABELS.map((t, i) => <option key={i} value={i}>{t}</option>)}
+              </select>
+            </label>
+            <label className={styles.label}>Tempo (BPM)
+              <select value={tempo} onChange={(e) => setTempo(+e.target.value)}>
+                {TEMPO_LABELS.map((t, i) => <option key={i} value={i}>{t}</option>)}
+              </select>
+            </label>
+            <label className={styles.label}>Bars
+              <input type="number" min="1" max="128" value={numBars}
+                onChange={(e) => setNumBars(+e.target.value)} />
+            </label>
+            <label className={styles.label}>Temperature
+              <input type="range" min="0.1" max="2" step="0.05"
+                value={genTemp} onChange={(e) => setGenTemp(+e.target.value)} />
+              <span>{genTemp.toFixed(2)}</span>
+            </label>
+            <label className={styles.label}>Top-K
+              <input type="range" min="1" max="200" step="1"
+                value={genTopK} onChange={(e) => setGenTopK(+e.target.value)} />
+              <span>{genTopK}</span>
+            </label>
+            <label className={styles.label}>Device
+              <select value={genDevice} onChange={(e) => setGenDevice(e.target.value)}>
+                <option value="cpu">CPU</option>
+                <option value="cuda">CUDA</option>
+              </select>
+            </label>
+            <button
+              className={styles.runBtn}
+              onClick={handleGenerate}
+              disabled={loading}
+            >
+              {progressLabel('Generating') ?? 'Generate Score'}
+            </button>
+          </div>
+        )}
+
+        {tab === 'append' && (
+          <div className={styles.section}>
+            <p className={styles.hint}>
+              Generate new measures at the end of the current score.
+            </p>
+            <label className={styles.label}>Bars to add
+              <input type="number" min="1" max="64" value={appendBars}
+                onChange={(e) => setAppendBars(Math.max(1, +e.target.value))} />
+            </label>
+            <label className={styles.label}>Temperature
+              <input type="range" min="0.1" max="2" step="0.05"
+                value={appendTemp} onChange={(e) => setAppendTemp(+e.target.value)} />
+              <span>{appendTemp.toFixed(2)}</span>
+            </label>
+            <label className={styles.label}>Top-K
+              <input type="range" min="1" max="200" step="1"
+                value={appendTopK} onChange={(e) => setAppendTopK(+e.target.value)} />
+              <span>{appendTopK}</span>
+            </label>
+            <label className={styles.label}>Device
+              <select value={appendDevice} onChange={(e) => setAppendDevice(e.target.value)}>
+                <option value="cpu">CPU</option>
+                <option value="cuda">CUDA</option>
+              </select>
+            </label>
+            <button
+              className={styles.runBtn}
+              onClick={handleAppend}
+              disabled={loading || !currentXml}
+            >
+              {progressLabel('Appending') ?? 'Append Measures'}
+            </button>
+          </div>
+        )}
+      </div>
+      <div className={styles.panel}>
         <div className={styles.section}>
-          <p className={styles.hint}>
-            Generate new measures at the end of the current score.
-          </p>
-          <label className={styles.label}>Bars to add
-            <input type="number" min="1" max="64" value={appendBars}
-              onChange={(e) => setAppendBars(Math.max(1, +e.target.value))} />
-          </label>
-          <label className={styles.label}>Temperature
-            <input type="range" min="0.1" max="2" step="0.05"
-              value={appendTemp} onChange={(e) => setAppendTemp(+e.target.value)} />
-            <span>{appendTemp.toFixed(2)}</span>
-          </label>
-          <label className={styles.label}>Top-K
-            <input type="range" min="1" max="200" step="1"
-              value={appendTopK} onChange={(e) => setAppendTopK(+e.target.value)} />
-            <span>{appendTopK}</span>
-          </label>
-          <label className={styles.label}>Device
-            <select value={appendDevice} onChange={(e) => setAppendDevice(e.target.value)}>
-              <option value="cpu">CPU</option>
-              <option value="cuda">CUDA</option>
-            </select>
-          </label>
           <button
             className={styles.runBtn}
-            onClick={handleAppend}
+            onClick={handleEdit}
             disabled={loading || !currentXml}
           >
-            {progressLabel('Appending') ?? 'Append Measures'}
+            {progressLabel('Editing') ?? 'Edit'}
           </button>
         </div>
-      )}
-    </div>
+      </div>
+    </>
   )
 }

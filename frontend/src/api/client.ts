@@ -1,5 +1,6 @@
 const BASE = '/api'
 
+// Creative
 export interface InfillRequest {
   xml: string
   start_measure: number
@@ -35,6 +36,50 @@ export interface AppendRequest {
   device?: string
 }
 
+// Deterministic
+export interface EditClefRequest {
+  xml: string
+  measure_num: number
+  staff_num: number
+  new_clef: number
+}
+
+export interface EditTimeSigRequest {
+  xml: string
+  measure_num: number
+  /** 0=2/4, 1=3/4, 2=4/4, 3=6/8, 4=3/8, 5=12/8 */
+  new_time: number
+}
+
+export interface EditKeySigRequest {
+  xml: string
+  measure_num: number
+  /** 0=6 flats … 6=C … 12=6 sharps */
+  new_key: number // TODO: Fix this format
+}
+
+export interface EditTempoRequest {
+  xml: string
+  measure_num: number
+  /** Tempo bucket index 0 (slowest) … 15 (fastest) */
+  new_tempo: number
+}
+
+export interface EditInstrRequest {
+  xml: string
+  /** Instrument index 0-31 (see INSTR_NAMES) */
+  instr: number
+  /** Clef for the new staff (0=treble … 6=bass8vb) */
+  new_clef: number
+}
+
+export interface EditRmMeasureRequest {
+  xml: string
+  start_measure: number
+  end_measure: number
+}
+
+// Other
 export interface StreamEvent {
   xml?: string
   bar?: number
@@ -86,6 +131,7 @@ async function* streamPost(path: string, body: unknown): AsyncGenerator<StreamEv
 }
 
 export const api = {
+  // Creative
   infill: (req: InfillRequest) =>
     post<{ xml: string }>('/infill', req),
   generate: (req: GenerateRequest) =>
@@ -93,6 +139,20 @@ export const api = {
   append: (req: AppendRequest) =>
     post<{ xml: string }>('/append', req),
   streamGenerate: (req: GenerateRequest) => streamPost('/generate/stream', req),
-  streamAppend:   (req: AppendRequest)   => streamPost('/append/stream', req),
-  streamInfill:   (req: InfillRequest)   => streamPost('/infill/stream', req),
+  streamAppend: (req: AppendRequest) => streamPost('/append/stream', req),
+  streamInfill: (req: InfillRequest) => streamPost('/infill/stream', req),
+
+  // Deterministic
+  editClef: (req: EditClefRequest) =>
+    post<{ xml: string }>('/edit/clef', req),
+  editTimeSig: (req: EditTimeSigRequest) =>
+    post<{ xml: string }>('/edit/time_sig', req),
+  editKeySig: (req: EditKeySigRequest) =>
+    post<{ xml: string }>('/edit/key_sig', req),
+  editTempo: (req: EditTempoRequest) =>
+    post<{ xml: string }>('/edit/tempo', req),
+  editInstr: (req: EditInstrRequest) =>
+    post<{ xml: string }>('/edit/instr', req),
+  editRmMeasure: (req: EditRmMeasureRequest) =>
+    post<{ xml: string }>('/edit/rm-measure', req),
 }

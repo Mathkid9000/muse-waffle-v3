@@ -29,7 +29,7 @@ def _decode_xml(v: str) -> str:
                 return zf.read(name).decode("utf-8")
     raise ValueError("Could not find MusicXML content in MXL archive")
 
-
+# Creative Requests
 class InfillRequest(BaseModel):
     xml: str = Field(..., description="MusicXML content as a string")
 
@@ -78,6 +78,74 @@ class AppendRequest(BaseModel):
     top_k: int = Field(50, ge=1, le=200)
     model_name: str = Field("GEN-D1024-H16-L8", description="Generation model checkpoint name")
     device: str = Field("cpu", description="Inference device: cpu or cuda")
+
+
+# Deterministic requests
+class EditClefRequest(BaseModel):
+    xml: str = Field(..., description="Existing MusicXML content to change clef of")
+
+    @field_validator("xml", mode="before")
+    @classmethod
+    def resolve_xml(cls, v: str) -> str:
+        return _decode_xml(v)
+    measure_num: int = Field(1, ge=1)
+    staff_num: int = Field(0, ge=0)
+    new_clef: int = Field(0, ge=0, lt=7)
+
+
+class EditTimeSigRequest(BaseModel):
+    xml: str = Field(..., description="Existing MusicXML content to change the time signature of")
+
+    @field_validator("xml", mode="before")
+    @classmethod
+    def resolve_xml(cls, v: str) -> str:
+        return _decode_xml(v)
+    measure_num: int = Field(1, ge=1)
+    new_time: int = Field(2, ge=0, lt=6, description="Time signature index (0=2/4, 1=3/4, 2=4/4, 3=6/8, 4=3/8, 5=12/8)")
+
+
+class EditKeySigRequest(BaseModel):
+    xml: str = Field(..., description="Existing MusicXML content to change the key signature of")
+
+    @field_validator("xml", mode="before")
+    @classmethod
+    def resolve_xml(cls, v: str) -> str:
+        return _decode_xml(v)
+    measure_num: int = Field(1, ge=1)
+    new_key: int = Field(6, ge=0, le=12, description="Key signature index (0=6 flats … 6=C … 12=6 sharps)")
+
+
+class EditTempoRequest(BaseModel):
+    xml: str = Field(..., description="Existing MusicXML content to change the tempo of")
+
+    @field_validator("xml", mode="before")
+    @classmethod
+    def resolve_xml(cls, v: str) -> str:
+        return _decode_xml(v)
+    measure_num: int = Field(1, ge=1)
+    new_tempo: int = Field(5, ge=0, lt=16, description="Tempo bucket index (0=slowest … 15=fastest)")
+
+
+class EditInstrRequest(BaseModel):
+    xml: str = Field(..., description="Existing MusicXML content to add an instrument to")
+
+    @field_validator("xml", mode="before")
+    @classmethod
+    def resolve_xml(cls, v: str) -> str:
+        return _decode_xml(v)
+    instr: int = Field(1, ge=0, lt=32, description="Instrument index (0-31, see INSTR_NAMES in ml/tokenizer.py)")
+    new_clef: int = Field(0, ge=0, lt=7, description="Clef for the new staff (0=treble … 6=bass8vb)")
+
+
+class EditRmMeasureRequest(BaseModel):
+    xml: str = Field(..., description="Existing MusicXML content to remove measures from")
+
+    @field_validator("xml", mode="before")
+    @classmethod
+    def resolve_xml(cls, v: str) -> str:
+        return _decode_xml(v)
+    start_measure: int = Field(..., ge=1, description="First measure to remove (inclusive)")
+    end_measure: int = Field(..., ge=1, description="Last measure to remove (inclusive)")
 
 
 class XmlResponse(BaseModel):
