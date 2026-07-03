@@ -1,257 +1,91 @@
-"""
-Converts music21 scores to integer token sequences and back.
+"""music21 <-> compound-event codec for the MMT-BERT representation.
 
-Vocabulary layout: (522 tokens)
-  0        PAD
-  1        BOS
-  2        EOS
-  3        BAR
-  4        TIE   (note is tied forward to the next same-pitch note)
-  5-132    NOTE  pitch 0-127  (MIDI)
-  133-153  DURATION  (21 bins: 32nd to double-whole, plus triplet 16th/8th/quarter/half/whole)
-  154-174  REST      (same 21 duration bins)
-  175-187  KEY_SIG   (-6 to +6 sharps)
-  188-193  TIME_SIG  (common meters)
-  194-200  CLEF
-  201-257  TEXT chars (printable ASCII 32-88, 57 values)
-  258-273  PART_0 to PART_15  (combined part+voice: part_idx*2 + voice_idx)
-  274-417  STEP_0 to STEP_143 (absolute offset within measure, 1/24 ql units)
-  418      GRACE  (next note/chord is a grace note; DUR carries its written duration)
-  419      FILL_START  (infill: end of prefix)
-  420      FILL_END    (infill: end of suffix; start of kept-staff gap context)
-  421      EMPTY_BAR   (infill: placeholder for empty measures)
-  422-437  TEMPO  (16 BPM buckets)
-  438-469  INSTR  (32 instrument categories; see INSTR_NAMES)
-  470      FILL_GEN    (infill: end of kept-staff gap context; start of generation)
-  471      HARMONY     (chord-symbol lane marker, analogous to a PART token)
-  472-483  CSYM_ROOT   (chord-symbol root pitch class, 12)
-  484-509  CSYM_KIND   (chord quality; see CHORD_KINDS)
-  510-521  CSYM_BASS   (chord-symbol bass pitch class, slash chords only, 12)
+An "event" is a 7-field integer row — see :mod:`ml.events` for the schema.
+This module converts music21 scores to per-measure event rows and back.
 
-Infill (fill-in-the-middle) sequence format:
-  [BOS] header prefix [FILL_START] suffix [FILL_END] kept_gap [FILL_GEN] target_gap [EOS]
-  where kept_gap holds the gap measures restricted to the staves being KEPT (context),
-  and target_gap holds the gap measures restricted to the staves being regenerated
-  (the loss/generation region). For full-staff infill kept_gap is empty.
+The parse-once / emit-cheap split of the old flat-token tokenizer is kept:
 
-PART tokens encode both staff and voice: PART_{part*2 + voice}.
-Each token unambiguously identifies a single voice lane.  Supports up to
-8 staves x 2 voices = 16 lanes.
+  * :func:`collect_score` walks a score with music21 ONCE and returns a plain
+    pickle-friendly ``collected`` tuple.
+  * :func:`emit_measure_events` re-assembles per-measure event rows from
+    ``collected`` for arbitrary staff subsets — cheap pure python, which is
+    what partial-staff FIM and the token cache rely on.
+  * :func:`flatten_measure_events` concatenates measure blocks while assigning
+    window-relative bar indices (the compound representation's replacement for
+    counting flat BAR tokens).
 
-Step resolution is 1/24 ql per step.
-1/24 is the LCM of 1/8 (32nd notes) and 1/3 (triplets), so both quantise
-to integers with no rounding error.  144 steps x (1/24 ql) = 6 ql, matching
-the previous 48-step range while covering 12/8 time signatures fully.
-
-Each measure opens with BAR followed by optional global symbols, then note events:
-
-  [BAR] [KEY_SIG?] [TIME_SIG?] [TEMPO?]   <- only emitted when present in that measure
-    [STEP_0]
-      [PART_0] [NOTE] [DUR]
-      [PART_0] [NOTE] [DUR] [TIE]
-      [PART_0] [GRACE] [NOTE] [DUR]
-      [PART_2] [NOTE] [DUR]
-    [STEP_8]
-      [PART_0] [NOTE] [DUR]
-
-Instrument tokens appear once per part right after BOS (before the first BAR):
-  [BOS] [INSTR_0 INSTR_1 ...] [BAR] ...
+Legacy API-compat shim: ``api/routers/generate.py`` still builds its
+``first_bar_prefix`` from the old flat-token constants ``BAR``, ``KEY_OFF``,
+``TIME_OFF`` and ``TEMPO_OFF``.  Those names are kept here as sentinels (their
+historical numeric values; the ranges do not overlap) and
+:func:`parse_legacy_first_bar_prefix` converts such a prefix into
+(key_idx, time_idx, tempo_idx) for the new event-based generators.
 """
 
 from __future__ import annotations
 import music21 as m21
 from collections import defaultdict
 
-# 21 duration bins (quarter-lengths), sorted ascending.
-# Includes common triplet values (1/6, 1/3, 2/3, 4/3, 8/3) so tuplet notes
-# are quantized exactly instead of being rounded to the nearest regular value.
-# 1/6 = triplet 16th, 1/3 = triplet 8th, 2/3 = triplet quarter, etc.
-DURATIONS = [
-    0.125,  1/6,    0.25,   1/3,
-    0.375,  0.5,    2/3,    0.75,
-    1.0,    4/3,    1.5,    2.0,
-    2.25,   8/3,    3.0,    4.0,
-    6.0,    8.0,   12.0,   16.0,
-    32.0,
-]
+from ml.events import (
+    # fields / types
+    F_TYPE, F_BAR, F_POS, F_PITCH, F_DUR, F_TRACK, F_VALUE, N_FIELDS,
+    PAD_T, SOS_T, EOS_T, INSTR_T, BAR_T, KEY_T, TIME_T, TEMPO_T, CLEF_T,
+    NOTE_T, GRACE_T, REST_T, CHORD_T, FILL_START_T, FILL_END_T, FILL_GEN_T,
+    N_TYPES, FIELD_VOCAB_SIZES, FIELD_LOSS_MASK,
+    # constants
+    DURATIONS, N_DURATIONS, TIME_SIGS, CLEFS, N_CLEFS,
+    MAX_REAL_PARTS, MAX_VOICES_PER_PART, MAX_PARTS,
+    STEP_SIZE, MAX_POS, MAX_BARS,
+    N_TEMPO, TEMPO_BUCKETS, N_INSTR, INSTR_NAMES,
+    CHORD_KINDS, N_CHORD_KINDS,
+    # constructors
+    sos_event, eos_event, fill_start_event, fill_end_event, fill_gen_event,
+    bar_event, key_event, time_event, tempo_event, clef_event, instr_event,
+    note_event, grace_event, rest_event, chord_event,
+    transpose_events,
+)
 
-TIME_SIGS = ["2/4", "3/4", "4/4", "6/8", "3/8", "12/8"]
+# ---------------------------------------------------------------------------
+# Legacy flat-token sentinels (API-compat shim; see module docstring)
+# ---------------------------------------------------------------------------
 
-CLEFS = [ "treble", "bass", "alto", "tenor", "treble8vb", "treble8va", "bass8vb" ]
-
-MAX_REAL_PARTS      = 8
-MAX_VOICES_PER_PART = 2
-MAX_PARTS           = MAX_REAL_PARTS * MAX_VOICES_PER_PART  # 16
-
-# Step resolution: 1/24 ql per step.
-STEP_SIZE = 1 / 24
-MAX_STEP  = 144
-
-# Tempo: 16 BPM buckets.  Bucket i covers [TEMPO_BUCKETS[i], TEMPO_BUCKETS[i+1]).
-N_TEMPO = 16
-TEMPO_BUCKETS = [20, 40, 52, 63, 72, 84, 96, 108, 116, 126, 138, 152, 168, 192, 216, 256]
-
-# Instrument categories (32 entries, index 0 = unknown/other).
-N_INSTR = 32
-INSTR_NAMES = [
-    "other",          # 0
-    "piano",          # 1
-    "harpsichord",    # 2
-    "organ",          # 3
-    "accordion",      # 4
-    "guitar",         # 5
-    "bass_guitar",    # 6
-    "violin",         # 7
-    "viola",          # 8
-    "cello",          # 9
-    "double_bass",    # 10
-    "harp",           # 11
-    "flute",          # 12
-    "oboe",           # 13
-    "clarinet",       # 14
-    "bassoon",        # 15
-    "saxophone",      # 16
-    "trumpet",        # 17
-    "horn",           # 18
-    "trombone",       # 19
-    "tuba",           # 20
-    "percussion",     # 21
-    "timpani",        # 22
-    "celesta",        # 23
-    "voice_soprano",  # 24
-    "voice_mezzo",    # 25
-    "voice_alto",     # 26
-    "voice_tenor",    # 27
-    "voice_baritone", # 28
-    "voice_bass",     # 29
-    "voice",          # 30 (generic)
-    "choir",          # 31
-]
-
-PAD      = 0
-BOS      = 1
-EOS      = 2
-BAR      = 3
-TIE      = 4
-NOTE_OFF = 5
-DUR_OFF  = NOTE_OFF + 128            # 133
-REST_OFF = DUR_OFF  + len(DURATIONS) # 154
-KEY_OFF  = REST_OFF + len(DURATIONS) # 175
-TIME_OFF = KEY_OFF  + 13             # 188
-CLEF_OFF = TIME_OFF + 6              # 194
-TEXT_OFF = CLEF_OFF + 7              # 201  (ASCII 32-88 = 57 chars)
-PART_OFF = TEXT_OFF + 57             # 258
-STEP_OFF = PART_OFF + MAX_PARTS      # 274
-GRACE    = STEP_OFF + MAX_STEP       # 418
-
-# Infill special tokens (for fill-in-the-middle generation)
-FILL_START = GRACE + 1               # 419 - marks start of fill region (prefix ends here)
-FILL_END   = FILL_START + 1          # 420 - marks end of suffix, start of generation
-EMPTY_BAR  = FILL_END + 1            # 421 - placeholder for empty measures in input
-
-TEMPO_OFF = EMPTY_BAR + 1            # 422
-INSTR_OFF = TEMPO_OFF + N_TEMPO      # 438
-
-# FILL_GEN is appended at the END of the vocab so adding it does not shift any
-# existing token id (only one new embedding/head row).  It separates the kept-staff
-# gap context from the generation region in the FIM format.
-FILL_GEN  = INSTR_OFF + N_INSTR      # 470 - end of kept-staff gap context, start of generation
-
-# --- Chord-symbol tokens (lead-sheet harmony) -------------------------------
-# Appended at the very end so no existing token id shifts.  A chord symbol is
-# emitted on a dedicated "harmony lane" within a measure as:
-#     [HARMONY] [CSYM_ROOT + pc] [CSYM_KIND + k] (CSYM_BASS + pc)?
-# HARMONY marks the lane (analogous to a PART token); CSYM_BASS is only emitted
-# for slash chords (bass pitch-class differs from root).  Kind strings are
-# music21/MusicXML chordKind values, so encode is an identity map and decode can
-# pass them straight to harmony.ChordSymbol(kind=...).
-CHORD_KINDS = [
-    "major", "minor", "augmented", "diminished",
-    "dominant", "major-seventh", "minor-seventh", "diminished-seventh",
-    "augmented-seventh", "half-diminished", "major-minor",
-    "major-sixth", "minor-sixth",
-    "dominant-ninth", "major-ninth", "minor-ninth",
-    "dominant-11th", "major-11th", "minor-11th",
-    "dominant-13th", "major-13th", "minor-13th",
-    "suspended-second", "suspended-fourth",
-    "power", "other",
-]
-N_CHORD_KINDS = len(CHORD_KINDS)
-
-HARMONY       = FILL_GEN + 1                    # 471 - harmony-lane marker
-CSYM_ROOT_OFF = HARMONY + 1                     # 472 - root pitch class (12)
-CSYM_KIND_OFF = CSYM_ROOT_OFF + 12              # 484 - chord quality (N_CHORD_KINDS)
-CSYM_BASS_OFF = CSYM_KIND_OFF + N_CHORD_KINDS   # bass pitch class (12, slash chords)
-
-VOCAB_SIZE = CSYM_BASS_OFF + 12
-
-# Sentinel combined-lane id for chord-symbol events (NOT a token); sorts before
-# note lanes (0..15) so harmony is emitted before notes at the same step.
-HARMONY_LANE = -2
-
-# music21 chordKind -> CHORD_KINDS index (with aliases for less common spellings).
-_KIND_TO_IDX = {k: i for i, k in enumerate(CHORD_KINDS)}
-_KIND_ALIASES = {
-    "dominant-seventh": "dominant",
-    "minor-major": "major-minor",
-    "minor-major-seventh": "major-minor",
-    "pedal": "power",
-    "none": "other",
-    "": "major",
-}
-_OTHER_KIND_IDX = _KIND_TO_IDX["other"]
+BAR       = 3     # legacy flat BAR token id
+KEY_OFF   = 175   # legacy KEY_SIG offset  (KEY_OFF + sharps+6)
+TIME_OFF  = 188   # legacy TIME_SIG offset (TIME_OFF + TIME_SIGS idx)
+TEMPO_OFF = 422   # legacy TEMPO offset    (TEMPO_OFF + bucket idx)
 
 
-def _chord_kind_idx(kind: str | None) -> int:
-    kind = kind or ""
-    if kind in _KIND_TO_IDX:
-        return _KIND_TO_IDX[kind]
-    return _KIND_TO_IDX.get(_KIND_ALIASES.get(kind, ""), _OTHER_KIND_IDX)
+def parse_legacy_first_bar_prefix(
+    prefix: list[int] | None,
+) -> tuple[int | None, int | None, int | None]:
+    """Legacy [BAR, KEY_OFF+k, TIME_OFF+t, TEMPO_OFF+b] -> (key_idx, time_idx, tempo_idx).
 
-
-def chordsym_to_tokens(cs) -> list[int] | None:
-    """harmony.ChordSymbol -> [CSYM_ROOT, CSYM_KIND, (CSYM_BASS)] or None.
-
-    Returns None for no-chord / unparseable symbols (e.g. N.C.).
+    Each element is optional; unknown token ids are ignored.  ``key_idx`` is the
+    0..12 sharps+6 index, ``time_idx`` a TIME_SIGS index, ``tempo_idx`` a
+    TEMPO_BUCKETS index; missing entries come back as None.
     """
-    try:
-        root = cs.root()
-        if root is None:
-            return None
-        root_pc = root.pitchClass
-        toks = [CSYM_ROOT_OFF + root_pc,
-                CSYM_KIND_OFF + _chord_kind_idx(getattr(cs, "chordKind", None))]
-        bass = cs.bass()
-        if bass is not None and bass.pitchClass != root_pc:
-            toks.append(CSYM_BASS_OFF + bass.pitchClass)
-        return toks
-    except Exception:
-        return None
+    key_idx = time_idx = tempo_idx = None
+    for t in prefix or []:
+        if KEY_OFF <= t < KEY_OFF + 13:
+            key_idx = t - KEY_OFF
+        elif TIME_OFF <= t < TIME_OFF + len(TIME_SIGS):
+            time_idx = t - TIME_OFF
+        elif TEMPO_OFF <= t < TEMPO_OFF + N_TEMPO:
+            tempo_idx = t - TEMPO_OFF
+    return key_idx, time_idx, tempo_idx
 
 
-def make_chordsym(root_pc: int, kind_idx: int, bass_pc: int | None = None):
-    """Reconstruct a harmony.ChordSymbol from decoded token fields (or None)."""
-    try:
-        kwargs = {"root": m21.pitch.Pitch(midi=60 + root_pc).name}
-        kind = CHORD_KINDS[kind_idx] if 0 <= kind_idx < N_CHORD_KINDS else "other"
-        if kind != "other":
-            kwargs["kind"] = kind
-        if bass_pc is not None:
-            kwargs["bass"] = m21.pitch.Pitch(midi=60 + bass_pc).name
-        cs = m21.harmony.ChordSymbol(**kwargs)
-        cs.duration = m21.duration.Duration(0)
-        return cs
-    except Exception:
-        return None
-
+# ---------------------------------------------------------------------------
+# Small helpers (unchanged semantics from the flat-token tokenizer)
+# ---------------------------------------------------------------------------
 
 def _closest_dur_idx(qlen: float) -> int:
     return min(range(len(DURATIONS)), key=lambda i: abs(DURATIONS[i] - qlen))
 
 
 def _offset_to_step(offset: float) -> int:
-    """Quarter-length offset -> 1/24-ql step index, clamped to [0, MAX_STEP)."""
-    return min(MAX_STEP - 1, max(0, round(offset / STEP_SIZE)))
+    """Quarter-length offset -> 1/24-ql step index, clamped to [0, MAX_POS)."""
+    return min(MAX_POS - 1, max(0, round(offset / STEP_SIZE)))
 
 
 def bpm_to_tempo_idx(bpm: float) -> int:
@@ -329,38 +163,195 @@ def extract_part_clef(part: m21.stream.Part) -> int:
     return 0  # default to treble clef
 
 
-def score_to_header_tokens(score) -> list[int]:
-    """Returns one INSTR token and one CLEF token per part (in order), to be emitted right after BOS."""
-    parts = list(score.parts)[:MAX_REAL_PARTS]
-    header_toks = []
-    for p in parts:
-        header_toks.extend([INSTR_OFF + instrument_to_idx(p), CLEF_OFF + extract_part_clef(p)])
+# ---------------------------------------------------------------------------
+# Chord symbols
+# ---------------------------------------------------------------------------
 
-    return header_toks
+# music21 chordKind -> CHORD_KINDS index (with aliases for less common spellings).
+_KIND_TO_IDX = {k: i for i, k in enumerate(CHORD_KINDS)}
+_KIND_ALIASES = {
+    "dominant-seventh": "dominant",
+    "minor-major": "major-minor",
+    "minor-major-seventh": "major-minor",
+    "pedal": "power",
+    "none": "other",
+    "": "major",
+}
+_OTHER_KIND_IDX = _KIND_TO_IDX["other"]
+
+
+def _chord_kind_idx(kind: str | None) -> int:
+    kind = kind or ""
+    if kind in _KIND_TO_IDX:
+        return _KIND_TO_IDX[kind]
+    return _KIND_TO_IDX.get(_KIND_ALIASES.get(kind, ""), _OTHER_KIND_IDX)
+
+
+def chordsym_to_event(cs, pos: int = 0) -> list[int] | None:
+    """harmony.ChordSymbol -> CHORD event row (bar=0 placeholder) or None."""
+    try:
+        root = cs.root()
+        if root is None:
+            return None
+        root_pc = root.pitchClass
+        kind_idx = _chord_kind_idx(getattr(cs, "chordKind", None))
+        bass = cs.bass()
+        bass_pc = bass.pitchClass if (bass is not None and bass.pitchClass != root_pc) else None
+        return chord_event(0, pos, root_pc, kind_idx, bass_pc)
+    except Exception:
+        return None
+
+
+def make_chordsym(root_pc: int, kind_idx: int, bass_pc: int | None = None):
+    """Reconstruct a harmony.ChordSymbol from decoded event fields (or None)."""
+    try:
+        kwargs = {"root": m21.pitch.Pitch(midi=60 + root_pc).name}
+        kind = CHORD_KINDS[kind_idx] if 0 <= kind_idx < N_CHORD_KINDS else "other"
+        if kind != "other":
+            kwargs["kind"] = kind
+        if bass_pc is not None:
+            kwargs["bass"] = m21.pitch.Pitch(midi=60 + bass_pc).name
+        cs = m21.harmony.ChordSymbol(**kwargs)
+        cs.duration = m21.duration.Duration(0)
+        return cs
+    except Exception:
+        return None
+
+
+# Sort key that puts CHORD (harmony) rows before note rows at the same onset,
+# mirroring the old HARMONY_LANE = -2 ordering.
+def _row_sort_key(row: list[int]) -> tuple[int, int]:
+    lane = -1 if row[F_TYPE] == CHORD_T else row[F_TRACK]
+    return (row[F_POS], lane)
+
+
+# ---------------------------------------------------------------------------
+# Encode: score -> collected -> per-measure event rows
+# ---------------------------------------------------------------------------
+
+def score_to_header_events(score) -> list[list[int]]:
+    """One INSTR event per part (instrument category + clef), emitted after SOS."""
+    parts = list(score.parts)[:MAX_REAL_PARTS]
+    return [
+        instr_event(part_idx, instrument_to_idx(p), extract_part_clef(p))
+        for part_idx, p in enumerate(parts)
+    ]
+
+
+def collect_score(score) -> tuple:
+    """Walk a score once and return raw per-measure event rows plus symbols.
+
+    Returns ``(events_by_measure, key_vals, time_vals, tempo_vals, clef_changes)``:
+      * events_by_measure: {m_num: [event_row, ...]} — NOTE/GRACE/REST/CHORD rows
+        with a bar-field placeholder of 0 (assigned at flatten time).
+      * key_vals:   {m_num: sharps (int, -6..+6)}
+      * time_vals:  {m_num: TIME_SIGS index}
+      * tempo_vals: {m_num: TEMPO_BUCKETS index}
+      * clef_changes: {(part_idx, m_num): CLEFS index} — mid-score clef changes
+        only (the opening clef lives in the header INSTR event).
+
+    Everything is plain python (ints/lists/dicts/tuples) so it pickles cleanly
+    into the token cache.  This is the expensive music21-walking half of
+    tokenization; :func:`emit_measure_events` is the cheap re-emission half.
+    """
+    parts = list(score.parts)[:MAX_REAL_PARTS]
+    if not parts:
+        return {}, {}, {}, {}, {}
+
+    events_by_measure: dict[int, list[list[int]]] = {}
+
+    for part_idx, part in enumerate(parts):
+        for measure in part.getElementsByClass(m21.stream.Measure):
+            m_num = measure.number if measure.number is not None else 0
+            if m_num not in events_by_measure:
+                events_by_measure[m_num] = []
+
+            # Chord symbols (lead-sheet harmony): collect once, from the top
+            # staff, where they conventionally live.
+            if part_idx == 0:
+                for cs in measure.getElementsByClass(m21.harmony.ChordSymbol):
+                    row = chordsym_to_event(cs, pos=_offset_to_step(float(cs.offset)))
+                    if row is not None:
+                        events_by_measure[m_num].append(row)
+
+            if measure.voices:
+                voice_streams = []
+                found_v = 0
+                has_filled_voice = any([(True if any([(False if el.isRest else True) for el in v.notesAndRests]) else False) for v in measure.voices])
+                for v in measure.voices:
+                    els = v.notesAndRests
+                    if any([(False if el.isRest else True) for el in els]) or not has_filled_voice:
+                        voice_streams.append((found_v, els))
+                        found_v += 1
+                        if found_v >= MAX_VOICES_PER_PART: break
+            else:
+                voice_streams = [(0, measure.notesAndRests)]
+
+            for voice_idx, note_stream in voice_streams:
+                lane = part_idx * MAX_VOICES_PER_PART + voice_idx
+                for el in note_stream:
+                    # ChordSymbol subclasses Chord; handled above on part 0.
+                    if isinstance(el, m21.harmony.Harmony):
+                        continue
+                    pos = _offset_to_step(float(el.offset))
+                    is_grace = el.duration.quarterLength == 0
+
+                    if is_grace:
+                        dtype = el.duration.type
+                        written_ql = (m21.duration.Duration(dtype).quarterLength
+                                      if dtype and dtype != 'zero' else 0.25)
+                        dur_idx = _closest_dur_idx(written_ql if written_ql > 0 else 0.25)
+                    else:
+                        dur_idx = _closest_dur_idx(el.duration.quarterLength)
+
+                    if el.isRest:
+                        # Only add a rest when nothing else in this lane already
+                        # occupies the same onset (matches old behaviour).
+                        occupied = any(
+                            r[F_POS] == pos and r[F_TRACK] == lane + 1
+                            for r in events_by_measure[m_num]
+                            if r[F_TYPE] in (NOTE_T, GRACE_T, REST_T)
+                        )
+                        if not occupied:
+                            events_by_measure[m_num].append(rest_event(0, pos, dur_idx, lane))
+                    elif el.isNote or el.isChord:
+                        note_list = [el] if el.isNote else list(el.notes)
+                        tied = (not is_grace and el.tie is not None
+                                and el.tie.type in ('start', 'continue'))
+                        for n in note_list:
+                            if is_grace:
+                                events_by_measure[m_num].append(
+                                    grace_event(0, pos, n.pitch.midi, dur_idx, lane))
+                            else:
+                                events_by_measure[m_num].append(
+                                    note_event(0, pos, n.pitch.midi, dur_idx, lane, tied))
+
+    key_vals, time_vals, tempo_vals, clef_changes = _extract_measure_symbols(score)
+    return events_by_measure, key_vals, time_vals, tempo_vals, clef_changes
 
 
 def _extract_measure_symbols(score):
-    """Extract per-measure KEY_SIG, TIME_SIG, CLEF, and TEMPO tokens from the first part.
-
-    Returns three dicts mapping measure_number -> token_id.
-    Only measures that actually contain the element are included.
-    """
-
-    parts = list(score.parts)
+    """Per-measure KEY / TIME / TEMPO values (first part) and clef changes (all parts)."""
+    parts = list(score.parts)[:MAX_REAL_PARTS]
     if not parts:
         return {}, {}, {}, {}
 
-    key_toks: dict[int, int] = {}
-    time_toks: dict[int, int] = {}
-    clef_toks: dict[(int, int), int] = {}
-    tempo_toks: dict[int, int] = {}
+    key_vals: dict[int, int] = {}
+    time_vals: dict[int, int] = {}
+    tempo_vals: dict[int, int] = {}
+    clef_changes: dict[tuple[int, int], int] = {}
 
-    # clefs
+    # Mid-score clef changes (the opening clef is carried by the header).
     for part_idx, part in enumerate(parts):
-        for m_num, measure in enumerate(part.getElementsByClass(m21.stream.Measure)):
+        current_clef: int | None = None
+        for measure in part.getElementsByClass(m21.stream.Measure):
+            m_num = measure.number if measure.number is not None else 0
             for c in measure.getElementsByClass(m21.clef.Clef):
                 if c.name in CLEFS:
-                    clef_toks[(part_idx, m_num)] = CLEF_OFF + CLEFS.index(c.name)
+                    idx = CLEFS.index(c.name)
+                    if current_clef is not None and idx != current_clef:
+                        clef_changes[(part_idx, m_num)] = idx
+                    current_clef = idx
                 break
 
     for measure in parts[0].getElementsByClass(m21.stream.Measure):
@@ -369,163 +360,347 @@ def _extract_measure_symbols(score):
         for ks in measure.getElementsByClass(m21.key.KeySignature):
             sharps = int(ks.sharps)
             if -6 <= sharps <= 6:
-                key_toks[m_num] = KEY_OFF + (sharps + 6)
-            break  # one key sig per measure is enough
+                key_vals[m_num] = sharps
+            break
 
         for ts in measure.getElementsByClass(m21.meter.TimeSignature):
             ratio = ts.ratioString
             if ratio in TIME_SIGS:
-                time_toks[m_num] = TIME_OFF + TIME_SIGS.index(ratio)
+                time_vals[m_num] = TIME_SIGS.index(ratio)
             break
 
         for mm in measure.getElementsByClass(m21.tempo.MetronomeMark):
             if mm.number is not None:
-                tempo_toks[m_num] = TEMPO_OFF + bpm_to_tempo_idx(float(mm.number))
+                tempo_vals[m_num] = bpm_to_tempo_idx(float(mm.number))
             break
 
-    return key_toks, time_toks, clef_toks, tempo_toks
+    return key_vals, time_vals, tempo_vals, clef_changes
 
 
-def tokens_to_score(tokens: list[int]):
-    """Timestep token list -> music21 Score.
+def derive_bar_chords(score, collected, mode: str = "auto") -> tuple:
+    """Add one analysis-derived CHORD event per bar when the score has none.
 
-    lane_events[combined][m_num] stores a list of (offset_ql, element) pairs.
-    Using a list (rather than a dict keyed by offset) prevents silent overwrites
-    when two events in the same lane round to the same quantised step.
+    Args:
+        score: the parsed music21 score (needed for chordify).
+        collected: output of :func:`collect_score` (returned updated).
+        mode: "existing" — keep only chords already present (no analysis);
+              "off" — strip all CHORD events;
+              "auto" — if the score already has CHORD events (e.g. Wikifonia
+              chord symbols) keep them, otherwise run music21 chordify analysis
+              and add the most salient chord of each measure at pos 0.
+
+    Chordify is slow; call this at cache-build time only.  Failures are
+    swallowed — chords are optional context, scores without them still train.
     """
+    events_by_measure, key_vals, time_vals, tempo_vals, clef_changes = collected
 
-    # lane_events[combined][m_num] = [(offset_ql, element), ...]
+    if mode == "off":
+        for m_num, rows in events_by_measure.items():
+            events_by_measure[m_num] = [r for r in rows if r[F_TYPE] != CHORD_T]
+        return events_by_measure, key_vals, time_vals, tempo_vals, clef_changes
+
+    has_chords = any(
+        r[F_TYPE] == CHORD_T for rows in events_by_measure.values() for r in rows
+    )
+    if mode == "existing" or has_chords:
+        return collected
+
+    try:
+        chordified = score.chordify()
+        for measure in chordified.getElementsByClass(m21.stream.Measure):
+            m_num = measure.number if measure.number is not None else 0
+            if m_num not in events_by_measure:
+                continue
+            chords = [c for c in measure.getElementsByClass(m21.chord.Chord)
+                      if len(c.pitches) >= 2]
+            if not chords:
+                continue
+            # Most salient chord = the one sounding longest in the measure.
+            best = max(chords, key=lambda c: float(c.duration.quarterLength))
+            row = _analyzed_chord_to_event(best)
+            if row is not None:
+                events_by_measure[m_num].append(row)
+    except Exception:
+        pass
+
+    return events_by_measure, key_vals, time_vals, tempo_vals, clef_changes
+
+
+def _analyzed_chord_to_event(c: m21.chord.Chord) -> list[int] | None:
+    """Map an analyzed (chordified) music21 Chord to a CHORD event at pos 0."""
+    try:
+        root = c.root()
+        if root is None:
+            return None
+        if c.isDominantSeventh():
+            kind = "dominant"
+        elif c.isDiminishedSeventh():
+            kind = "diminished-seventh"
+        elif c.seventh is not None and c.quality == "major":
+            kind = "major-seventh"
+        elif c.seventh is not None and c.quality == "minor":
+            kind = "minor-seventh"
+        elif c.quality in ("major", "minor", "diminished", "augmented"):
+            kind = c.quality
+        else:
+            kind = "other"
+        root_pc = root.pitchClass
+        bass = c.bass()
+        bass_pc = bass.pitchClass if (bass is not None and bass.pitchClass != root_pc) else None
+        return chord_event(0, 0, root_pc, _KIND_TO_IDX[kind], bass_pc)
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Emit: collected -> per-measure event blocks -> flat windows
+# ---------------------------------------------------------------------------
+
+def emit_measure_events(
+    collected,
+    part_filter: set[int] | None = None,
+    measure_nums: list[int] | None = None,
+) -> dict[int, list[list[int]]]:
+    """Assemble per-measure event blocks from collected data (cheap, pure python).
+
+    Each measure block is ``[BAR] [KEY?] [TIME?] [TEMPO?] [CLEF?...]`` followed
+    by content rows sorted by (pos, lane) with CHORD rows first at each onset.
+    All rows are fresh copies with the bar field left 0 — assign window-relative
+    bar indices with :func:`flatten_measure_events`.
+
+    Args:
+        part_filter: if given, only content rows whose real part index is in the
+            set are emitted (CHORD rows ride with part 0, like the old harmony
+            lane).  BAR + symbols are still emitted for every measure, so a
+            measure with no content for the filtered staves is a bare BAR block.
+        measure_nums: explicit measure numbers to emit (in order); defaults to
+            all measures present.  Numbers absent from the collected data still
+            produce a bare BAR block.
+    """
+    events_by_measure, key_vals, time_vals, tempo_vals, clef_changes = collected
+    if measure_nums is None:
+        measure_nums = sorted(events_by_measure.keys())
+
+    clefs_by_measure: dict[int, list[tuple[int, int]]] = defaultdict(list)
+    for (part_idx, m_num), clef_idx in clef_changes.items():
+        if part_filter is None or part_idx in part_filter:
+            clefs_by_measure[m_num].append((part_idx, clef_idx))
+
+    out: dict[int, list[list[int]]] = {}
+    for m_num in measure_nums:
+        block: list[list[int]] = [bar_event(0)]
+        if m_num in key_vals:
+            block.append(key_event(0, key_vals[m_num]))
+        if m_num in time_vals:
+            block.append(time_event(0, time_vals[m_num]))
+        if m_num in tempo_vals:
+            block.append(tempo_event(0, tempo_vals[m_num]))
+        for part_idx, clef_idx in sorted(clefs_by_measure.get(m_num, [])):
+            block.append(clef_event(0, part_idx, clef_idx))
+
+        rows = events_by_measure.get(m_num, [])
+        if part_filter is not None:
+            rows = [
+                r for r in rows
+                if (0 if r[F_TYPE] == CHORD_T
+                    else (r[F_TRACK] - 1) // MAX_VOICES_PER_PART) in part_filter
+            ]
+        block.extend(list(r) for r in sorted(rows, key=_row_sort_key))
+        out[m_num] = block
+
+    return out
+
+
+def flatten_measure_events(
+    measure_events: dict[int, list[list[int]]],
+    measure_nums: list[int] | None = None,
+    start_bar: int = 0,
+) -> list[list[int]]:
+    """Concatenate measure blocks, assigning bar index start_bar+i to block i.
+
+    Mutates the (already-copied) rows produced by :func:`emit_measure_events`;
+    do not pass rows straight out of a ``collected`` structure.
+    """
+    if measure_nums is None:
+        measure_nums = sorted(measure_events.keys())
+    flat: list[list[int]] = []
+    for i, m_num in enumerate(measure_nums):
+        bar = min(start_bar + i, MAX_BARS - 1)
+        for row in measure_events.get(m_num, [bar_event(0)]):
+            row[F_BAR] = bar
+            flat.append(row)
+    return flat
+
+
+def score_to_events_by_measure(
+    score, part_filter: set[int] | None = None,
+) -> dict[int, list[list[int]]]:
+    """music21 Score -> {measure number: event block} (bar fields left 0)."""
+    collected = collect_score(score)
+    if not collected[0]:
+        return {}
+    return emit_measure_events(collected, part_filter=part_filter)
+
+
+def gap_measure_events(
+    collected, gap_start: int, gap_end: int,
+    part_filter: set[int] | None = None,
+    start_bar: int = 0,
+) -> list[list[int]]:
+    """Flat event rows for gap measures [gap_start, gap_end] with bar indices
+    start_bar.., restricted to part_filter.  Every measure in the range emits
+    a BAR row even when the filtered staves are empty there, so kept/target
+    gap blocks stay measure-aligned."""
+    measure_nums = list(range(gap_start, gap_end + 1))
+    blocks = emit_measure_events(collected, part_filter=part_filter, measure_nums=measure_nums)
+    return flatten_measure_events(blocks, measure_nums, start_bar=start_bar)
+
+
+def extract_prefix_suffix_events(
+    collected, gap_start: int, gap_end: int, max_context_measures: int = 16,
+) -> tuple[list[list[int]], list[list[int]], int]:
+    """Extract flattened prefix and suffix event windows around a gap.
+
+    Bar indices are window-relative: prefix bars run 0..P-1, the gap occupies
+    bars P..P+G-1 (returned as ``gap_bar_start`` = P), and suffix bars continue
+    at P+G.  Only the nearest ``max_context_measures`` measures on each side
+    are included, matching the FIM training window.
+
+    Returns (prefix_events, suffix_events, gap_bar_start).
+    """
+    events_by_measure = collected[0]
+    all_nums = sorted(events_by_measure.keys())
+
+    pre_nums  = [m for m in all_nums if m < gap_start][-max_context_measures:]
+    post_nums = [m for m in all_nums if m > gap_end][:max_context_measures]
+    gap_len = gap_end - gap_start + 1
+
+    blocks = emit_measure_events(collected, measure_nums=pre_nums + post_nums)
+    prefix = flatten_measure_events(blocks, pre_nums, start_bar=0)
+    suffix = flatten_measure_events(blocks, post_nums, start_bar=len(pre_nums) + gap_len)
+    return prefix, suffix, len(pre_nums)
+
+
+# ---------------------------------------------------------------------------
+# Decode: events -> music21 Score
+# ---------------------------------------------------------------------------
+
+_CLEF_CLASSES = [
+    m21.clef.TrebleClef, m21.clef.BassClef, m21.clef.AltoClef,
+    m21.clef.TenorClef, m21.clef.Treble8vbClef, m21.clef.Treble8vaClef,
+    m21.clef.Bass8vbClef,
+]
+
+_INSTR_DISPLAY = [
+    "Part", "Piano", "Harpsichord", "Organ", "Accordion",
+    "Guitar", "Bass Guitar", "Violin", "Viola", "Cello",
+    "Double Bass", "Harp", "Flute", "Oboe", "Clarinet",
+    "Bassoon", "Saxophone", "Trumpet", "Horn", "Trombone",
+    "Tuba", "Percussion", "Timpani", "Celesta",
+    "Soprano", "Mezzo-Soprano", "Alto", "Tenor",
+    "Baritone", "Bass", "Voice", "Choir",
+]
+
+# GM MIDI program numbers matching INSTR_NAMES order.
+_INSTR_MIDI = [
+    0, 0, 6, 19, 21, 25, 33, 40, 41, 42, 43, 46, 73, 68, 71, 70, 65,
+    56, 60, 57, 58, 0, 47, 8, 52, 52, 52, 52, 52, 52, 52, 52,
+]
+
+
+def events_to_score(events: list[list[int]]):
+    """Compound-event rows -> music21 Score.
+
+    Measure numbers are ``bar_field + 1`` (1-based, like the old decoder), so
+    the i-th window bar decodes to measure i+1 regardless of what absolute
+    measure it came from — callers that merge fills map measures positionally.
+    """
+    # lane_events[lane][m_num] = [(offset_ql, element), ...]
     lane_events: dict = defaultdict(lambda: defaultdict(list))
 
-    cur_lane      = 0
-    cur_measure   = 0
-    cur_offset    = 0.0
-    next_is_grace = False
-    part_instrs: list[(int, int)] = []   # INSTR index per part, in order
+    part_instrs: dict[int, tuple[int, int]] = {}    # part_idx -> (instr, clef)
+    measure_key_sigs: dict[int, int] = {}           # m_num -> sharps
+    measure_time_sigs: dict[int, int] = {}          # m_num -> TIME_SIGS idx
+    measure_tempos: dict[int, float] = {}           # m_num -> BPM
+    measure_clefs: dict[tuple[int, int], int] = {}  # (part_idx, m_num) -> clef idx
+    measure_chord_syms: dict = defaultdict(list)    # m_num -> [(offset, ChordSymbol)]
+    bar_measures: set[int] = set()                  # measures opened by a BAR row
 
-    # Accumulate global symbols per measure for score reconstruction
-    measure_key_sigs: dict[int, int] = {}    # measure -> sharps value
-    measure_time_sigs: dict[int, int] = {}   # measure -> TIME_SIGS index
-    measure_clefs: dict[(int, int), int] = {}   # instrument idx + measure -> CLEFS index
-    measure_tempos: dict[int, float] = {}    # measure -> BPM
-    measure_chord_syms: dict = defaultdict(list)  # measure -> [(offset_ql, ChordSymbol), ...]
+    # First pass: group NOTE/GRACE rows into chords by (lane, m_num, pos, dur, type).
+    note_groups: dict[tuple, list[tuple[int, int]]] = defaultdict(list)
+    group_order: list[tuple] = []
 
-    i = 0
-    while i < len(tokens):
-        t = tokens[i]
+    for row in events:
+        t = row[F_TYPE]
+        m_num = row[F_BAR] + 1
 
-        if t in (BOS, EOS, PAD):
-            i += 1
+        if t in (PAD_T, SOS_T, EOS_T, FILL_START_T, FILL_END_T, FILL_GEN_T):
             continue
-
-        # Instrument header tokens
-        if INSTR_OFF <= t < INSTR_OFF + N_INSTR:
-            part_instrs.append((t - INSTR_OFF, tokens[i + 1] - CLEF_OFF))
-            i += 2
+        if t == INSTR_T:
+            part_instrs[row[F_TRACK] - 1] = (row[F_VALUE] - 1, row[F_PITCH] - 1)
             continue
-
-        if t == BAR:
-            cur_measure += 1
-            cur_offset = 0.0
-            i += 1
+        if t == BAR_T:
+            bar_measures.add(m_num)
             continue
-
-        if t == TIE:
-            i += 1
+        if t == KEY_T:
+            measure_key_sigs[m_num] = (row[F_VALUE] - 1) - 6
             continue
-
-        if t == GRACE:
-            next_is_grace = True
-            i += 1
+        if t == TIME_T:
+            idx = row[F_VALUE] - 1
+            if 0 <= idx < len(TIME_SIGS):
+                measure_time_sigs[m_num] = idx
             continue
-
-        # Global measure symbols
-        if KEY_OFF <= t < KEY_OFF + 13:
-            measure_key_sigs[cur_measure] = (t - KEY_OFF) - 6
-            i += 1
+        if t == TEMPO_T:
+            bucket = row[F_VALUE] - 1
+            if 0 <= bucket < N_TEMPO:
+                lo = TEMPO_BUCKETS[bucket]
+                hi = TEMPO_BUCKETS[bucket + 1] if bucket + 1 < N_TEMPO else lo + 40
+                measure_tempos[m_num] = (lo + hi) / 2.0
             continue
-
-        if TIME_OFF <= t < TIME_OFF + len(TIME_SIGS):
-            measure_time_sigs[cur_measure] = t - TIME_OFF
-            i += 1
+        if t == CLEF_T:
+            clef_idx = row[F_VALUE] - 1
+            if 0 <= clef_idx < N_CLEFS:
+                measure_clefs[(row[F_TRACK] - 1, m_num)] = clef_idx
             continue
-
-        if TEMPO_OFF <= t < TEMPO_OFF + N_TEMPO:
-            bucket = t - TEMPO_OFF
-            lo = TEMPO_BUCKETS[bucket]
-            hi = TEMPO_BUCKETS[bucket + 1] if bucket + 1 < N_TEMPO else lo + 40
-            measure_tempos[cur_measure] = (lo + hi) / 2.0
-            i += 1
-            continue
-
-        if STEP_OFF <= t < STEP_OFF + MAX_STEP:
-            cur_offset = (t - STEP_OFF) * STEP_SIZE
-            i += 1
-            continue
-
-        # Chord symbol: [HARMONY] [CSYM_ROOT] [CSYM_KIND] (CSYM_BASS)?
-        if t == HARMONY:
-            i += 1
-            continue
-
-        if CSYM_ROOT_OFF <= t < CSYM_ROOT_OFF + 12:
-            root_pc = t - CSYM_ROOT_OFF
-            i += 1
-            kind_idx = _OTHER_KIND_IDX
-            if i < len(tokens) and CSYM_KIND_OFF <= tokens[i] < CSYM_KIND_OFF + N_CHORD_KINDS:
-                kind_idx = tokens[i] - CSYM_KIND_OFF
-                i += 1
-            bass_pc = None
-            if i < len(tokens) and CSYM_BASS_OFF <= tokens[i] < CSYM_BASS_OFF + 12:
-                bass_pc = tokens[i] - CSYM_BASS_OFF
-                i += 1
-            cs = make_chordsym(root_pc, kind_idx, bass_pc)
+        if t == CHORD_T:
+            bass = row[F_VALUE] - 1 if row[F_VALUE] > 0 else None
+            cs = make_chordsym(row[F_PITCH] - 1, row[F_DUR] - 1, bass)
             if cs is not None:
-                measure_chord_syms[cur_measure].append((cur_offset, cs))
+                measure_chord_syms[m_num].append((row[F_POS] * STEP_SIZE, cs))
+            continue
+        if t == REST_T:
+            lane = row[F_TRACK] - 1
+            dur = DURATIONS[min(max(row[F_DUR] - 1, 0), N_DURATIONS - 1)]
+            lane_events[lane][m_num].append(
+                (row[F_POS] * STEP_SIZE, m21.note.Rest(quarterLength=dur)))
+            continue
+        if t in (NOTE_T, GRACE_T):
+            lane = row[F_TRACK] - 1
+            key = (lane, m_num, row[F_POS], row[F_DUR], t)
+            if key not in note_groups:
+                group_order.append(key)
+            note_groups[key].append((row[F_PITCH] - 1, row[F_VALUE]))
             continue
 
-        if PART_OFF <= t < PART_OFF + MAX_PARTS:
-            cur_lane = t - PART_OFF
-            i += 1
-            continue
-
-        if REST_OFF <= t < REST_OFF + len(DURATIONS):
-            dur = DURATIONS[t - REST_OFF]
-            lane_events[cur_lane][cur_measure].append(
-                (cur_offset, m21.note.Rest(quarterLength=dur))
-            )
-            i += 1
-            continue
-
-        if NOTE_OFF <= t < NOTE_OFF + 128:
-            pitches = []
-            while i < len(tokens) and NOTE_OFF <= tokens[i] < NOTE_OFF + 128:
-                pitches.append(tokens[i] - NOTE_OFF)
-                i += 1
-            dur_idx = 7  # default: quarter note (DURATIONS[7] = 1.0)
-            if i < len(tokens) and DUR_OFF <= tokens[i] < DUR_OFF + len(DURATIONS):
-                dur_idx = tokens[i] - DUR_OFF
-                i += 1
-            dur = DURATIONS[dur_idx]
-            if len(pitches) == 1:
-                el = m21.note.Note(midi=pitches[0], quarterLength=dur)
-            else:
-                el = m21.chord.Chord(
-                    [m21.pitch.Pitch(midi=p) for p in pitches], quarterLength=dur
-                )
-            if next_is_grace:
-                el = el.getGrace()
-                next_is_grace = False
-            elif i < len(tokens) and tokens[i] == TIE:
-                el.tie = m21.tie.Tie('start')
-                i += 1
-            lane_events[cur_lane][cur_measure].append((cur_offset, el))
-            continue
-
-        i += 1
+    # Materialise grouped notes/chords.
+    for key in group_order:
+        lane, m_num, pos, dur_field, t = key
+        pitches = note_groups[key]
+        dur = DURATIONS[min(max(dur_field - 1, 0), N_DURATIONS - 1)]
+        midi_list = [max(0, min(127, p)) for p, _ in pitches]
+        if len(midi_list) == 1:
+            el = m21.note.Note(midi=midi_list[0], quarterLength=dur)
+        else:
+            el = m21.chord.Chord(
+                [m21.pitch.Pitch(midi=p) for p in midi_list], quarterLength=dur)
+        if t == GRACE_T:
+            el = el.getGrace()
+        elif all(tie for _, tie in pitches) and pitches:
+            el.tie = m21.tie.Tie('start')
+        lane_events[lane][m_num].append((pos * STEP_SIZE, el))
 
     # Connect tie starts to the next same-pitch note within the same lane.
-    for combined, m_dict in lane_events.items():
+    for lane, m_dict in lane_events.items():
         flat: list = []
         for m_num in sorted(m_dict.keys()):
             flat.extend(el for _, el in sorted(m_dict[m_num], key=lambda x: x[0]))
@@ -545,39 +720,34 @@ def tokens_to_score(tokens: list[int]):
 
     # Group lanes by real part index.
     parts_lanes: dict[int, dict[int, dict]] = defaultdict(dict)
-    for combined in sorted(lane_events.keys()):
-        part_idx  = combined // MAX_VOICES_PER_PART
-        voice_idx = combined % MAX_VOICES_PER_PART
-        parts_lanes[part_idx][voice_idx] = lane_events[combined]
+    for lane in sorted(lane_events.keys()):
+        part_idx  = lane // MAX_VOICES_PER_PART
+        voice_idx = lane % MAX_VOICES_PER_PART
+        parts_lanes[part_idx][voice_idx] = lane_events[lane]
 
     score = m21.stream.Score()
-    for part_idx in sorted(parts_lanes.keys()):
+    part_order: list[int] = sorted(parts_lanes.keys())
+    for part_idx in part_order:
         part = m21.stream.Part()
         voices_data = parts_lanes[part_idx]
 
-        all_measures: set[int] = set()
+        all_measures: set[int] = set(bar_measures)
         for v_data in voices_data.values():
             all_measures.update(v_data.keys())
-        if part_idx == 0:
+        if part_idx == part_order[0]:
             all_measures.update(measure_chord_syms.keys())
 
         for m_num in sorted(all_measures):
             measure = m21.stream.Measure(number=m_num)
 
-            # Reconstruct global measure symbols
             if m_num in measure_key_sigs:
                 measure.insert(0, m21.key.KeySignature(measure_key_sigs[m_num]))
-            if m_num in measure_tempos and part_idx == 0:
+            if m_num in measure_tempos and part_idx == part_order[0]:
                 measure.insert(0, m21.tempo.MetronomeMark(number=measure_tempos[m_num]))
             if (part_idx, m_num) in measure_clefs:
                 clef_idx = measure_clefs[(part_idx, m_num)]
-                clef_map = [
-                    m21.clef.TrebleClef, m21.clef.BassClef, m21.clef.AltoClef,
-                    m21.clef.TenorClef, m21.clef.Treble8vbClef, m21.clef.Treble8vaClef,
-                    m21.clef.Bass8vbClef,
-                ]
-                if 0 <= clef_idx < len(clef_map):
-                    measure.insert(0, clef_map[clef_idx]())
+                if 0 <= clef_idx < len(_CLEF_CLASSES):
+                    measure.insert(0, _CLEF_CLASSES[clef_idx]())
 
             if len(voices_data) > 1:
                 for voice_idx in sorted(voices_data.keys()):
@@ -588,14 +758,14 @@ def tokens_to_score(tokens: list[int]):
                     for offset_ql, el in sorted(pairs, key=lambda x: x[0]):
                         voice.insert(offset_ql, el)
                     measure.insert(0, voice)
-            else:
+            elif voices_data:
                 voice_idx = next(iter(voices_data))
                 pairs = voices_data[voice_idx].get(m_num, [])
                 for offset_ql, el in sorted(pairs, key=lambda x: x[0]):
                     measure.insert(offset_ql, el)
 
             # Chord symbols belong to the top staff.
-            if part_idx == 0:
+            if part_idx == part_order[0]:
                 for offset_ql, cs in measure_chord_syms.get(m_num, []):
                     measure.insert(offset_ql, cs)
 
@@ -607,84 +777,33 @@ def tokens_to_score(tokens: list[int]):
         part.append(m21.stream.Measure())
         score.append(part)
 
-    # Reconstruct time sigs
+    # Reconstruct time signatures (inside the measure, so re-encoding and
+    # makeBeams both see them).
     for part in score.parts:
-        measures = list(part.getElementsByClass(m21.stream.Measure))
-        for measure in measures:
-            if measure.measureNumber in measure_time_sigs:
-                part.insert(measure.offset, m21.meter.TimeSignature(TIME_SIGS[measure_time_sigs[measure.measureNumber]])) # janky hack
+        for measure in part.getElementsByClass(m21.stream.Measure):
+            m_num = measure.number if measure.number is not None else 0
+            if m_num in measure_time_sigs:
+                measure.insert(0, m21.meter.TimeSignature(
+                    TIME_SIGS[measure_time_sigs[m_num]]))
 
-    # Reconstruct clefs and instrument names
-    _INSTR_DISPLAY = [
-        "Part", "Piano", "Harpsichord", "Organ", "Accordion",
-        "Guitar", "Bass Guitar", "Violin", "Viola", "Cello",
-        "Double Bass", "Harp", "Flute", "Oboe", "Clarinet",
-        "Bassoon", "Saxophone", "Trumpet", "Horn", "Trombone",
-        "Tuba", "Percussion", "Timpani", "Celesta",
-        "Soprano", "Mezzo-Soprano", "Alto", "Tenor",
-        "Baritone", "Bass", "Voice", "Choir",
-    ]
-    # GM MIDI program numbers corresponding to each instrument index (matches INSTR_NAMES order)
-    _INSTR_MIDI = [
-        0,   # 0  other        → acoustic grand piano
-        0,   # 1  piano        → acoustic grand piano
-        6,   # 2  harpsichord  → harpsichord
-        19,  # 3  organ        → church organ
-        21,  # 4  accordion    → accordion
-        25,  # 5  guitar       → acoustic guitar (steel)
-        33,  # 6  bass_guitar  → electric bass (finger)
-        40,  # 7  violin       → violin
-        41,  # 8  viola        → viola
-        42,  # 9  cello        → cello
-        43,  # 10 double_bass  → contrabass
-        46,  # 11 harp         → orchestral harp
-        73,  # 12 flute        → flute
-        68,  # 13 oboe         → oboe
-        71,  # 14 clarinet     → clarinet
-        70,  # 15 bassoon      → bassoon
-        65,  # 16 saxophone    → alto sax
-        56,  # 17 trumpet      → trumpet
-        60,  # 18 horn         → french horn
-        57,  # 19 trombone     → trombone
-        58,  # 20 tuba         → tuba
-        0,   # 21 percussion   → (uses MIDI channel 9; program ignored)
-        47,  # 22 timpani      → timpani
-        8,   # 23 celesta      → celesta
-        52,  # 24 voice_soprano → choir aahs
-        52,  # 25 voice_mezzo  → choir aahs
-        52,  # 26 voice_alto   → choir aahs
-        52,  # 27 voice_tenor  → choir aahs
-        52,  # 28 voice_baritone → choir aahs
-        52,  # 29 voice_bass   → choir aahs
-        52,  # 30 voice        → choir aahs
-        52,  # 31 choir        → choir aahs
-    ]
-
-    if len(part_instrs) > 0:
-        for part_idx, part in enumerate(score.parts):
-            if part_idx >= len(part_instrs): continue
-            measure = list(part.getElementsByClass(m21.stream.Measure))[0]
+    # Reconstruct instruments and opening clefs from the header INSTR events.
+    if part_instrs:
+        for pos_idx, part in enumerate(score.parts):
+            part_idx = part_order[pos_idx] if pos_idx < len(part_order) else pos_idx
+            if part_idx not in part_instrs:
+                continue
+            measures = list(part.getElementsByClass(m21.stream.Measure))
+            if not measures:
+                continue
             instrument_idx, clef_idx = part_instrs[part_idx]
-            instrument = m21.instrument.Instrument(instrumentName=_INSTR_DISPLAY[instrument_idx])
-            instrument.midiProgram = _INSTR_MIDI[instrument_idx]
-            measure.insert(0, instrument)
+            if 0 <= instrument_idx < N_INSTR:
+                instrument = m21.instrument.Instrument(
+                    instrumentName=_INSTR_DISPLAY[instrument_idx])
+                instrument.midiProgram = _INSTR_MIDI[instrument_idx]
+                measures[0].insert(0, instrument)
+            if 0 <= clef_idx < len(_CLEF_CLASSES):
+                measures[0].insert(0, _CLEF_CLASSES[clef_idx]())
 
-            if clef_idx == 0:
-                clef = m21.clef.TrebleClef()
-            elif clef_idx == 1:
-                clef = m21.clef.BassClef()
-            elif clef_idx == 2:
-                clef = m21.clef.AltoClef()
-            elif clef_idx == 3:
-                clef = m21.clef.TenorClef()
-            elif clef_idx == 4:
-                clef = m21.clef.Treble8vbClef()
-            elif clef_idx == 5:
-                clef = m21.clef.Treble8vaClef()
-            elif clef_idx == 6:
-                clef = m21.clef.Bass8vbClef()
-            measure.insert(0, clef)
-        
     try:
         for part in score.parts:
             for measure in part.getElementsByClass(m21.stream.Measure):
@@ -696,29 +815,21 @@ def tokens_to_score(tokens: list[int]):
     return score
 
 
-def text_to_tokens(text: str) -> list[int]:
-    """ASCII text -> token ids (printable chars in range 32-88 -> TEXT_OFF+0..56)."""
-    out = []
-    for ch in text[:56]:
-        code = ord(ch)
-        if 32 <= code <= 88:
-            out.append(TEXT_OFF + code - 32)
-    return out
-
+# ---------------------------------------------------------------------------
+# Gap detection (unchanged from the flat-token tokenizer)
+# ---------------------------------------------------------------------------
 
 def identify_empty_measures(score) -> list[tuple[int, int]]:
     """Detect empty measures across all parts.
 
     A measure is considered empty if ALL parts have zero notes AND zero rests
-    in that measure. Returns a list of (start_measure, end_measure) tuples
-    for contiguous empty regions (inclusive).
+    in that measure (a single hidden full-measure rest counts as empty).
+    Returns (start_measure, end_measure) tuples for contiguous empty regions.
     """
-
     parts = list(score.parts)[:MAX_REAL_PARTS]
     if not parts:
         return []
 
-    # Collect all measure numbers across all parts
     all_measure_nums: set[int] = set()
     for part in parts:
         for measure in part.getElementsByClass(m21.stream.Measure):
@@ -728,20 +839,19 @@ def identify_empty_measures(score) -> list[tuple[int, int]]:
     if not all_measure_nums:
         return []
 
-    # Check each measure: empty if ALL parts have no notes/rests
     empty_measures: list[int] = []
     for m_num in sorted(all_measure_nums):
         is_empty = True
         for part in parts:
             measures = [m for m in part.getElementsByClass(m21.stream.Measure)
-                       if (m.number if m.number is not None else 0) == m_num]
+                        if (m.number if m.number is not None else 0) == m_num]
             if not measures:
                 is_empty = False
                 break
             measure = measures[0]
             notes_and_rests = list(measure.flatten().notesAndRests)
             if len(notes_and_rests) == 0:
-                continue  # truly empty measure, still possibly empty across parts
+                continue
             if len(notes_and_rests) != 1:
                 is_empty = False
                 break
@@ -755,271 +865,24 @@ def identify_empty_measures(score) -> list[tuple[int, int]]:
         if is_empty:
             empty_measures.append(m_num)
 
-    # Group contiguous empty measures into ranges
     if not empty_measures:
         return []
 
     gaps: list[tuple[int, int]] = []
-    start = empty_measures[0]
-    end = empty_measures[0]
-
+    start = end = empty_measures[0]
     for m_num in empty_measures[1:]:
         if m_num == end + 1:
             end = m_num
         else:
             gaps.append((start, end))
-            start = m_num
-            end = m_num
+            start = end = m_num
     gaps.append((start, end))
-
     return gaps
 
 
-def _collect_events_by_measure(score):
-    """Walk a score once and return raw per-measure events plus global symbols.
-
-    Returns (events_by_measure, key_toks, time_toks, tempo_toks) where
-    events_by_measure maps measure_number -> list of (offset, combined_lane, toks)
-    and combined_lane = part_idx * MAX_VOICES_PER_PART + voice_idx.
-
-    This is the expensive (music21-walking) half of tokenization.  Splitting it
-    out lets callers re-emit tokens for arbitrary part subsets cheaply via
-    _emit_measure_tokens, which is what partial-staff FIM relies on.
-    """
-    parts = list(score.parts)[:MAX_REAL_PARTS]
-    if not parts:
-        return {}, {}, {}, {}
-
-    events_by_measure: dict[int, list[tuple[float, int, list[int]]]] = {}
-
-    for part_idx, part in enumerate(parts):
-        for measure in part.getElementsByClass(m21.stream.Measure):
-            m_num = measure.number if measure.number is not None else 0
-
-            if m_num not in events_by_measure:
-                events_by_measure[m_num] = []
-
-            # Chord symbols (lead-sheet harmony) ride on a dedicated harmony lane.
-            # Collect them once, from the top staff, where they conventionally live.
-            if part_idx == 0:
-                for cs in measure.getElementsByClass(m21.harmony.ChordSymbol):
-                    cs_toks = chordsym_to_tokens(cs)
-                    if cs_toks:
-                        events_by_measure[m_num].append((float(cs.offset), HARMONY_LANE, cs_toks))
-
-            if measure.voices:
-                voice_streams = []
-                found_v = 0
-                has_filled_voice = any([ (True if any([ (False if el.isRest else True) for el in v.notesAndRests ]) else False) for v in measure.voices ])
-                for v in measure.voices:
-                    els = v.notesAndRests
-                    if any([ (False if el.isRest else True) for el in els ]) or not has_filled_voice:
-                        voice_streams.append((found_v, els))
-                        found_v += 1
-                        if found_v >= MAX_VOICES_PER_PART: break
-            else:
-                voice_streams = [(0, measure.notesAndRests)]
-
-            for voice_idx, note_stream in voice_streams:
-                combined = part_idx * MAX_VOICES_PER_PART + voice_idx
-                for el in note_stream:
-                    # ChordSymbol subclasses Chord; it is handled on the harmony
-                    # lane above and must not be tokenized as literal notes here.
-                    if isinstance(el, m21.harmony.Harmony):
-                        continue
-                    offset = float(el.offset)
-                    is_grace = el.duration.quarterLength == 0
-
-                    if is_grace:
-                        dtype = el.duration.type
-                        written_ql = (m21.duration.Duration(dtype).quarterLength
-                                      if dtype and dtype != 'zero' else 0.25)
-                        dur_idx = _closest_dur_idx(written_ql if written_ql > 0 else 0.25)
-                    else:
-                        dur_idx = _closest_dur_idx(el.duration.quarterLength)
-
-                    if el.isRest and len([ 1 for o,c,t in events_by_measure[m_num] if o == offset and c == combined ]) == 0:
-                        toks = [REST_OFF + dur_idx]
-                    elif el.isNote or el.isChord:
-                        note_list = [el] if el.isNote else list(el.notes)
-                        toks = []
-                        if is_grace:
-                            toks.append(GRACE)
-                        toks += [NOTE_OFF + n.pitch.midi for n in note_list]
-                        toks.append(DUR_OFF + dur_idx)
-                        if not is_grace and el.tie is not None and el.tie.type in ('start', 'continue'):
-                            toks.append(TIE)
-                    else:
-                        continue
-
-                    events_by_measure[m_num].append((offset, combined, toks))
-
-    key_toks, time_toks, _, tempo_toks = _extract_measure_symbols(score)
-
-    return events_by_measure, key_toks, time_toks, tempo_toks
-
-
-def _emit_measure_tokens(
-    events_by_measure, key_toks, time_toks, tempo_toks,
-    part_filter: set[int] | None = None,
-    measure_nums: list[int] | None = None,
-) -> dict[int, list[int]]:
-    """Assemble per-measure token lists from collected events (cheap, pure-python).
-
-    Args:
-        part_filter: if given, only events whose real part index
-            (combined_lane // MAX_VOICES_PER_PART) is in the set are emitted.
-            BAR + global symbols are still emitted for every measure, so a measure
-            with no events for the filtered staves becomes a bare [BAR] (+ symbols).
-        measure_nums: explicit list of measure numbers to emit (in order). Defaults
-            to all measures present in events_by_measure (sorted). Numbers absent
-            from events_by_measure still produce a bare [BAR] (+ symbols).
-    """
-    if measure_nums is None:
-        measure_nums = sorted(events_by_measure.keys())
-
-    measure_tokens: dict[int, list[int]] = {}
-
-    for m_num in measure_nums:
-        events = events_by_measure.get(m_num, [])
-        if part_filter is not None:
-            # Chord symbols (harmony lane) ride with the top staff (part 0).
-            events = [
-                e for e in events
-                if (0 if e[1] == HARMONY_LANE else e[1] // MAX_VOICES_PER_PART) in part_filter
-            ]
-        events = sorted(events, key=lambda e: (e[0], e[1]))
-
-        tokens: list[int] = [BAR]
-
-        # Emit global symbols for this measure
-        for sym_dict in (key_toks, time_toks, tempo_toks):
-            if m_num in sym_dict:
-                tokens.append(sym_dict[m_num])
-
-        cur_offset = -1.0
-        cur_lane = -1
-
-        for offset, combined, toks in events:
-            if offset != cur_offset:
-                tokens.append(STEP_OFF + _offset_to_step(offset))
-                cur_offset = offset
-                cur_lane = -1
-
-            if combined != cur_lane:
-                tokens.append(HARMONY if combined == HARMONY_LANE else PART_OFF + combined)
-                cur_lane = combined
-
-            tokens.extend(toks)
-
-        measure_tokens[m_num] = tokens
-
-    return measure_tokens
-
-
-def score_to_tokens_by_measure(
-    score, part_filter: set[int] | None = None,
-) -> dict[int, list[int]]:
-    """music21 Score -> dict mapping measure number to tokens for that measure.
-
-    Returns tokens for each measure separately (without BOS/EOS).
-    Each measure's tokens start with BAR followed by optional KEY_SIG, TIME_SIG,
-    and TEMPO tokens (only when present), then STEP/PART/note content.
-
-    Args:
-        part_filter: optional set of real part indices to keep; events from other
-            parts are dropped (BAR + global symbols still emitted).
-    """
-    events_by_measure, key_toks, time_toks, tempo_toks = _collect_events_by_measure(score)
-    if not events_by_measure:
-        return {}
-    return _emit_measure_tokens(
-        events_by_measure, key_toks, time_toks, tempo_toks, part_filter=part_filter,
-    )
-
-
-def gap_measure_tokens(
-    score, gap_start: int, gap_end: int, part_filter: set[int] | None = None,
-) -> list[int]:
-    """Flat token list for gap measures [gap_start, gap_end], restricted to part_filter.
-
-    Always emits a [BAR] (+ global symbols) for every measure in the range, even
-    when the filtered staves are empty there, so kept/target gap blocks stay
-    measure-aligned and BAR counting at generation time is exact.
-    """
-    events_by_measure, key_toks, time_toks, tempo_toks = _collect_events_by_measure(score)
-    measure_nums = list(range(gap_start, gap_end + 1))
-    mt = _emit_measure_tokens(
-        events_by_measure, key_toks, time_toks, tempo_toks,
-        part_filter=part_filter, measure_nums=measure_nums,
-    )
-    return [t for m_num in measure_nums for t in mt[m_num]]
-
-
-def score_to_tokens_with_gaps(score) -> tuple[list[int], list[tuple[int, int]]]:
-    """Tokenizes a score while identifying empty regions that need filling.
-
-    Returns:
-        (tokens, gap_descriptors)
-        - tokens: Full token sequence with EMPTY_BAR placeholders for gaps
-        - gap_descriptors: List of (start_measure, end_measure) for empty regions
-    """
-    gaps = identify_empty_measures(score)
-    measure_tokens = score_to_tokens_by_measure(score)
-
-    if not measure_tokens:
-        return [BOS, EOS], gaps
-
-    # Build token sequence, using EMPTY_BAR for gap measures
-    gap_measures: set[int] = set()
-    for start, end in gaps:
-        for m in range(start, end + 1):
-            gap_measures.add(m)
-
-    tokens: list[int] = [BOS]
-    for m_num in sorted(measure_tokens.keys()):
-        if m_num in gap_measures:
-            tokens.append(EMPTY_BAR)
-        else:
-            tokens.extend(measure_tokens[m_num])
-    tokens.append(EOS)
-
-    return tokens, gaps
-
-
-def extract_prefix_suffix_tokens(
-    score, gap_start: int, gap_end: int, max_context_measures: int = 16,
-) -> tuple[list[int], list[int]]:
-    """Extract prefix and suffix tokens around a gap region.
-
-    Only the nearest `max_context_measures` measures on each side are included,
-    matching the window used during FIM training.
-
-    Args:
-        score: music21 Score object
-        gap_start: First measure number of the gap (inclusive)
-        gap_end: Last measure number of the gap (inclusive)
-        max_context_measures: Maximum measures to include on each side
-
-    Returns:
-        (prefix_tokens, suffix_tokens)
-        - prefix_tokens: Tokens for up to max_context_measures before the gap
-        - suffix_tokens: Tokens for up to max_context_measures after the gap
-    """
-    measure_tokens = score_to_tokens_by_measure(score)
-
-    pre_nums  = [m for m in sorted(measure_tokens) if m < gap_start][-max_context_measures:]
-    post_nums = [m for m in sorted(measure_tokens) if m > gap_end  ][:max_context_measures]
-
-    prefix = [t for m in pre_nums  for t in measure_tokens[m]]
-    suffix = [t for m in post_nums for t in measure_tokens[m]]
-
-    return prefix, suffix
-
-
-def get_gap_measure_count(tokens: list[int]) -> int:
-    """Count the number of BAR tokens in a sequence (measures generated)."""
-    return tokens.count(BAR)
+def count_bars(events: list[list[int]]) -> int:
+    """Number of BAR events in a sequence (measures generated)."""
+    return sum(1 for r in events if r[F_TYPE] == BAR_T)
 
 
 def score_to_xml_str(score) -> str:

@@ -34,22 +34,16 @@ from tqdm import tqdm
 
 from ml.datasets.base import STORAGE_DIR
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DEFAULT_CACHE_DIR = STORAGE_DIR / "cache" / "tokens"
 DEFAULT_SHARD_SIZE = 1000
 
 
 def vocab_fingerprint() -> str:
-    """Hash of the tokenizer's vocabulary layout; changes invalidate the cache."""
-    import ml.tokenizer as tk
+    """Hash of the compound-event schema layout; changes invalidate the cache."""
+    from ml.events import SCHEMA_LAYOUT
 
-    layout = (
-        tk.VOCAB_SIZE, tk.NOTE_OFF, tk.DUR_OFF, tk.REST_OFF, tk.KEY_OFF,
-        tk.TIME_OFF, tk.CLEF_OFF, tk.TEXT_OFF, tk.PART_OFF, tk.STEP_OFF,
-        tk.GRACE, tk.TEMPO_OFF, tk.INSTR_OFF, tk.FILL_GEN,
-        len(tk.DURATIONS), tk.MAX_STEP, tk.MAX_PARTS,
-    )
-    return hashlib.sha1(repr(layout).encode()).hexdigest()[:16]
+    return hashlib.sha1(repr(SCHEMA_LAYOUT).encode()).hexdigest()[:16]
 
 
 def _abs_path(path) -> Path:
@@ -75,18 +69,22 @@ def _path_key(path) -> str:
 def _parse_one(item: dict) -> dict | None:
     """Parse one score into a cache record, or None if it fails / is too short.
 
-    `item` is a manifest-style dict: {"path", "source", "meta"}.
+    `item` is a manifest-style dict: {"path", "source", "meta"}.  Chord
+    analysis (derive_bar_chords) runs here, at cache-build time, because
+    chordify is far too slow for the training loop.
     """
     import music21 as m21
     from ml.tokenizer import (
-        score_to_header_tokens, _collect_events_by_measure, MAX_REAL_PARTS,
+        score_to_header_events, collect_score, derive_bar_chords, MAX_REAL_PARTS,
     )
 
     path = _abs_path(item["path"])
+    chords_mode = item.get("chords", "auto")
     try:
         score = m21.converter.parse(str(path))
-        header = score_to_header_tokens(score)
-        collected = _collect_events_by_measure(score)
+        header = score_to_header_events(score)
+        collected = collect_score(score)
+        collected = derive_bar_chords(score, collected, mode=chords_mode)
     except Exception:
         return None
 
@@ -137,6 +135,7 @@ def build_token_cache(
     force: bool = False,
     shard_size: int = DEFAULT_SHARD_SIZE,
     log: Callable[[str], None] = print,
+    chords: str = "auto",
 ) -> "CachedMeasureStore":
     """Parse `items` into the token cache (incremental & resumable).
 
@@ -147,6 +146,8 @@ def build_token_cache(
             ``if __name__ == '__main__'`` on Windows). Default 1 (serial).
         force: rebuild from scratch, ignoring any existing cache.
         shard_size: records per shard.
+        chords: chord-analysis mode for scores without chord symbols —
+            "auto" (analyze), "existing" (keep only real symbols), "off".
 
     Returns an open :class:`CachedMeasureStore`.
     """
@@ -168,6 +169,8 @@ def build_token_cache(
                 (cache_dir / sh["file"]).unlink(missing_ok=True)
 
     records = _normalise_records(items)
+    for r in records:
+        r["chords"] = chords
     cached_keys = set(index["order"])
     todo = [r for r in records if _path_key(r["path"]) not in cached_keys]
     log(f"Token cache: {len(cached_keys)} cached, {len(todo)} new to parse "
@@ -275,9 +278,9 @@ class CachedMeasureStore:
         return self._load_shard(shard_idx)[off]
 
     def _to_tuple(self, rec: dict):
-        from ml.tokenizer import _emit_measure_tokens
-        measure_tokens = _emit_measure_tokens(*rec["collected"])
-        return rec["header"], measure_tokens, rec["collected"], rec["n_parts"]
+        from ml.tokenizer import emit_measure_events
+        measure_events = emit_measure_events(rec["collected"])
+        return rec["header"], measure_events, rec["collected"], rec["n_parts"]
 
     def __getitem__(self, pos: int):
         return self._to_tuple(self._record(pos))
