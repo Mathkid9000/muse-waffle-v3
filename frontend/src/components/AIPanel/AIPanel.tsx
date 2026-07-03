@@ -169,14 +169,17 @@ export default function AIPanel() {
   async function handleEdit() {
     setLoading(true)
     try {
-      const output = await api.editRmMeasure({
-        xml: currentXml!,
-        start_measure: 3,
-        end_measure: 4
-      })
-      setXml(output['xml'])
+      const promptText = document.querySelector("#edit-input-span")?.textContent
+      console.log(promptText)
 
-      console.log(output,'success')
+      // const output = await api.editRmMeasure({
+      //   xml: currentXml!,
+      //   start_measure: 3,
+      //   end_measure: 4
+      // })
+      // setXml(output['xml'])
+
+      // console.log(output,'success')
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -377,8 +380,11 @@ export default function AIPanel() {
           </div>
         )}
       </div>
-      <div className={styles.panel}>
+      <div className={styles.panel} style={ { borderTop: "1px solid grey" } }>
         <div className={styles.section}>
+          <span id="edit-input-span" contentEditable style={ { border: "1px solid grey" } }>
+            ...
+          </span>
           <button
             className={styles.runBtn}
             onClick={handleEdit}
