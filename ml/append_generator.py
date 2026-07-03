@@ -1,16 +1,95 @@
-"""Inference pipeline for appending new measures to an existing score."""
+"""Inference pipeline for appending new measures to an existing score.
+
+The existing score is tokenized to compound events, renumbered to window bars
+0..C-1 (left-truncating whole measures when the context would overflow the
+model window or the MAX_BARS bar-index range), used as a committed prompt for
+generate_standard, and the newly generated measures are extracted and appended
+to the original score.  Public signatures unchanged.
+"""
 
 from __future__ import annotations
 from pathlib import Path
 from typing import Callable, Generator
 
+from ml.events import MAX_BARS, sos_event, eos_event, bar_event
 from ml.tokenizer import (
-    score_to_tokens_by_measure, score_to_header_tokens, score_to_xml_str,
-    tokens_to_score, BOS, EOS, BAR,
+    collect_score, score_to_header_events, emit_measure_events,
+    flatten_measure_events, events_to_score, score_to_xml_str, count_bars,
 )
 from ml.model import load_model
 
 OUTPUT_DIR = Path("output")
+
+DEFAULT_MODEL_NAME = "MMT-GAN-D512-L6"
+
+
+def _context_events(orig_score, max_seq_len: int, num_bars: int, header_len: int, log):
+    """Tokenize the existing score into committed context rows (bars 0..C-1).
+
+    Truncates whole measures from the left until the context fits both the
+    model window (reserving ~256 events for generation) and the bar-index
+    range (context bars + new bars <= MAX_BARS).
+    """
+    collected = collect_score(orig_score)
+    blocks = emit_measure_events(collected)
+    nums = sorted(blocks.keys())
+
+    max_ctx_events = max_seq_len - 256 - header_len - 1  # reserve gen + SOS
+    max_ctx_bars = MAX_BARS - num_bars
+
+    def total_len(ns):
+        return sum(len(blocks[m]) for m in ns)
+
+    trimmed = False
+    while nums and (total_len(nums) > max_ctx_events or len(nums) > max_ctx_bars):
+        nums = nums[1:]
+        trimmed = True
+    if trimmed:
+        log(f"Context truncated: using last {len(nums)} of {len(blocks)} measures")
+
+    if not nums:
+        return [bar_event(0)], 1
+    return flatten_measure_events(blocks, nums, start_bar=0), len(nums)
+
+
+def _extract_new_measures(cont_parts, part_idx, n_ctx_bars, count):
+    import music21 as m21
+    if part_idx < len(cont_parts):
+        cont_measures = list(cont_parts[part_idx].getElementsByClass(m21.stream.Measure))
+        return cont_measures[n_ctx_bars:n_ctx_bars + count]
+    return []
+
+
+def _append_measures(orig_score, continuation_score, n_ctx_bars, take, pad_to, orig_last_m_num):
+    """Append up to `take` new measures from the continuation onto orig_score,
+    padding with full-measure rests up to `pad_to` when generation came up short."""
+    import music21 as m21
+    cont_parts = list(continuation_score.parts)
+    for part_idx, orig_part in enumerate(orig_score.parts):
+        next_m_num = orig_last_m_num + 1
+        new_measures = _extract_new_measures(cont_parts, part_idx, n_ctx_bars, take)
+        for new_m in new_measures:
+            new_m.number = next_m_num
+            orig_part.append(new_m)
+            next_m_num += 1
+        for _ in range(len(new_measures), pad_to):
+            rest_m = m21.stream.Measure(number=next_m_num)
+            rest_m.append(m21.note.Rest(quarterLength=4.0))
+            orig_part.append(rest_m)
+            next_m_num += 1
+
+
+def _last_measure_number(orig_score) -> int:
+    import music21 as m21
+    parts = list(orig_score.parts)
+    if not parts:
+        return 0
+    return max(
+        (m.number or 0)
+        for p in parts
+        for m in p.getElementsByClass(m21.stream.Measure)
+    )
+
 
 def append_and_export(
     xml_str: str,
@@ -20,13 +99,9 @@ def append_and_export(
     top_k: int = 50,
     log: Callable[[str], None] = print,
     device: str = "cpu",
-    model_name: str = "GEN-D1024-H8-L8",
+    model_name: str = DEFAULT_MODEL_NAME,
 ) -> dict[str, str]:
     """Append num_bars newly generated measures to an existing score.
-
-    Tokenizes the existing score, uses it as a context prefix via
-    generate_standard(), extracts the newly generated measures, and appends
-    them to the original score XML.
 
     Returns:
         Dict with path to output file: {"xml": ...}
@@ -38,40 +113,18 @@ def append_and_export(
 
     log("Loading generation model...")
     model, cfg = load_model(model_name, device)
-    max_seq_len: int = cfg.get("max_seq_len", 2048)
+    max_seq_len: int = cfg.get("max_seq_len", 1024)
     log(f"Model loaded ({model.num_params():,} params, max_seq_len={max_seq_len})")
 
-    header_tokens = score_to_header_tokens(orig_score)
-    measure_tokens = score_to_tokens_by_measure(orig_score)
+    header = score_to_header_events(orig_score)
+    context, n_ctx_bars = _context_events(orig_score, max_seq_len, num_bars, len(header), log)
 
-    # Flatten measure tokens in order
-    flat_measures: list[int] = []
-    for m_num in sorted(measure_tokens.keys()):
-        flat_measures.extend(measure_tokens[m_num])
-
-    if not flat_measures:
-        flat_measures = [BAR]
-
-    # Truncate context from the left if it would exceed the model window.
-    # Reserve 256 tokens for new generation.
-    max_ctx = max_seq_len - 256
-    header_overhead = 1 + len(header_tokens)  # BOS + header
-    if header_overhead + len(flat_measures) > max_ctx:
-        excess = header_overhead + len(flat_measures) - max_ctx
-        # Advance past `excess` tokens, then align to the next BAR boundary
-        i = excess
-        while i < len(flat_measures) and flat_measures[i] != BAR:
-            i += 1
-        flat_measures = flat_measures[i:]
-        log(f"Context truncated: using last {flat_measures.count(BAR)} of {len(measure_tokens)} measures")
-
-    n_ctx_bars = flat_measures.count(BAR)
     target_bars = n_ctx_bars + num_bars
     log(f"Generating {num_bars} new bars (context has {n_ctx_bars} bars, target={target_bars})...")
 
     generated = model.generate_standard(
-        header_tokens=header_tokens,
-        first_bar_prefix=flat_measures,
+        header_events=header,
+        forced_events=context,
         target_bars=target_bars,
         max_new=max_new,
         temperature=temperature,
@@ -79,40 +132,13 @@ def append_and_export(
         device=device,
     )
 
-    # Reconstruct the continuation score (context measures + new measures)
-    full_tokens = [BOS] + header_tokens + flat_measures + generated + [EOS]
-    continuation_score = tokens_to_score(full_tokens)
+    full = [sos_event()] + header + context + generated + [eos_event()]
+    continuation_score = events_to_score(full)
 
-    # Extract only the new measures (those after the n_ctx_bars context measures)
-    orig_parts = list(orig_score.parts)
-    cont_parts = list(continuation_score.parts)
-
-    # Determine the highest measure number in the original score for renumbering
-    if orig_parts:
-        orig_last_m_num = max(
-            (m.number or 0)
-            for p in orig_parts
-            for m in p.getElementsByClass(m21.stream.Measure)
-        )
-    else:
-        orig_last_m_num = 0
-
-    for part_idx, orig_part in enumerate(orig_parts):
-        next_m_num = orig_last_m_num + 1
-        if part_idx < len(cont_parts):
-            cont_measures = list(cont_parts[part_idx].getElementsByClass(m21.stream.Measure))
-            new_measures = cont_measures[n_ctx_bars:n_ctx_bars + num_bars]
-        else:
-            new_measures = []
-        for new_m in new_measures:
-            new_m.number = next_m_num
-            orig_part.append(new_m)
-            next_m_num += 1
-        for _ in range(len(new_measures), num_bars):
-            rest_m = m21.stream.Measure(number=next_m_num)
-            rest_m.append(m21.note.Rest(quarterLength=4.0))
-            orig_part.append(rest_m)
-            next_m_num += 1
+    orig_last_m_num = _last_measure_number(orig_score)
+    _append_measures(orig_score, continuation_score, n_ctx_bars,
+                     take=min(count_bars(generated), num_bars), pad_to=num_bars,
+                     orig_last_m_num=orig_last_m_num)
 
     try:
         for part in orig_score.parts:
@@ -143,7 +169,7 @@ def append_and_stream(
     top_k: int = 50,
     log: Callable[[str], None] = print,
     device: str = "cpu",
-    model_name: str = "GEN-D1024-H8-L8",
+    model_name: str = DEFAULT_MODEL_NAME,
 ) -> Generator[tuple[int, str, int], None, None]:
     """Stream partial MusicXML as each new measure is generated and merged.
 
@@ -158,44 +184,37 @@ def append_and_stream(
 
     log("Loading generation model...")
     model, cfg = load_model(model_name, device)
-    max_seq_len: int = cfg.get("max_seq_len", 2048)
+    max_seq_len: int = cfg.get("max_seq_len", 1024)
     log(f"Model loaded ({model.num_params():,} params)")
 
-    header_tokens = score_to_header_tokens(orig_score)
-    measure_tokens = score_to_tokens_by_measure(orig_score)
-
-    flat_measures: list[int] = []
-    for m_num in sorted(measure_tokens.keys()):
-        flat_measures.extend(measure_tokens[m_num])
-
-    if not flat_measures:
-        flat_measures = [BAR]
-
-    max_ctx = max_seq_len - 256
-    header_overhead = 1 + len(header_tokens)
-    if header_overhead + len(flat_measures) > max_ctx:
-        excess = header_overhead + len(flat_measures) - max_ctx
-        i = excess
-        while i < len(flat_measures) and flat_measures[i] != BAR:
-            i += 1
-        flat_measures = flat_measures[i:]
-        log(f"Context truncated: using last {flat_measures.count(BAR)} of {len(measure_tokens)} measures")
-
-    n_ctx_bars = flat_measures.count(BAR)
+    header = score_to_header_events(orig_score)
+    context, n_ctx_bars = _context_events(orig_score, max_seq_len, num_bars, len(header), log)
     target_bars = n_ctx_bars + num_bars
 
-    orig_parts = list(orig_score.parts)
-    orig_last_m_num = max(
-        (m.number or 0)
-        for p in orig_parts
-        for m in p.getElementsByClass(m21.stream.Measure)
-    ) if orig_parts else 0
+    orig_last_m_num = _last_measure_number(orig_score)
+    last_snapshot: list[list[int]] = []
 
-    last_snapshot: list[int] = []
+    def emit(snapshot, final: bool):
+        new_bars = count_bars(snapshot)
+        full = [sos_event()] + header + context + snapshot + [eos_event()]
+        continuation_score = events_to_score(full)
+        partial_score = copy.deepcopy(orig_score)
+        take = min(new_bars, num_bars)
+        _append_measures(partial_score, continuation_score, n_ctx_bars,
+                         take=take, pad_to=num_bars if final else take,
+                         orig_last_m_num=orig_last_m_num)
+        try:
+            for part in partial_score.parts:
+                if final:
+                    part.makeBeams(inPlace=True)
+                part.makeAccidentals(inPlace=True, overrideStatus=True)
+        except Exception:
+            pass
+        return new_bars, score_to_xml_str(partial_score)
 
     for snapshot in model.generate_standard_stream(
-        header_tokens=header_tokens,
-        first_bar_prefix=flat_measures,
+        header_events=header,
+        forced_events=context,
         target_bars=target_bars,
         max_new=max_new,
         temperature=temperature,
@@ -203,76 +222,15 @@ def append_and_stream(
         device=device,
     ):
         last_snapshot = snapshot
-        new_bars = snapshot.count(BAR)
-
-        full_tokens = [BOS] + header_tokens + flat_measures + snapshot + [EOS]
         try:
-            continuation_score = tokens_to_score(full_tokens)
-            cont_parts = list(continuation_score.parts)
-
-            partial_score = copy.deepcopy(orig_score)
-            partial_orig_parts = list(partial_score.parts)
-
-            for part_idx, orig_part in enumerate(partial_orig_parts):
-                curr_m_num = orig_last_m_num + 1
-                if part_idx < len(cont_parts):
-                    cont_measures = list(cont_parts[part_idx].getElementsByClass(m21.stream.Measure))
-                    new_measures = cont_measures[n_ctx_bars:n_ctx_bars + new_bars]
-                else:
-                    new_measures = []
-                for i, new_m in enumerate(new_measures):
-                    new_m.number = curr_m_num + i
-                    orig_part.append(new_m)
-                for i in range(len(new_measures), new_bars):
-                    rest_m = m21.stream.Measure(number=curr_m_num + i)
-                    rest_m.append(m21.note.Rest(quarterLength=4.0))
-                    orig_part.append(rest_m)
-
-            try:
-                for part in partial_score.parts:
-                    part.makeAccidentals(inPlace=True, overrideStatus=True)
-            except Exception:
-                pass
-            xml_out = score_to_xml_str(partial_score)
-            # log(f"Streamed {new_bars} new bar(s) of {num_bars}")
+            new_bars, xml_out = emit(snapshot, final=False)
             yield (new_bars, xml_out, num_bars)
         except Exception as e:
-            log(f"Append stream XML error at {new_bars} bars: {e}")
+            log(f"Append stream XML error: {e}")
 
-    # Final emit with complete last measure
-    full_tokens = [BOS] + header_tokens + flat_measures + last_snapshot + [EOS]
     try:
-        continuation_score = tokens_to_score(full_tokens)
-        cont_parts = list(continuation_score.parts)
-
-        final_score = copy.deepcopy(orig_score)
-        final_orig_parts = list(final_score.parts)
-
-        total_new = last_snapshot.count(BAR)
-        for part_idx, orig_part in enumerate(final_orig_parts):
-            curr_m_num = orig_last_m_num + 1
-            if part_idx < len(cont_parts):
-                cont_measures = list(cont_parts[part_idx].getElementsByClass(m21.stream.Measure))
-                new_measures = cont_measures[n_ctx_bars:n_ctx_bars + total_new]
-            else:
-                new_measures = []
-            for i, new_m in enumerate(new_measures[:num_bars]):
-                new_m.number = curr_m_num + i
-                orig_part.append(new_m)
-            for i in range(min(len(new_measures), num_bars), num_bars):
-                rest_m = m21.stream.Measure(number=curr_m_num + i)
-                rest_m.append(m21.note.Rest(quarterLength=4.0))
-                orig_part.append(rest_m)
-
-        try:
-            for part in final_score.parts:
-                part.makeBeams(inPlace=True)
-                part.makeAccidentals(inPlace=True, overrideStatus=True)
-        except Exception:
-            pass
-
-        xml_out = score_to_xml_str(final_score)
-        log(f"Append stream complete: {total_new} new bars")
-        yield (total_new, xml_out, num_bars)
+        new_bars, xml_out = emit(last_snapshot, final=True)
+        log(f"Append stream complete: {new_bars} new bars")
+        yield (new_bars, xml_out, num_bars)
     except Exception as e:
         log(f"Final append stream XML error: {e}")

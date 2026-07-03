@@ -1,12 +1,14 @@
-"""Tests for vertical-aware partial-staff infill.
+"""Tests for vertical-aware partial-staff infill over compound events.
 
 Run: python test_partial_infill.py
 
 Covers (no trained model required):
-  1. Tokenizer part_filter + gap_measure_tokens (BAR emitted even for empty staff).
-  2. create_fim_example partial/full format (FILL_START/FILL_END/FILL_GEN, loss_start).
-  3. merge_fill_into_score: generated target staff lands in the right part and the
-     kept staff is left byte-identical (guards the part-index mapping bug).
+  1. Tokenizer part_filter + gap_measure_events (BAR emitted even for an empty
+     staff; bar indices window-relative).
+  2. create_fim_example partial/full format (FILL_START/FILL_END/FILL_GEN,
+     loss_start, kept/target staff disjointness, bar-index continuity).
+  3. merge_fill_into_score: generated target staff lands in the right part and
+     the kept staff is left byte-identical (guards the part-index mapping bug).
 """
 
 from __future__ import annotations
@@ -14,11 +16,15 @@ import random
 
 import music21 as m21
 
-import ml.tokenizer as t
+from ml.events import (
+    F_TYPE, F_BAR, F_TRACK,
+    BAR_T, NOTE_T, GRACE_T, REST_T,
+    FILL_START_T, FILL_END_T, FILL_GEN_T,
+    MAX_VOICES_PER_PART, MAX_REAL_PARTS,
+)
 from ml.tokenizer import (
-    _collect_events_by_measure, _emit_measure_tokens, gap_measure_tokens,
-    score_to_tokens_by_measure, score_to_header_tokens,
-    MAX_REAL_PARTS, MAX_VOICES_PER_PART, PART_OFF, MAX_PARTS,
+    collect_score, emit_measure_events, flatten_measure_events,
+    gap_measure_events, score_to_header_events,
 )
 from ml.infill_trainer import create_fim_example
 from ml.infill_generator import merge_fill_into_score
@@ -42,9 +48,17 @@ def build_score(n_parts=2, n_measures=6, empty=None):
     return score
 
 
-def parts_in(toks):
-    return sorted({(x - PART_OFF) // MAX_VOICES_PER_PART
-                   for x in toks if PART_OFF <= x < PART_OFF + MAX_PARTS})
+def parts_in(rows):
+    return sorted({(r[F_TRACK] - 1) // MAX_VOICES_PER_PART
+                   for r in rows if r[F_TYPE] in (NOTE_T, GRACE_T, REST_T)})
+
+
+def n_bars(rows):
+    return sum(1 for r in rows if r[F_TYPE] == BAR_T)
+
+
+def type_idx(rows, t):
+    return next(i for i, r in enumerate(rows) if r[F_TYPE] == t)
 
 
 def measure_pitches(score, part_idx, m_num):
@@ -59,68 +73,86 @@ def measure_pitches(score, part_idx, m_num):
 def test_tokenizer_part_filter():
     # part 0 empty in measure 3 -> gap builder must still emit a BAR there.
     score = build_score(n_parts=2, n_measures=4, empty={(0, 3)})
+    collected = collect_score(score)
 
-    mt_p1 = score_to_tokens_by_measure(score, part_filter={1})
+    blocks_p1 = emit_measure_events(collected, part_filter={1})
     for m in (1, 2, 3, 4):
-        assert parts_in(mt_p1[m]) == [1], f"part_filter leaked: m{m} {parts_in(mt_p1[m])}"
+        assert parts_in(blocks_p1[m]) == [1], f"part_filter leaked: m{m} {parts_in(blocks_p1[m])}"
 
-    g = gap_measure_tokens(score, 3, 3, part_filter={0})
-    assert g.count(t.BAR) == 1 and parts_in(g) == [], f"empty-staff gap not a bare BAR: {g}"
+    g = gap_measure_events(collected, 3, 3, part_filter={0}, start_bar=2)
+    assert n_bars(g) == 1 and parts_in(g) == [], f"empty-staff gap not a bare BAR: {g}"
+    assert g[0][F_BAR] == 2, f"gap bar index not window-relative: {g[0]}"
 
-    g2 = gap_measure_tokens(score, 2, 4, part_filter={1})
-    assert g2.count(t.BAR) == 3 and parts_in(g2) == [1]
+    g2 = gap_measure_events(collected, 2, 4, part_filter={1}, start_bar=1)
+    assert n_bars(g2) == 3 and parts_in(g2) == [1]
+    assert [r[F_BAR] for r in g2 if r[F_TYPE] == BAR_T] == [1, 2, 3]
     print("test_tokenizer_part_filter: OK")
 
 
 def test_fim_format():
     score = build_score(n_parts=2, n_measures=6)
-    header = score_to_header_tokens(score)
-    collected = _collect_events_by_measure(score)
-    measure_tokens = _emit_measure_tokens(*collected)
+    header = score_to_header_events(score)
+    collected = collect_score(score)
+    measure_events = emit_measure_events(collected)
     n_parts = len(list(score.parts)[:MAX_REAL_PARTS])
 
     random.seed(0)
     # partial
     seq = None
     for _ in range(20):
-        res = create_fim_example(header, measure_tokens, collected, n_parts,
-                                 partial_ratio=1.0, max_len=2048)
+        res = create_fim_example(header, measure_events, collected, n_parts,
+                                 partial_ratio=1.0, max_len=1024)
         if res:
             seq, ls = res
             break
     assert seq is not None
-    for tok in (t.FILL_START, t.FILL_END, t.FILL_GEN):
-        assert seq.count(tok) == 1, f"marker {tok} count {seq.count(tok)}"
-    assert seq[ls - 1] == t.FILL_GEN, "loss_start not immediately after FILL_GEN"
-    fe, fg = seq.index(t.FILL_END), seq.index(t.FILL_GEN)
-    kept, target = seq[fe + 1:fg], seq[ls:]
+    for t in (FILL_START_T, FILL_END_T, FILL_GEN_T):
+        cnt = sum(1 for r in seq if r[F_TYPE] == t)
+        assert cnt == 1, f"marker type {t} count {cnt}"
+    assert seq[ls - 1][F_TYPE] == FILL_GEN_T, "loss_start not immediately after FILL_GEN"
+
+    fs, fe, fg = (type_idx(seq, t) for t in (FILL_START_T, FILL_END_T, FILL_GEN_T))
+    prefix, suffix = seq[:fs], seq[fs + 1:fe]
+    kept, target = seq[fe + 1:fg], seq[ls:-1]
+
     assert set(parts_in(kept)).isdisjoint(parts_in(target)), "kept/target staff overlap"
     assert parts_in(kept) and parts_in(target), "partial example missing kept or target staff"
 
+    # Bar-index continuity: prefix 0..P-1, gap P..P+G-1 (kept == target), suffix P+G.. .
+    p_bars = [r[F_BAR] for r in prefix if r[F_TYPE] == BAR_T]
+    s_bars = [r[F_BAR] for r in suffix if r[F_TYPE] == BAR_T]
+    k_bars = [r[F_BAR] for r in kept if r[F_TYPE] == BAR_T]
+    t_bars = [r[F_BAR] for r in target if r[F_TYPE] == BAR_T]
+    P, G = len(p_bars), len(t_bars)
+    assert p_bars == list(range(P)), f"prefix bars {p_bars}"
+    assert k_bars == t_bars == list(range(P, P + G)), f"gap bars kept={k_bars} target={t_bars}"
+    assert s_bars == list(range(P + G, P + G + len(s_bars))), f"suffix bars {s_bars}"
+
     # full-staff: kept region empty, single FILL_GEN
-    res2 = create_fim_example(header, measure_tokens, collected, n_parts, partial_ratio=0.0)
+    res2 = create_fim_example(header, measure_events, collected, n_parts, partial_ratio=0.0)
     seq2, ls2 = res2
-    fe2, fg2 = seq2.index(t.FILL_END), seq2.index(t.FILL_GEN)
+    fe2, fg2 = type_idx(seq2, FILL_END_T), type_idx(seq2, FILL_GEN_T)
     assert seq2[fe2 + 1:fg2] == [], "full-staff kept region should be empty"
     print("test_fim_format: OK")
 
 
 def test_merge_maps_to_correct_part():
     score = build_score(n_parts=2, n_measures=6)
+    collected = collect_score(score)
 
     # Snapshot the KEPT staff (part 0) in the gap before any mutation.
     snap_p0 = {m: measure_pitches(score, 0, m) for m in (3, 4)}
 
     # Pretend-model output: part 1's real content for the gap (target staff only).
-    fill_tokens = gap_measure_tokens(score, 3, 4, part_filter={1})
-    assert parts_in(fill_tokens) == [1]
+    fill_events = gap_measure_events(collected, 3, 4, part_filter={1}, start_bar=2)
+    assert parts_in(fill_events) == [1]
 
     # Simulate the API: blank only part 1 in the gap, then merge the generated content.
     from api.routers.infill import _mark_measures_empty
     _mark_measures_empty(score, 3, 4, parts=[1])
     assert measure_pitches(score, 1, 3) == [], "blanking failed"
 
-    merge_fill_into_score(score, fill_tokens, 3, 4, target_parts=[1])
+    merge_fill_into_score(score, fill_events, 3, 4, target_parts=[1])
 
     # Kept staff (part 0) must be byte-identical in the gap.
     for m in (3, 4):

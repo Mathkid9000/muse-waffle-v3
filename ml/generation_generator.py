@@ -1,24 +1,34 @@
-"""Inference pipeline for pure autoregressive music generation from scratch."""
+"""Inference pipeline for pure autoregressive music generation from scratch.
+
+Public signatures are unchanged from the flat-token system — including the
+legacy ``first_bar_prefix`` list of flat token ids built by
+api/routers/generate.py from BAR/KEY_OFF/TIME_OFF/TEMPO_OFF — but internally
+everything runs on compound events (see ml.events / ml.tokenizer).
+"""
 
 from __future__ import annotations
 from pathlib import Path
 from typing import Callable, Generator
 
-from ml.tokenizer import tokens_to_score, score_to_xml_str, BOS, EOS, BAR, INSTR_OFF, CLEF_OFF
+from ml.events import (
+    F_TYPE, BAR_T, sos_event, eos_event, bar_event, key_event, time_event,
+    tempo_event,
+)
+from ml.tokenizer import (
+    events_to_score, score_to_xml_str, parse_legacy_first_bar_prefix, count_bars,
+)
 from ml.model import load_model
 
 OUTPUT_DIR = Path("output")
+
+DEFAULT_MODEL_NAME = "MMT-GAN-D512-L6"
 
 # Instrument indices that use two staves (treble + bass).
 _KEYBOARD_INSTRS = {1, 2, 3, 4}  # piano, harpsichord, organ, accordion
 
 
 def _expand_instr_indices(instr_indices: list[int]) -> list[int]:
-    """Expand keyboard instruments to two entries (one per staff).
-
-    A single piano entry becomes two entries so the model receives separate
-    INSTR+CLEF header tokens for the treble and bass staves.
-    """
+    """Expand keyboard instruments to two entries (one per staff)."""
     expanded: list[int] = []
     for idx in instr_indices:
         expanded.append(idx)
@@ -27,44 +37,17 @@ def _expand_instr_indices(instr_indices: list[int]) -> list[int]:
     return expanded
 
 
-def _sample_header_clefs(model, instr_indices: list[int], temperature: float, top_k: int, device: str) -> list[int]:
-    """Given instrument indices, build a full header by letting the model sample a CLEF
-    token after each INSTR token, as it was trained to do.
-
-    Returns interleaved [INSTR_0, CLEF_0, INSTR_1, CLEF_1, ...] header tokens.
-    """
-    import torch
-
-    model.eval()
-    max_ctx = model.cfg["max_seq_len"]
-    idx = torch.tensor([[BOS]], dtype=torch.long, device=device)
-    header_tokens: list[int] = []
-
-    instr_indices = sorted(instr_indices, reverse=True)
-
-    with torch.no_grad():
-        for instr_idx in instr_indices:
-            instr_tok = INSTR_OFF + instr_idx
-            idx = torch.cat([idx, torch.tensor([[instr_tok]], dtype=torch.long, device=device)], dim=1)
-            header_tokens.append(instr_tok)
-
-            # Sample the next token; the model should predict a CLEF token here.
-            logits = model(idx[:, -max_ctx:])[:, -1, :] / max(temperature, 1e-6)
-            if top_k > 0:
-                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = -float("Inf")
-            probs = torch.softmax(logits, dim=-1)
-            next_t = torch.multinomial(probs, num_samples=1)
-            clef_tok = next_t.item()
-
-            # Clamp to valid CLEF range in case the model predicts something unexpected.
-            if not (CLEF_OFF <= clef_tok < CLEF_OFF + 7):
-                clef_tok = CLEF_OFF  # fall back to treble
-
-            header_tokens.append(clef_tok)
-            idx = torch.cat([idx, torch.tensor([[clef_tok]], dtype=torch.long, device=device)], dim=1)
-
-    return header_tokens
+def _forced_opening(first_bar_prefix: list[int] | None) -> list[list[int]]:
+    """Legacy flat first_bar_prefix -> forced opening event rows for bar 0."""
+    forced = [bar_event(0)]
+    key_idx, time_idx, tempo_idx = parse_legacy_first_bar_prefix(first_bar_prefix)
+    if key_idx is not None:
+        forced.append(key_event(0, key_idx - 6))
+    if time_idx is not None:
+        forced.append(time_event(0, time_idx))
+    if tempo_idx is not None:
+        forced.append(tempo_event(0, tempo_idx))
+    return forced
 
 
 def generate_and_export(
@@ -76,20 +59,15 @@ def generate_and_export(
     top_k: int = 50,
     log: Callable[[str], None] = print,
     device: str = "cpu",
-    model_name: str = "GEN-D1024-H8-L8",
+    model_name: str = DEFAULT_MODEL_NAME,
 ) -> dict[str, str]:
     """Generate a new score from scratch using the generation model.
 
     Args:
         instr_indices: Instrument category indices (0-31, one per part).
-        first_bar_prefix: Tokens to force after the header, e.g.
-            [BAR, KEY_SIG_token, TIME_SIG_token, TEMPO_token]. Defaults to [BAR].
-        target_bars: Total number of measures to generate
-        max_new: Maximum tokens to generate
-        temperature: Sampling temperature
-        top_k: Top-k sampling parameter
-        log: Logging callback
-        device: Device for inference
+        first_bar_prefix: Legacy flat token ids forcing key/time/tempo, e.g.
+            [BAR, KEY_OFF+k, TIME_OFF+t, TEMPO_OFF+b]. Defaults to a bare bar.
+        target_bars: Total number of measures to generate.
 
     Returns:
         Dict with paths to output files: {"midi": ..., "xml": ...}
@@ -99,14 +77,15 @@ def generate_and_export(
     log(f"Model loaded ({model.num_params():,} params)")
 
     expanded = _expand_instr_indices(instr_indices)
-    header_tokens = _sample_header_clefs(model, expanded, temperature, top_k, device)
-    log(f"Expanded instruments: {expanded}, sampled header: {header_tokens}")
+    header = model.sample_header(
+        sorted(expanded, reverse=True), temperature, top_k, device)
+    log(f"Expanded instruments: {expanded}, sampled header: {header}")
 
-    forced = first_bar_prefix if first_bar_prefix is not None else [BAR]
+    forced = _forced_opening(first_bar_prefix)
 
     generated = model.generate_standard(
-        header_tokens=header_tokens,
-        first_bar_prefix=forced,
+        header_events=header,
+        forced_events=forced,
         target_bars=target_bars,
         max_new=max_new,
         temperature=temperature,
@@ -115,8 +94,8 @@ def generate_and_export(
         max_parts=len(expanded),
     )
 
-    full_tokens = [BOS] + header_tokens + forced + generated + [EOS]
-    score = tokens_to_score(full_tokens)
+    full = [sos_event()] + header + forced + generated + [eos_event()]
+    score = events_to_score(full)
 
     OUTPUT_DIR.mkdir(exist_ok=True)
     midi_path = str(OUTPUT_DIR / "generated.mid")
@@ -148,28 +127,34 @@ def generate_and_stream(
     top_k: int = 50,
     log: Callable[[str], None] = print,
     device: str = "cpu",
-    model_name: str = "GEN-D1024-H8-L8",
-) -> Generator[tuple[int, str, int], None, None]:
+    model_name: str = DEFAULT_MODEL_NAME,
+) -> Generator[tuple[int, str, int, int], None, None]:
     """Stream partial MusicXML as each measure is generated.
 
-    Yields (bar_index, xml_str, total_bars) after each completed measure.
-    bar_index counts total BARs visible in the partial score (including forced prefix).
+    Yields (bar_index, xml_str, total_bars, num_instr) after each completed
+    measure; bar_index counts all bars visible in the partial score
+    (including the forced opening bar).
     """
     log("Loading generation model...")
     model, _ = load_model(model_name, device)
     log(f"Model loaded ({model.num_params():,} params)")
 
     expanded = _expand_instr_indices(instr_indices)
-    header_tokens = _sample_header_clefs(model, expanded, temperature, top_k, device)
-    log(f"Expanded instruments: {expanded}, sampled header: {header_tokens}")
+    header = model.sample_header(
+        sorted(expanded, reverse=True), temperature, top_k, device)
+    log(f"Expanded instruments: {expanded}, sampled header: {header}")
 
-    forced = first_bar_prefix if first_bar_prefix is not None else [BAR]
-    n_forced_bars = forced.count(BAR)
-    last_snapshot: list[int] = []
+    forced = _forced_opening(first_bar_prefix)
+    n_forced_bars = count_bars(forced)
+    last_snapshot: list[list[int]] = []
+
+    def snapshot_xml(snapshot):
+        full = [sos_event()] + header + forced + snapshot + [eos_event()]
+        return score_to_xml_str(events_to_score(full))
 
     for snapshot in model.generate_standard_stream(
-        header_tokens=header_tokens,
-        first_bar_prefix=forced,
+        header_events=header,
+        forced_events=forced,
         target_bars=target_bars,
         max_new=max_new,
         temperature=temperature,
@@ -178,21 +163,20 @@ def generate_and_stream(
         max_parts=len(expanded),
     ):
         last_snapshot = snapshot
-        bar_count = n_forced_bars + snapshot.count(BAR)
-
-        full_tokens = [BOS] + header_tokens + forced + snapshot + [EOS]
-        score = tokens_to_score(full_tokens)
-        xml_str = score_to_xml_str(score)
+        bar_count = n_forced_bars + count_bars(snapshot)
+        try:
+            xml_str = snapshot_xml(snapshot)
+        except Exception as e:
+            log(f"Stream XML export error: {e}")
+            continue
         log(f"Streamed bar {bar_count} of {target_bars}")
-        yield (bar_count, xml_str, target_bars, len(header_tokens) // 2)
+        yield (bar_count, xml_str, target_bars, len(header))
 
     # Always emit the final complete score (last measure now has its notes)
-    full_tokens = [BOS] + header_tokens + forced + last_snapshot + [EOS]
     try:
-        score = tokens_to_score(full_tokens)
-        xml_str = score_to_xml_str(score)
-        final_bar = n_forced_bars + last_snapshot.count(BAR)
+        xml_str = snapshot_xml(last_snapshot)
+        final_bar = n_forced_bars + count_bars(last_snapshot)
         log(f"Stream complete: {final_bar} bars")
-        yield (final_bar, xml_str, target_bars, len(header_tokens) // 2)
+        yield (final_bar, xml_str, target_bars, len(header))
     except Exception as e:
         log(f"Final stream XML export error: {e}")

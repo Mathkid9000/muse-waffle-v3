@@ -45,7 +45,7 @@ class InfillRequest(BaseModel):
     )
     temperature: float = Field(0.9, ge=0.1, le=2.0)
     top_k: int = Field(50, ge=1, le=200)
-    model_name: str = Field("INFILL-D1024-H16-L8", description="Infill model checkpoint name")
+    model_name: str = Field("MMT-GAN-D512-L6", description="Infill model checkpoint name")
     device: str = Field("cpu", description="Inference device: cpu or cuda")
 
 
@@ -61,7 +61,7 @@ class GenerateRequest(BaseModel):
     max_new: int = Field(2000, ge=100, le=4096)
     temperature: float = Field(0.9, ge=0.1, le=2.0)
     top_k: int = Field(50, ge=1, le=200)
-    model_name: str = Field("GEN-D1024-H16-L8", description="Generation model checkpoint name")
+    model_name: str = Field("MMT-GAN-D512-L6", description="Generation model checkpoint name")
     device: str = Field("cpu", description="Inference device: cpu or cuda")
 
 
@@ -76,7 +76,7 @@ class AppendRequest(BaseModel):
     max_new: int = Field(1024, ge=100, le=4096)
     temperature: float = Field(0.9, ge=0.1, le=2.0)
     top_k: int = Field(50, ge=1, le=200)
-    model_name: str = Field("GEN-D1024-H16-L8", description="Generation model checkpoint name")
+    model_name: str = Field("MMT-GAN-D512-L6", description="Generation model checkpoint name")
     device: str = Field("cpu", description="Inference device: cpu or cuda")
 
 

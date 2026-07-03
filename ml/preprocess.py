@@ -6,10 +6,11 @@ each score **once** and serialises the exact per-score record the trainer consum
 — ``(header, collected, n_parts)`` — into gzipped pickle shards, then streams them
 back lazily at train time with no music21 in the loop.
 
-``collected`` is the output of :func:`ml.tokenizer._collect_events_by_measure`
-(events plus global-symbol dicts) and is plain Python (ints/lists/dicts), so it
-pickles cleanly and still lets partial-staff FIM re-emit arbitrary staff subsets.
-``measure_tokens`` is re-derived on access via ``_emit_measure_tokens`` (cheap).
+``collected`` is the output of :func:`ml.tokenizer.collect_score` (per-measure
+compound-event rows plus global-symbol dicts) and is plain Python
+(ints/lists/dicts), so it pickles cleanly and still lets partial-staff FIM
+re-emit arbitrary staff subsets.  ``measure_events`` is re-derived on access
+via ``emit_measure_events`` (cheap).
 
 Cache layout (under ``STORAGE_DIR/cache/tokens`` by default):
     index.json              schema + vocab fingerprint + shard list + key order

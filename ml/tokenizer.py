@@ -694,6 +694,10 @@ def events_to_score(events: list[list[int]]):
             el = m21.chord.Chord(
                 [m21.pitch.Pitch(midi=p) for p in midi_list], quarterLength=dur)
         if t == GRACE_T:
+            if el.duration.type == 'complex':
+                # A zero-length grace cannot be split into tied notes at
+                # export, so fall back to a typed written duration.
+                el.duration = m21.duration.Duration(0.5)
             el = el.getGrace()
         elif all(tie for _, tie in pitches) and pitches:
             el.tie = m21.tie.Tie('start')

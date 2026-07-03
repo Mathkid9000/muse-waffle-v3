@@ -1,33 +1,37 @@
-"""Shared training utilities for MusicTransformer models."""
+"""Shared training utilities for the MMT-BERT compound-event models.
+
+The training loop structure is unchanged from the previous system (persisted
+val split, AdamW + warmup/cosine, AMP, gradient accumulation, checkpoint every
+epoch); what changed is the example shape — ``(x [T,7], y [T,7], loss_mask
+[T])`` — and the loss, which is now a per-field masked cross-entropy summed
+over the 7 event fields, with each field additionally masked by
+``FIELD_LOSS_MASK[y_type]`` so a field an event type does not use is never
+scored.
+"""
 
 from __future__ import annotations
 import json
 import math
 import random
-from pathlib import Path
 from typing import Callable
 
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader, random_split
+from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 
-from ml.tokenizer import (
-    score_to_tokens_by_measure, score_to_header_tokens,
-    text_to_tokens,
-    _collect_events_by_measure, _emit_measure_tokens,
-    MAX_REAL_PARTS,
-    BOS, EOS, PAD,
-    NOTE_OFF, KEY_OFF,
-    CSYM_ROOT_OFF, CSYM_BASS_OFF,
+from ml.events import (
+    F_TYPE, N_FIELDS, PAD_T, FIELD_LOSS_MASK, MAX_BARS,
+    special_event, sos_event, eos_event, transpose_events,
 )
-from ml.model import MusicTransformer, model_paths, WEIGHTS_FILE
+from ml.tokenizer import flatten_measure_events
+from ml.model import model_paths
 from ml.preprocess import build_or_open_cache, _path_key, DEFAULT_CACHE_DIR
 
-_NOTE_END = NOTE_OFF + 128
-_KEY_END  = KEY_OFF  + 13
-
 VAL_RATIO = 0.05
+
+# Transposition augmentation range per the MMT-BERT paper: s ~ U(-5, 6).
+TRANSPOSE_LOW, TRANSPOSE_HIGH = -5, 6
 
 
 def _make_split(keys: list[str]) -> tuple[list[str], list[str]]:
@@ -38,116 +42,113 @@ def _make_split(keys: list[str]) -> tuple[list[str], list[str]]:
     return shuffled[-n_val:], shuffled[:-n_val]
 
 
-def _transpose_tokens(tokens: list[int], semitones: int) -> list[int]:
-    """Shift NOTE and KEY_SIG tokens by semitones; all other tokens are unchanged.
+def compound_ce_loss(
+    logits: list[torch.Tensor],
+    y: torch.Tensor,
+    loss_mask: torch.Tensor,
+) -> torch.Tensor:
+    """Per-field masked cross-entropy, summed over the 7 fields.
 
-    NOTE tokens are clamped to [0, 127]. KEY_SIG tokens are shifted via the
-    circle of fifths and wrapped to the representable [-6, +6] sharps range.
+    Args:
+        logits: 7 tensors [B, T, V_k] from the per-field heads.
+        y: [B, T, 7] target event rows.
+        loss_mask: [B, T] float, 1 at scored positions (0 at padding and, for
+            FIM examples, everywhere before the target region).
     """
-    if semitones == 0:
-        return tokens
-    result = []
-    for t in tokens:
-        if NOTE_OFF <= t < _NOTE_END:
-            new_pitch = max(0, min(127, t - NOTE_OFF + semitones))
-            result.append(NOTE_OFF + new_pitch)
-        elif KEY_OFF <= t < _KEY_END:
-            old_sharps = (t - KEY_OFF) - 6
-            new_sharps = ((old_sharps + semitones * 7) + 6) % 12 - 6
-            result.append(KEY_OFF + new_sharps + 6)
-        elif CSYM_ROOT_OFF <= t < CSYM_ROOT_OFF + 12:
-            result.append(CSYM_ROOT_OFF + (t - CSYM_ROOT_OFF + semitones) % 12)
-        elif CSYM_BASS_OFF <= t < CSYM_BASS_OFF + 12:
-            result.append(CSYM_BASS_OFF + (t - CSYM_BASS_OFF + semitones) % 12)
-        else:
-            result.append(t)
-    return result
+    mask_table = torch.tensor(FIELD_LOSS_MASK, device=y.device, dtype=loss_mask.dtype)
+    field_mask = mask_table[y[..., F_TYPE]]          # [B, T, 7]
+    total = torch.zeros((), device=y.device)
+    for k in range(N_FIELDS):
+        ce = nn.functional.cross_entropy(
+            logits[k].reshape(-1, logits[k].size(-1)),
+            y[..., k].reshape(-1),
+            reduction="none",
+        )
+        m = (loss_mask * field_mask[..., k]).reshape(-1)
+        total = total + (ce * m).sum() / (m.sum() + 1e-8)
+    return total
 
 
 def create_standard_example(
-    header_tokens: list[int],
-    measure_tokens: dict[int, list[int]],
-) -> list[int]:
-    """Create a standard next-token prediction example (no FIM)."""
-    tokens = [BOS] + header_tokens
-    for m_num in sorted(measure_tokens.keys()):
-        tokens.extend(measure_tokens[m_num])
-    tokens.append(EOS)
-    return tokens
+    header_events: list[list[int]],
+    measure_events: dict[int, list[list[int]]],
+    max_bars: int = MAX_BARS,
+) -> list[list[int]]:
+    """[SOS] + header + all measures (bars renumbered 0..N-1) + [EOS].
+
+    Scores longer than ``max_bars`` measures contribute a random contiguous
+    window per call, so the bar-index cap doubles as augmentation.
+    """
+    nums = sorted(measure_events.keys())
+    if len(nums) > max_bars:
+        start = random.randint(0, len(nums) - max_bars)
+        nums = nums[start:start + max_bars]
+    flat = flatten_measure_events(measure_events, nums, start_bar=0)
+    return [sos_event()] + list(header_events) + flat + [eos_event()]
 
 
 class MusicDataset(Dataset):
-    """Dataset that produces standard (and optionally FIM) training examples.
+    """Produces standard (and optionally FIM) compound-event training examples.
 
     Pass fim_example_fn to enable fill-in-the-middle examples when fim_ratio > 0.
-    When fim_example_fn is None or fim_ratio is 0.0, all examples are standard.
-
     Gap position and size are re-randomized on every __getitem__ call so the
     model sees each song with a different gap each epoch.
     """
 
     def __init__(
         self,
-        sequences: list[tuple],
-        max_len: int = 512,
+        sequences,
+        max_len: int = 1024,
         fim_ratio: float = 0.0,
-        transpose_range: int = 6,
+        transpose: bool = True,
         fim_example_fn=None,
     ):
         """
         Args:
             sequences: either an in-memory list of
-                (header_tokens, measure_tokens, collected, n_parts) tuples (legacy
-                2-tuples are also accepted), OR a map-style provider (e.g. a
-                CachedMeasureStore / SubsetView) yielding the same 4-tuples lazily.
-            max_len: Maximum sequence length (tokens)
-            fim_ratio: Proportion of examples that use FIM format
-            transpose_range: Max semitone shift for pitch augmentation (0 to disable)
-            fim_example_fn: Callable(header, measures, collected, n_parts, max_len)
-                -> (seq, loss_start) | None
+                (header_events, measure_events, collected, n_parts) tuples, OR a
+                map-style provider (CachedMeasureStore / SubsetView) yielding the
+                same 4-tuples lazily.
+            max_len: maximum sequence length in events.
+            fim_ratio: proportion of examples that use the FIM format.
+            transpose: apply s ~ U(-5, 6) semitone augmentation.
+            fim_example_fn: Callable(header, measures, collected, n_parts,
+                max_len) -> (seq, loss_start) | None
         """
         self.max_len = max_len
         self.fim_ratio = fim_ratio
-        self.transpose_range = transpose_range
+        self.transpose = transpose
         self.fim_example_fn = fim_example_fn
         if isinstance(sequences, list):
-            # Legacy in-memory path: normalise to 4-tuples (tolerate 2-tuples) and
-            # drop scores with fewer than 3 measures.
-            norm = []
-            for seq in sequences:
-                if len(seq) == 2:
-                    h, m = seq
-                    norm.append((h, m, None, 1))
-                else:
-                    norm.append(seq)
-            self.sequences = [t for t in norm if len(t[1]) >= 3]
+            self.sequences = [t for t in sequences if len(t[1]) >= 3]
         else:
-            # Cache-backed provider: already 4-tuples, already length-filtered at
-            # cache-build time. Accessed lazily via __getitem__.
+            # Cache-backed provider: already length-filtered at build time.
             self.sequences = sequences
 
     def __len__(self):
         return len(self.sequences)
 
     def __getitem__(self, idx: int):
-        header_tokens, measure_tokens, collected, n_parts = self.sequences[idx]
+        header_events, measure_events, collected, n_parts = self.sequences[idx]
 
-        if self.fim_ratio > 0 and self.fim_example_fn is not None and random.random() < self.fim_ratio:
+        if self.fim_ratio > 0 and self.fim_example_fn is not None \
+                and random.random() < self.fim_ratio:
             result = self.fim_example_fn(
-                header_tokens, measure_tokens, collected, n_parts, max_len=self.max_len,
+                header_events, measure_events, collected, n_parts,
+                max_len=self.max_len,
             )
             if result is not None:
                 seq, loss_start = result
             else:
-                seq = create_standard_example(header_tokens, measure_tokens)
+                seq = create_standard_example(header_events, measure_events)
                 loss_start = 1
         else:
-            seq = create_standard_example(header_tokens, measure_tokens)
+            seq = create_standard_example(header_events, measure_events)
             loss_start = 1
 
-        if self.transpose_range:
-            shift = random.randint(-self.transpose_range, self.transpose_range)
-            seq = _transpose_tokens(seq, shift)
+        if self.transpose:
+            shift = random.randint(TRANSPOSE_LOW, TRANSPOSE_HIGH)
+            seq = transpose_events(seq, shift)
 
         if len(seq) > self.max_len + 1:
             seq = seq[:self.max_len + 1]
@@ -155,14 +156,15 @@ class MusicDataset(Dataset):
         x = seq[:-1]
         y = seq[1:]
 
-        loss_mask = [0] * len(y)
-        for i in range(loss_start - 1, len(y)):
-            loss_mask[i] = 1
+        loss_mask = [0.0] * len(y)
+        for i in range(max(loss_start - 1, 0), len(y)):
+            loss_mask[i] = 1.0
 
         pad_len = self.max_len - len(x)
-        x         = x         + [PAD] * pad_len
-        y         = y         + [PAD] * pad_len
-        loss_mask = loss_mask + [0]   * pad_len
+        pad_row = special_event(PAD_T)
+        x         = x         + [pad_row] * pad_len
+        y         = y         + [pad_row] * pad_len
+        loss_mask = loss_mask + [0.0]     * pad_len
 
         return (
             torch.tensor(x,         dtype=torch.long),
@@ -171,42 +173,9 @@ class MusicDataset(Dataset):
         )
 
 
-def _load_measure_sequences(
-    paths: list[str],
-    log: Callable[[str], None],
-    max_sequences: int = 0,
-) -> list[tuple[list[int], dict[int, list[int]], tuple, int]]:
-    """Load scores into (header_tokens, measure_tokens, collected, n_parts) tuples.
-
-    `collected` is the raw output of `_collect_events_by_measure` (events plus
-    global-symbol dicts); it lets the FIM example generator re-emit token streams
-    for arbitrary staff subsets (partial-staff infill) without re-parsing music21.
-    `n_parts` is the number of real parts (staves) in the score.
-    """
-    import music21 as m21
-
-    sequences = []
-    for path in tqdm(paths, desc="Parsing scores..."):
-        if max_sequences != 0 and len(sequences) >= max_sequences:
-            break
-        # try:
-        score = m21.converter.parse(path)
-        header = score_to_header_tokens(score)
-        collected = _collect_events_by_measure(score)
-        events_by_measure = collected[0]
-        if events_by_measure and len(events_by_measure) >= 3:
-            measure_tokens = _emit_measure_tokens(*collected)
-            n_parts = len(list(score.parts)[:MAX_REAL_PARTS])
-            sequences.append((header, measure_tokens, collected, n_parts))
-        # except Exception as e:
-        #     log(f"  Skip {Path(path).name}: {e}")
-
-    return sequences
-
-
 def _train_loop(
     name: str,
-    model: MusicTransformer,
+    model,
     data_paths: list[str],
     epochs: int,
     batch_size: int,
@@ -224,23 +193,15 @@ def _train_loop(
     cache_dir=None,
     cache_workers: int = 1,
 ):
-    """Core training loop shared by all model trainers.
+    """Core training loop shared by the generator trainers.
 
-    Handles val split persistence, sequence loading, dataset creation,
-    optimizer setup, epoch loop, checkpointing, and the on_epoch callback.
-    Saves checkpoints to model_paths(name)["weights"] / ["optimizer"].
-
-    Training features:
-        - Linear LR warmup (warmup_ratio of total steps) + cosine decay
-        - Automatic mixed precision (AMP) when use_amp=True and on CUDA
-        - Gradient accumulation over accumulation_steps mini-batches
+    Handles val-split persistence, the token cache, optimizer setup, the epoch
+    loop, checkpointing, and the on_epoch callback.  Saves checkpoints to
+    model_paths(name)["weights"] / ["optimizer"] every epoch.
     """
     paths = model_paths(name)
     paths["dir"].mkdir(parents=True, exist_ok=True)
 
-    # Parse every score exactly once into the on-disk token cache (shared across
-    # models, incremental), then stream tokenized records from it — no music21 in
-    # the epoch loop. The val split is persisted by cache key (resolved path).
     cache_dir = cache_dir or DEFAULT_CACHE_DIR
     log(f"Building/opening token cache for {name} ({len(data_paths)} scores)...")
     store = build_or_open_cache(data_paths, cache_dir=cache_dir, n_workers=cache_workers, log=log)
@@ -264,8 +225,8 @@ def _train_loop(
         log(f"Created val split: {len(val_keys)} val / {len(train_keys)} train.")
 
     max_len   = model.cfg["max_seq_len"]
-    train_set = MusicDataset(store.subset_view(train_keys), max_len, fim_ratio, transpose_range=6, fim_example_fn=fim_example_fn)
-    val_set   = MusicDataset(store.subset_view(val_keys),   max_len, fim_ratio, transpose_range=6, fim_example_fn=fim_example_fn)
+    train_set = MusicDataset(store.subset_view(train_keys), max_len, fim_ratio, fim_example_fn=fim_example_fn)
+    val_set   = MusicDataset(store.subset_view(val_keys),   max_len, fim_ratio, fim_example_fn=fim_example_fn)
     log(f"Dataset: {len(train_set)} train / {len(val_set)} val (max_len={max_len}, fim_ratio={fim_ratio})")
 
     loader     = DataLoader(train_set, batch_size=batch_size, shuffle=True,  drop_last=False)
@@ -286,11 +247,10 @@ def _train_loop(
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
     if paths["optimizer"].exists() and resume_optimizer:
-        optimizer.load_state_dict(torch.load(paths["optimizer"], map_location=device, weights_only=False))
+        optimizer.load_state_dict(torch.load(paths["optimizer"], map_location=device, weights_only=True))
         log("Resumed optimizer state from previous session.")
     model.to(device)
 
-    # AMP setup (only effective on CUDA)
     amp_enabled = use_amp and device == "cuda"
     scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
     amp_dtype = torch.float16
@@ -318,15 +278,7 @@ def _train_loop(
 
             with torch.amp.autocast(device, dtype=amp_dtype, enabled=amp_enabled):
                 logits = model(x)
-                logits_flat = logits.view(-1, logits.size(-1))
-                y_flat      = y.view(-1)
-                mask_flat   = loss_mask.view(-1)
-
-                loss_per_token = nn.functional.cross_entropy(
-                    logits_flat, y_flat, ignore_index=PAD, reduction='none'
-                )
-                masked_loss = loss_per_token * mask_flat
-                loss = masked_loss.sum() / (mask_flat.sum() + 1e-8)
+                loss = compound_ce_loss(logits, y, loss_mask)
                 loss = loss / accumulation_steps
 
             scaler.scale(loss).backward()
@@ -354,15 +306,7 @@ def _train_loop(
 
                 with torch.amp.autocast(device, dtype=amp_dtype, enabled=amp_enabled):
                     logits = model(x)
-                    logits_flat = logits.view(-1, logits.size(-1))
-                    y_flat      = y.view(-1)
-                    mask_flat   = loss_mask.view(-1)
-
-                    loss_per_token = nn.functional.cross_entropy(
-                        logits_flat, y_flat, ignore_index=PAD, reduction='none'
-                    )
-                    masked_loss = loss_per_token * mask_flat
-                    val_loss   += (masked_loss.sum() / (mask_flat.sum() + 1e-8)).item()
+                    val_loss += compound_ce_loss(logits, y, loss_mask).item()
                     val_batches += 1
 
         avg_val_loss = val_loss / max(val_batches, 1)

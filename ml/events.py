@@ -94,7 +94,14 @@ DURATIONS = [
 ]
 N_DURATIONS = len(DURATIONS)
 
+# Duration bins with no single notation type (music21 'complex'); a NOTE/REST
+# with one of these is exported as tied notes, but a zero-length GRACE cannot
+# be split, so grace sampling masks them and grace decoding falls back.
+COMPLEX_DUR_BINS = (12,)  # 2.25 ql
+
 TIME_SIGS = ["2/4", "3/4", "4/4", "6/8", "3/8", "12/8"]
+# Total quarter-lengths per bar for each TIME_SIGS entry (num * 4/den).
+TIME_SIG_QL = [2.0, 3.0, 4.0, 3.0, 1.5, 6.0]
 
 CLEFS = ["treble", "bass", "alto", "tenor", "treble8vb", "treble8va", "bass8vb"]
 N_CLEFS = len(CLEFS)

@@ -3,36 +3,41 @@
 This module handles:
 1. Loading partial MusicXML files with empty measures
 2. Detecting gaps (empty regions)
-3. Generating fill content using the trained infill model
+3. Generating fill content using the trained infill-capable model
 4. Merging generated content back into the score
 5. Exporting completed MIDI and MusicXML
+
+Public signatures (infill_and_export / infill_and_stream) are unchanged from
+the flat-token system; internals run on compound events.  The generated fill
+rows carry window-relative bar indices in the gap range, so
+``events_to_score`` numbers the fill measures consecutively and the merge maps
+them onto the original gap measures positionally, exactly as before.
 """
 
 from __future__ import annotations
+import copy
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Generator
 
+from ml.events import sos_event, eos_event
 from ml.tokenizer import (
-    identify_empty_measures, extract_prefix_suffix_tokens, gap_measure_tokens,
-    tokens_to_score, score_to_xml_str, score_to_header_tokens,
+    identify_empty_measures, collect_score, score_to_header_events,
+    extract_prefix_suffix_events, gap_measure_events,
+    events_to_score, score_to_xml_str, count_bars,
     MAX_REAL_PARTS,
-    BAR, BOS, EOS
 )
 from ml.model import load_model
-from typing import Generator
 
 OUTPUT_DIR = Path("output")
+
+DEFAULT_MODEL_NAME = "MMT-GAN-D512-L6"
+
 
 def load_partial_xml(xml_path: str) -> tuple:
     """Parse input XML and identify gaps.
 
-    Args:
-        xml_path: Path to MusicXML file with empty measures
-
-    Returns:
-        (score, gap_descriptors)
-        - score: music21 Score object
-        - gap_descriptors: List of (start_measure, end_measure) tuples
+    Returns (score, gap_descriptors) where gap_descriptors is a list of
+    (start_measure, end_measure) tuples.
     """
     import music21 as m21
 
@@ -47,83 +52,62 @@ def extract_prefix_suffix(
     gap_start: int,
     gap_end: int,
     target_parts: list[int] | None = None,
-) -> tuple[list[int], list[int], list[int], int, list[int]]:
-    """Extract prefix, suffix, header, and kept-staff gap tokens around a gap.
-
-    Args:
-        score: music21 Score object
-        gap_start: First measure of gap (inclusive)
-        gap_end: Last measure of gap (inclusive)
-        target_parts: Real part indices being regenerated. When given, the gap
-            measures restricted to the OTHER (kept) staves are returned as
-            kept_gap so the model has vertical context.
+) -> tuple[list, list, list, int, list, int]:
+    """Extract prefix, suffix, header, and kept-staff gap events around a gap.
 
     Returns:
-        (prefix_tokens, suffix_tokens, header_tokens, target_bars, kept_gap_tokens)
-        - prefix_tokens: Content before gap (all staves)
-        - suffix_tokens: Content after gap (all staves)
-        - header_tokens: Instrument header for this score
-        - target_bars: Number of bars to generate (gap size)
-        - kept_gap_tokens: Gap measures restricted to kept staves (empty for
-          full-staff infill)
+        (prefix, suffix, header, target_bars, kept_gap, gap_bar_start)
+        - prefix/suffix: event rows before/after the gap (all staves), bars
+          renumbered window-relative (prefix 0..P-1, suffix P+G..)
+        - header: INSTR header events for this score
+        - target_bars: number of measures to generate (gap size)
+        - kept_gap: gap measures restricted to kept staves (empty for
+          full-staff infill), bars P..P+G-1
+        - gap_bar_start: P, the window bar index of the first gap measure
     """
-    prefix, suffix = extract_prefix_suffix_tokens(score, gap_start, gap_end)
-    header = score_to_header_tokens(score)
+    collected = collect_score(score)
+    prefix, suffix, gap_bar_start = extract_prefix_suffix_events(
+        collected, gap_start, gap_end)
+    header = score_to_header_events(score)
     target_bars = gap_end - gap_start + 1
 
-    kept_gap: list[int] = []
+    kept_gap: list = []
     if target_parts is not None:
         n_parts = len(list(score.parts)[:MAX_REAL_PARTS])
         kept_parts = set(range(n_parts)) - set(target_parts)
         if kept_parts:
-            kept_gap = gap_measure_tokens(score, gap_start, gap_end, part_filter=kept_parts)
+            kept_gap = gap_measure_events(
+                collected, gap_start, gap_end,
+                part_filter=kept_parts, start_bar=gap_bar_start)
 
-    return prefix, suffix, header, target_bars, kept_gap
+    return prefix, suffix, header, target_bars, kept_gap, gap_bar_start
 
 
 def merge_fill_into_score(
     score,
-    fill_tokens: list[int],
+    fill_events: list[list[int]],
     gap_start: int,
     gap_end: int,
     color='red',
     target_parts: list[int] | None = None,
 ):
-    """Insert generated tokens back into the score at correct measure positions.
+    """Insert generated events back into the score at correct measure positions.
 
-    This modifies the score in-place by:
-    1. Converting fill_tokens to a temporary score
-    2. Extracting notes from each generated measure
-    3. Inserting them into the corresponding empty measures in the original
-
-    Args:
-        score: Original music21 Score (modified in-place)
-        fill_tokens: Generated tokens for the gap region
-        gap_start: First measure of gap
-        gap_end: Last measure of gap
+    Modifies the score in-place by decoding fill_events to a temporary score,
+    then replacing the musical content of the gap measures (structural
+    elements — clef, key/time sig, tempo — stay in place).
     """
     import music21 as m21
 
-    # Convert fill tokens to a temporary score
-    fill_score = tokens_to_score([BOS] + fill_tokens + [EOS])
+    fill_score = events_to_score([sos_event()] + list(fill_events) + [eos_event()])
 
-    # xml_out_path = str(OUTPUT_DIR / f"filled_test.xml")
-
-    # try:
-    #     fill_score.write("musicxml", fp=xml_out_path)
-    #     print(f"Saved MusicXML -> {xml_out_path}")
-    # except Exception as e:
-    #     print(f"[yellow]MusicXML export skipped: {e}[/yellow]")
-    #     xml_out_path = ""
-    
     if not fill_score.parts:
         return
 
-    # Map each generated part to an ORIGINAL part index.
-    # tokens_to_score compacts parts to sorted part_idx order, so when only a
-    # subset of staves is generated the i-th generated part corresponds to the
-    # i-th (ascending) target part. For full-staff infill (target_parts is None)
-    # this is just identity 0,1,2,...
+    # Map each generated part to an ORIGINAL part index.  events_to_score
+    # compacts parts to sorted lane order, so when only a subset of staves is
+    # generated the i-th generated part corresponds to the i-th (ascending)
+    # target part.  Full-staff infill is identity 0,1,2,...
     gen_parts = list(fill_score.parts)
     if target_parts is not None:
         dest_indices = sorted(target_parts)
@@ -146,11 +130,8 @@ def merge_fill_into_score(
             m_num = measure.number if measure.number is not None else 1
             fill_measures[orig_idx][m_num] = measure
 
-    # Map generated measure numbers to target gap positions
-    # Generated measures are numbered 1, 2, 3... but we need gap_start, gap_start+1, etc.
     target_measures = list(range(gap_start, gap_end + 1))
 
-    # Insert into original score
     for part_idx, part in enumerate(score.parts):
         if target_parts is not None and part_idx not in target_parts:
             continue
@@ -163,20 +144,16 @@ def merge_fill_into_score(
             if i >= len(generated_nums):
                 break
 
-            gen_m_num = generated_nums[i]
-            gen_measure = fill_measures[part_idx][gen_m_num]
+            gen_measure = fill_measures[part_idx][generated_nums[i]]
 
-            # Find the target measure in the original score
             for measure in part.getElementsByClass(m21.stream.Measure):
                 m_num = measure.number if measure.number is not None else 0
                 if m_num == target_m_num:
-                    # Remove only musical content; structural elements (clef, key/time sig,
-                    # tempo) stay in place so they are never accidentally deleted.
+                    # Remove only musical content; structural elements stay.
                     _musical = (m21.note.Note, m21.note.Rest, m21.chord.Chord, m21.stream.Voice)
                     for el in [e for e in measure if isinstance(e, _musical)]:
                         measure.remove(el)
 
-                    # Copy notes/rests/voices from generated measure
                     for el in gen_measure:
                         if isinstance(el, (m21.note.Note, m21.note.Rest, m21.chord.Chord)):
                             if color is not None: el.style.color = color
@@ -205,10 +182,9 @@ def merge_fill_into_score(
         print(f"makeBeams error: {e}")
 
 
-
 def infill_and_export(
     score,
-    model_name,
+    model_name: str = DEFAULT_MODEL_NAME,
     max_new: int = 500,
     temperature: float = 0.9,
     top_k: int = 50,
@@ -219,22 +195,12 @@ def infill_and_export(
 ) -> dict[str, str]:
     """Main entry point for infill generation.
 
-    Processes gaps left-to-right. After filling each gap, the filled content
+    Processes gaps left-to-right.  After filling each gap, the filled content
     becomes part of the prefix for subsequent gaps.
-
-    Args:
-        xml_path: Path to MusicXML file with empty measures
-        max_new: Maximum tokens to generate per gap
-        temperature: Sampling temperature
-        top_k: Top-k sampling
-        log: Logging function
-        device: Device for inference
 
     Returns:
         Dict with paths to output files: {"midi": ..., "xml": ...}
     """
-    import torch
-
     if gaps is None:
         gaps = identify_empty_measures(score)
 
@@ -244,42 +210,36 @@ def infill_and_export(
 
     log(f"Detected {len(gaps)} gap(s): {gaps}")
 
-    # Load infill model
-    log(f"Loading infill model...")
+    log("Loading infill model...")
     model, _ = load_model(model_name, device)
-
     log(f"Model loaded ({model.num_params():,} params)")
 
-    # Process gaps left-to-right
     for i, (gap_start, gap_end) in enumerate(gaps):
         log(f"Processing gap {i+1}/{len(gaps)}: measures {gap_start}-{gap_end}")
 
-        # Extract prefix, suffix, instrument header, and kept-staff gap context
-        prefix, suffix, header, target_bars, kept_gap = extract_prefix_suffix(
-            score, gap_start, gap_end, target_parts=target_parts)
-        log(f"  Prefix: {len(prefix)} tokens, Suffix: {len(suffix)} tokens, "
-            f"Kept-gap: {len(kept_gap)} tokens, Header: {header}, Target: {target_bars} bars")
+        prefix, suffix, header, target_bars, kept_gap, gap_bar_start = \
+            extract_prefix_suffix(score, gap_start, gap_end, target_parts=target_parts)
+        log(f"  Prefix: {len(prefix)} events, Suffix: {len(suffix)} events, "
+            f"Kept-gap: {len(kept_gap)} events, Target: {target_bars} bars "
+            f"(window bars {gap_bar_start}..{gap_bar_start + target_bars - 1})")
 
-        # Generate fill content
-        fill_tokens = model.generate_infill(
-            prefix_tokens=prefix,
-            suffix_tokens=suffix,
-            header_tokens=header,
+        fill_events = model.generate_infill(
+            prefix_events=prefix,
+            suffix_events=suffix,
+            header_events=header,
             target_bars=target_bars,
+            gap_bar_start=gap_bar_start,
             max_new=max_new,
             temperature=temperature,
             top_k=top_k,
             device=device,
-            kept_gap_tokens=kept_gap,
+            kept_gap_events=kept_gap,
             target_parts=target_parts,
         )
 
-        generated_bars = fill_tokens.count(BAR)
-        log(f"  Generated {len(fill_tokens)} tokens ({generated_bars} bars)")
-        log(f"  Generated: {fill_tokens}")
+        log(f"  Generated {len(fill_events)} events ({count_bars(fill_events)} bars)")
 
-        # Merge into score
-        merge_fill_into_score(score, fill_tokens, gap_start, gap_end, target_parts=target_parts)
+        merge_fill_into_score(score, fill_events, gap_start, gap_end, target_parts=target_parts)
         log(f"  Merged fill content into measures {gap_start}-{gap_end}")
 
     # Export results
@@ -294,8 +254,7 @@ def infill_and_export(
             part.makeAccidentals(inPlace=True)
             part.makeBeams(inPlace=True)
     except Exception as e:
-        print(f'SOMETHING WENT WRONG 2 {e}')
-        pass
+        log(f"makeBeams/makeAccidentals skipped: {e}")
 
     score.write("midi", fp=midi_path)
     log(f"Saved MIDI -> {midi_path}")
@@ -304,10 +263,9 @@ def infill_and_export(
         score.write("musicxml", fp=xml_out_path)
         log(f"Saved MusicXML -> {xml_out_path}")
     except Exception as e:
-        log(f"[yellow]MusicXML export skipped: {e}[/yellow]")
+        log(f"MusicXML export skipped: {e}")
         xml_out_path = ""
 
-    # Summary
     note_count = sum(
         1 for el in score.flatten().notesAndRests
         if el.isNote or el.isChord
@@ -318,11 +276,9 @@ def infill_and_export(
     return {"midi": midi_path, "xml": xml_out_path}
 
 
-import time
-
 def infill_and_stream(
     score,
-    model_name: str,
+    model_name: str = DEFAULT_MODEL_NAME,
     max_new: int = 500,
     temperature: float = 0.9,
     top_k: int = 50,
@@ -336,8 +292,6 @@ def infill_and_stream(
     Yields (bar_index, xml_str, total_bars) after each completed fill measure.
     Processes gaps left-to-right, streaming within each gap.
     """
-    import copy
-
     if gaps is None:
         gaps = identify_empty_measures(score)
     if not gaps:
@@ -356,27 +310,28 @@ def infill_and_stream(
 
     for i, (gap_start, gap_end) in enumerate(gaps):
         log(f"Processing gap {i+1}/{len(gaps)}: measures {gap_start}-{gap_end}")
-        prefix, suffix, header, target_bars, kept_gap = extract_prefix_suffix(
-            working_score, gap_start, gap_end, target_parts=target_parts)
+        prefix, suffix, header, target_bars, kept_gap, gap_bar_start = \
+            extract_prefix_suffix(working_score, gap_start, gap_end, target_parts=target_parts)
 
-        last_snapshot: list[int] = []
-        partial_score = copy.deepcopy(working_score)
+        last_snapshot: list[list[int]] = []
 
         for snapshot in model.generate_infill_stream(
-            prefix_tokens=prefix,
-            suffix_tokens=suffix,
-            header_tokens=header,
+            prefix_events=prefix,
+            suffix_events=suffix,
+            header_events=header,
             target_bars=target_bars,
+            gap_bar_start=gap_bar_start,
             max_new=max_new,
             temperature=temperature,
             top_k=top_k,
             device=device,
-            kept_gap_tokens=kept_gap,
+            kept_gap_events=kept_gap,
             target_parts=target_parts,
         ):
             last_snapshot = snapshot
-            bar_count = snapshot.count(BAR)
+            bar_count = count_bars(snapshot)
 
+            partial_score = copy.deepcopy(working_score)
             merge_fill_into_score(partial_score, snapshot, gap_start, gap_end, target_parts=target_parts)
             try:
                 xml_str = score_to_xml_str(partial_score)
@@ -386,34 +341,26 @@ def infill_and_stream(
                 log(f"Infill stream XML error: {e}")
 
         # Final emit for this gap with complete last measure
-        final_snapshot = last_snapshot
         final_score = copy.deepcopy(working_score)
-        merge_fill_into_score(final_score, final_snapshot, gap_start, gap_end, target_parts=target_parts)
+        merge_fill_into_score(final_score, last_snapshot, gap_start, gap_end, target_parts=target_parts)
         try:
             xml_str = score_to_xml_str(final_score)
-            gap_bars = gap_end - gap_start + 1
-            filled_bars += gap_bars
+            filled_bars += gap_end - gap_start + 1
             yield (filled_bars, xml_str, total_fill_bars)
         except Exception as e:
             log(f"Infill final stream XML error: {e}")
 
         # Update working_score so subsequent gaps see filled content
-        merge_fill_into_score(working_score, final_snapshot, gap_start, gap_end, target_parts=target_parts)
+        merge_fill_into_score(working_score, last_snapshot, gap_start, gap_end, target_parts=target_parts)
 
 
 def create_test_partial_xml(output_path: str, empty_measures: list[int] = None):
-    """Create a test MusicXML file with some empty measures for testing.
-
-    Args:
-        output_path: Where to save the test file
-        empty_measures: List of measure numbers to leave empty (default: [3, 4])
-    """
+    """Create a test MusicXML file with some empty measures for testing."""
     import music21 as m21
 
     if empty_measures is None:
         empty_measures = [3, 4]
 
-    # Create a simple score with 8 measures
     score = m21.stream.Score()
     part = m21.stream.Part()
 
@@ -421,22 +368,12 @@ def create_test_partial_xml(output_path: str, empty_measures: list[int] = None):
         measure = m21.stream.Measure(number=m_num)
 
         if m_num not in empty_measures:
-            # Add some content
             if m_num % 2 == 1:
-                n1 = m21.note.Note('C4', quarterLength=1)
-                n2 = m21.note.Note('E4', quarterLength=1)
-                n3 = m21.note.Note('G4', quarterLength=1)
-                n4 = m21.note.Note('C5', quarterLength=1)
-                measure.insert(0, n1)
-                measure.insert(1, n2)
-                measure.insert(2, n3)
-                measure.insert(3, n4)
+                for i, name in enumerate(['C4', 'E4', 'G4', 'C5']):
+                    measure.insert(i, m21.note.Note(name, quarterLength=1))
             else:
-                n1 = m21.note.Note('D4', quarterLength=2)
-                n2 = m21.note.Note('F4', quarterLength=2)
-                measure.insert(0, n1)
-                measure.insert(2, n2)
-        # Empty measures are left with no content
+                measure.insert(0, m21.note.Note('D4', quarterLength=2))
+                measure.insert(2, m21.note.Note('F4', quarterLength=2))
         else:
             rest = m21.note.Rest(quarterLength=4)
             rest.style.hideObjectOnPrint = True

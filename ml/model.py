@@ -38,6 +38,7 @@ from ml.events import (
     NOTE_T, GRACE_T, REST_T, CHORD_T, FILL_START_T, FILL_END_T, FILL_GEN_T,
     N_TYPES, FIELD_VOCAB_SIZES, FIELD_VALID_RANGES, CONTENT_TYPES,
     MAX_BARS, MAX_POS, MAX_PARTS, MAX_VOICES_PER_PART, MAX_REAL_PARTS, N_CLEFS,
+    DURATIONS, N_DURATIONS, TIME_SIGS, TIME_SIG_QL, STEP_SIZE, COMPLEX_DUR_BINS,
     instr_event,
 )
 
@@ -278,13 +279,24 @@ class MMTGenerator(nn.Module):
         cur_bar: int | None,
         next_bar: int,
         last_pos: int,
+        capacity_ql: float,
+        bar_has_content: bool,
         allow_eos: bool,
         allow_bar: bool,
         track_mask: list[int],
         max_parts: int | None,
         device,
     ) -> list[int]:
-        """Sample one event row under structural constraints (type first)."""
+        """Sample one event row under structural constraints (type first).
+
+        capacity_ql is the current bar length (from the active time signature);
+        pos is masked to fall inside the bar and NOTE/REST durations are masked
+        so the event fits the remaining space — guaranteeing decodable,
+        exportable measures.  Symbol events (KEY/TIME/TEMPO/CLEF) are only
+        legal before any content in the current bar, matching the emit order
+        of the training data (and keeping the capacity coherent for the whole
+        bar).
+        """
         # -- type ---------------------------------------------------------
         type_allowed = torch.ones(N_TYPES, dtype=torch.bool, device=device)
         type_allowed[[PAD_T, SOS_T, INSTR_T, FILL_START_T, FILL_END_T, FILL_GEN_T]] = False
@@ -292,6 +304,8 @@ class MMTGenerator(nn.Module):
             type_allowed[EOS_T] = False
         if not allow_bar:
             type_allowed[BAR_T] = False
+        if bar_has_content:
+            type_allowed[[KEY_T, TIME_T, TEMPO_T, CLEF_T]] = False
         if cur_bar is None:
             # No measure open yet: the only legal continuations are BAR / EOS.
             content = torch.zeros_like(type_allowed)
@@ -307,9 +321,14 @@ class MMTGenerator(nn.Module):
         # -- bar (forced, never sampled) ------------------------------------
         row[F_BAR] = min(next_bar if t == BAR_T else (cur_bar or 0), MAX_BARS - 1)
 
-        # -- pos -------------------------------------------------------------
+        # -- pos (monotonic within the bar, inside the bar's capacity) -------
+        # Sounding events stop early enough that the shortest duration bin
+        # (0.125 ql = 3 steps) still fits before the barline.
+        capacity_steps = min(MAX_POS, max(1, round(capacity_ql / STEP_SIZE)))
         if t in CONTENT_TYPES:
-            allowed = _range_mask(MAX_POS, min(last_pos, MAX_POS - 1), MAX_POS - 1, device)
+            hi_pos = capacity_steps - (3 if t in (NOTE_T, REST_T) else 1)
+            lo_pos = min(last_pos, max(hi_pos, 0))
+            allowed = _range_mask(MAX_POS, lo_pos, max(hi_pos, lo_pos), device)
             row[F_POS] = _sample_head(logits[F_POS], temperature, top_k, allowed)
 
         # -- remaining fields under per-type validity ranges -----------------
@@ -326,6 +345,23 @@ class MMTGenerator(nn.Module):
                     allowed[max_parts * MAX_VOICES_PER_PART + 1:] = False
                 if not allowed.any():
                     allowed = _range_mask(FIELD_VOCAB_SIZES[f], lo, hi, device)
+            elif f == F_DUR and t == GRACE_T:
+                # A grace's written duration must have a notation type.
+                for b in COMPLEX_DUR_BINS:
+                    allowed[b + 1] = False
+            elif f == F_DUR and t in (NOTE_T, REST_T):
+                # The sounding duration must fit the rest of the bar (GRACE
+                # carries a written duration and occupies no time; CHORD's dur
+                # field is a chord quality).
+                remaining = capacity_ql - row[F_POS] * STEP_SIZE + 1e-6
+                fit = torch.zeros_like(allowed)
+                for d in range(N_DURATIONS):
+                    if DURATIONS[d] <= remaining:
+                        fit[d + 1] = True
+                if fit.any():
+                    allowed &= fit
+                else:
+                    allowed = _range_mask(FIELD_VOCAB_SIZES[f], 1, 1, device)
             row[f] = _sample_head(logits[f], temperature, top_k, allowed)
         return row
 
@@ -338,6 +374,8 @@ class MMTGenerator(nn.Module):
         cur_bar: int | None,
         next_bar: int,
         last_pos: int,
+        capacity_ql: float,
+        bar_has_content: bool,
         max_new: int,
         temperature: float,
         top_k: int,
@@ -358,7 +396,8 @@ class MMTGenerator(nn.Module):
             allow_bar = True
             row = self._sample_event(
                 logits, temperature, top_k, cur_bar, next_bar, last_pos,
-                allow_eos, allow_bar, track_mask, max_parts, device,
+                capacity_ql, bar_has_content, allow_eos, allow_bar,
+                track_mask, max_parts, device,
             )
 
             if row[F_TYPE] == EOS_T:
@@ -370,10 +409,16 @@ class MMTGenerator(nn.Module):
                 cur_bar = row[F_BAR]
                 next_bar = cur_bar + 1
                 last_pos = 0
+                bar_has_content = False
                 if generated:
                     yield list(generated)
+            elif row[F_TYPE] == TIME_T:
+                idx_ts = row[F_VALUE] - 1
+                if 0 <= idx_ts < len(TIME_SIG_QL):
+                    capacity_ql = TIME_SIG_QL[idx_ts]
             elif row[F_TYPE] in CONTENT_TYPES:
                 last_pos = row[F_POS]
+                bar_has_content = True
 
             generated.append(row)
             idx = torch.cat(
@@ -382,18 +427,27 @@ class MMTGenerator(nn.Module):
         yield list(generated)
 
     @staticmethod
-    def _prompt_bar_state(events: list[list[int]]) -> tuple[int, int | None, int, int]:
-        """(bar_count, cur_bar, next_bar, last_pos) implied by committed events."""
+    def _prompt_bar_state(events: list[list[int]]) -> tuple[int, int | None, int, int, float, bool]:
+        """(bar_count, cur_bar, next_bar, last_pos, capacity_ql,
+        bar_has_content) implied by committed events."""
         bar_count, cur_bar, last_pos = 0, None, 0
+        capacity_ql = 4.0  # default 4/4 until a TIME event says otherwise
+        bar_has_content = False
         for row in events:
             if row[F_TYPE] == BAR_T:
                 bar_count += 1
                 cur_bar = row[F_BAR]
                 last_pos = 0
+                bar_has_content = False
+            elif row[F_TYPE] == TIME_T:
+                idx_ts = row[F_VALUE] - 1
+                if 0 <= idx_ts < len(TIME_SIG_QL):
+                    capacity_ql = TIME_SIG_QL[idx_ts]
             elif row[F_TYPE] in CONTENT_TYPES and cur_bar is not None:
                 last_pos = max(last_pos, row[F_POS])
+                bar_has_content = True
         next_bar = (cur_bar + 1) if cur_bar is not None else 0
-        return bar_count, cur_bar, next_bar, last_pos
+        return bar_count, cur_bar, next_bar, last_pos, capacity_ql, bar_has_content
 
     @torch.no_grad()
     def generate_standard(
@@ -435,11 +489,13 @@ class MMTGenerator(nn.Module):
         """Like generate_standard but yields the accumulated rows after each bar."""
         from ml.events import sos_event, bar_event
         forced = forced_events if forced_events is not None else [bar_event(0)]
-        bar_count, cur_bar, next_bar, last_pos = self._prompt_bar_state(forced)
+        (bar_count, cur_bar, next_bar, last_pos,
+         capacity_ql, bar_has_content) = self._prompt_bar_state(forced)
         prompt = [sos_event()] + list(header_events) + list(forced)
         yield from self._generate_loop(
             prompt, target_bars, bar_count, cur_bar, next_bar, last_pos,
-            max_new, temperature, top_k, device, max_parts=max_parts,
+            capacity_ql, bar_has_content, max_new, temperature, top_k, device,
+            max_parts=max_parts,
         )
 
     @torch.no_grad()
@@ -492,9 +548,12 @@ class MMTGenerator(nn.Module):
         prompt = ([sos_event()] + list(hdr) + list(prefix_events)
                   + [fill_start_event()] + list(suffix_events)
                   + [fill_end_event()] + list(kept) + [fill_gen_event()])
+        # The active time signature at the gap is whatever the prefix ends on.
+        _, _, _, _, capacity_ql, _ = self._prompt_bar_state(list(prefix_events))
         yield from self._generate_loop(
             prompt, target_bars, bar_count=0, cur_bar=None,
-            next_bar=gap_bar_start, last_pos=0,
+            next_bar=gap_bar_start, last_pos=0, capacity_ql=capacity_ql,
+            bar_has_content=False,
             max_new=max_new, temperature=temperature, top_k=top_k,
             device=device, target_parts=target_parts,
         )

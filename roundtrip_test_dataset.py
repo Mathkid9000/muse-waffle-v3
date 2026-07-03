@@ -1,30 +1,51 @@
-from ml.trainer import MusicDataset
-from ml.trainer import _load_measure_sequences
-from ml.dataset import load_cached_paths
-from ml.tokenizer import tokens_to_score
-import numpy as np
+"""Round-trip a random cached dataset score through the compound-event codec.
+
+Requires downloaded dataset files (run the dataset cells in
+notebooks/training.ipynb first).  Picks a random score, encodes it via the
+same path the trainer uses, decodes it back to MusicXML, and reports note
+counts plus a MusicDataset tensor sanity check.
+"""
+
 from random import randint
+from pathlib import Path
 
-idx=randint(0,1800)
-paths = load_cached_paths()[idx:idx+1]
-sequences = _load_measure_sequences(paths, print)
+import music21 as m21
 
-max_len = 2048
-IDX = 1
-train_set = MusicDataset(sequences, max_len, 0, transpose_range=0, fim_example_fn=None)
+from ml.dataset import load_cached_paths
+from ml.events import F_TYPE, NOTE_T, GRACE_T, PAD_T
+from ml.tokenizer import (
+    collect_score, emit_measure_events, score_to_header_events, events_to_score,
+    MAX_REAL_PARTS,
+)
+from ml.trainer import MusicDataset
 
-print('Loaded dataset')
+paths = load_cached_paths()
+if not paths:
+    raise SystemExit("No dataset cached — run 'Download Dataset' first.")
 
-x, y, mask = train_set.__getitem__(0)
-score_in = tokens_to_score(x.flatten().tolist())
-# score_out = tokens_to_score(y.flatten().tolist())
+idx = randint(0, len(paths) - 1)
+path = paths[idx]
+print(f"Analyzing score ({idx}): {path}")
 
-score_in.write("musicxml", fp="./roundtrip/roundtrip_in.mxl")
-# score_out.write("musicxml", fp="./roundtrip/roundtrip_out.mxl")
+score = m21.converter.parse(path)
+header = score_to_header_events(score)
+collected = collect_score(score)
+measure_events = emit_measure_events(collected)
+n_parts = len(list(score.parts)[:MAX_REAL_PARTS])
 
-diffs = [ i for i, x in enumerate(np.absolute(x - y).flatten().tolist()) if x > 0 ]
+train_set = MusicDataset([(header, measure_events, collected, n_parts)],
+                         max_len=1024, fim_ratio=0, transpose=False)
+x, y, mask = train_set[0]
+print(f"x {tuple(x.shape)}  y {tuple(y.shape)}  mask {tuple(mask.shape)}")
+assert x[1:].equal(y[:-1]), "y is not x shifted by one event"
 
-print(f"Analyzed score ({idx}): {paths[0]}")
-print(f"SCORE IN ({len(x):04d} tokens) / SCORE OUT ({len(y):04d} tokens)")
-print(f"Diffs found: {len(diffs)}")
-print(x.flatten().tolist()[:1000])
+rows = [r for r in x.tolist() if r[F_TYPE] != PAD_T]
+recon = events_to_score(rows)
+
+Path("roundtrip").mkdir(exist_ok=True)
+recon.write("musicxml", fp="./roundtrip/roundtrip_in.mxl")
+
+orig_notes  = sum(1 for r in rows if r[F_TYPE] in (NOTE_T, GRACE_T))
+recon_notes = len(list(recon.flatten().notes))
+print(f"encoded NOTE/GRACE rows: {orig_notes}, reconstructed notes: {recon_notes}")
+print("wrote ./roundtrip/roundtrip_in.mxl")

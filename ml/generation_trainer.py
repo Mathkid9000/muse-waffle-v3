@@ -1,21 +1,22 @@
-"""Trains MusicTransformer for pure autoregressive music generation.
+"""MLE-pretrains the MMT generator for pure autoregressive generation.
 
-All training examples use the standard next-token prediction format:
-    [BOS] + header + [BAR] + measures... + [EOS]
+All training examples use the standard next-event prediction format:
+    [SOS] + header + measures (bars 0..N-1) + [EOS]
 
-No fill-in-the-middle restructuring is applied.
+No fill-in-the-middle restructuring is applied — use ml.infill_trainer for
+the combined standard+FIM regime (recommended for the product's infill
+feature), then ml.gan_trainer for MMT-BERT's adversarial phase.
 """
 
 from __future__ import annotations
 from typing import Callable
 
-from ml.model import MusicTransformer
 from ml.trainer import _train_loop
 
 
 def train_generation(
     name: str,
-    model: MusicTransformer,
+    model,
     data_paths: list[str],
     epochs: int,
     batch_size: int,
@@ -30,7 +31,7 @@ def train_generation(
     """Train model on pure standard autoregressive generation (no FIM).
 
     Args:
-        model: MusicTransformer model
+        model: MMTGenerator model
         data_paths: Paths to MusicXML files
         epochs: Number of training epochs
         batch_size: Batch size

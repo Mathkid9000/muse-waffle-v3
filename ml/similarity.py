@@ -1,4 +1,4 @@
-"""Token-histogram similarity between a generated score and the dataset."""
+"""Event-histogram similarity between a generated score and the dataset."""
 
 from __future__ import annotations
 
@@ -9,29 +9,31 @@ from typing import Callable
 
 import music21 as m21
 
-from ml.tokenizer import (
-    score_to_tokens,
-    NOTE_OFF, DUR_OFF, REST_OFF, BAR,
-)
+from ml.events import F_TYPE, F_PITCH, F_DUR, NOTE_T, GRACE_T, REST_T, BAR_T
+from ml.tokenizer import collect_score, emit_measure_events, flatten_measure_events
 from ml.dataset import load_cached_paths
 
 
-def _token_histogram(tokens: list[int]) -> dict[str, float]:
+def _score_events(score) -> list[list[int]]:
+    return flatten_measure_events(emit_measure_events(collect_score(score)))
+
+
+def _event_histogram(events: list[list[int]]) -> dict[str, float]:
     pitch_counts: Counter = Counter()
     dur_counts:   Counter = Counter()
     rest_counts:  Counter = Counter()
     note_total = rest_total = bar_count = 0
 
-    for t in tokens:
-        if t == BAR:
+    for row in events:
+        t = row[F_TYPE]
+        if t == BAR_T:
             bar_count += 1
-        elif NOTE_OFF <= t < NOTE_OFF + 128:
-            pitch_counts[t - NOTE_OFF] += 1
+        elif t in (NOTE_T, GRACE_T):
+            pitch_counts[row[F_PITCH] - 1] += 1
+            dur_counts[row[F_DUR] - 1] += 1
             note_total += 1
-        elif DUR_OFF <= t < DUR_OFF + 16:
-            dur_counts[t - DUR_OFF] += 1
-        elif REST_OFF <= t < REST_OFF + 16:
-            rest_counts[t - REST_OFF] += 1
+        elif t == REST_T:
+            rest_counts[row[F_DUR] - 1] += 1
             rest_total += 1
 
     vec: dict[str, float] = {}
@@ -50,12 +52,12 @@ def _token_histogram(tokens: list[int]) -> dict[str, float]:
     return vec
 
 
-def _chroma_histogram(tokens: list[int]) -> dict[int, float]:
+def _chroma_histogram(events: list[list[int]]) -> dict[int, float]:
     counts: Counter = Counter()
     total = 0
-    for t in tokens:
-        if NOTE_OFF <= t < NOTE_OFF + 128:
-            counts[(t - NOTE_OFF) % 12] += 1
+    for row in events:
+        if row[F_TYPE] in (NOTE_T, GRACE_T):
+            counts[(row[F_PITCH] - 1) % 12] += 1
             total += 1
     if not total:
         return {}
@@ -83,13 +85,13 @@ def compare_to_dataset(
 
     try:
         gen_score  = m21.converter.parse(xml_path)
-        gen_tokens = score_to_tokens(gen_score)
+        gen_events = _score_events(gen_score)
     except Exception as e:
         log(f"[yellow]Similarity: could not parse generated score: {e}[/yellow]")
         return
 
-    gen_vec    = _token_histogram(gen_tokens)
-    gen_chroma = _chroma_histogram(gen_tokens)
+    gen_vec    = _event_histogram(gen_events)
+    gen_chroma = _chroma_histogram(gen_events)
 
     log(f"Comparing against {len(dataset_paths)} dataset scores…")
 
@@ -98,10 +100,9 @@ def compare_to_dataset(
         if not Path(path).exists():
             continue
         try:
-            score  = m21.converter.parse(path)
-            tokens = score_to_tokens(score)
-            tok_sim    = _cosine(gen_vec,    _token_histogram(tokens))
-            chroma_sim = _cosine(gen_chroma, _chroma_histogram(tokens))
+            events = _score_events(m21.converter.parse(path))
+            tok_sim    = _cosine(gen_vec,    _event_histogram(events))
+            chroma_sim = _cosine(gen_chroma, _chroma_histogram(events))
             combined   = 0.6 * tok_sim + 0.4 * chroma_sim
             results.append((combined, tok_sim, chroma_sim, path))
         except Exception:
