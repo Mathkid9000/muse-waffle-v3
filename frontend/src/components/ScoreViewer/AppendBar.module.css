@@ -1,9 +1,11 @@
 .appendBar {
   display: flex;
+  align-items: center;
   justify-content: center;
-  padding: 16px 20px 32px;
-  width: 100%;
+  padding: 20px;
+  width: 560px;
   box-sizing: border-box;
+  flex-shrink: 0;
 }
 
 .trigger {

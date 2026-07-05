@@ -17,8 +17,11 @@
 
 .pages {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   align-items: center;
+  justify-content: center;
+  height: 100%;
+  box-sizing: border-box;
   padding: 20px;
   gap: 20px;
   /* Camera transform anchors at the viewport top-left so pan/zoom math is exact. */
@@ -26,7 +29,10 @@
   will-change: transform;
 }
 
+/* Each page fills the viewport height (minus padding) and keeps its aspect ratio,
+   so a whole page fits vertically and is vertically centered by align-items. */
 .page {
+  height: 100%;
   background: #fff;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6);
   border-radius: 1px;
@@ -35,8 +41,8 @@
 
 .page svg {
   display: block;
-  width: 100%;
-  height: auto;
+  height: 100%;
+  width: auto;
 }
 
 /* Empty state: show a blank paper rectangle on the dark canvas */
