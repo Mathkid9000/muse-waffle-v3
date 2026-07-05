@@ -12,6 +12,7 @@ export default function Toolbar() {
   const setError = useStore((s) => s.setError)
   const zoomTo = useStore((s) => s.zoomTo)
   const resetCamera = useStore((s) => s.resetCamera)
+  const redrawScore = useStore((s) => s.redrawScore)
   const viewportW = useStore((s) => s.viewportW)
   const viewportH = useStore((s) => s.viewportH)
 
@@ -69,6 +70,9 @@ export default function Toolbar() {
         </button>
         <button className={styles.btn} onClick={handleDownload} disabled={!currentXml}>
           Download
+        </button>
+        <button className={styles.btn} onClick={() => redrawScore()} disabled={!currentXml} title="Re-render the score">
+          Redraw
         </button>
         <div className={styles.zoom}>
           <button className={styles.zoomBtn} onClick={() => zoomStep(-10)} disabled={zoom <= 25} title="Zoom out (Ctrl+Scroll)">−</button>

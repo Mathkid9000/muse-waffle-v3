@@ -28,6 +28,8 @@ interface AppState {
   streamBar: number | null
   totalBars: number | null
   streamMode: 'infill' | 'generate' | 'append' | null
+  /** Bumped to force ScoreViewer to re-render the SVG from the current XML. */
+  redrawNonce: number
 
   setXml: (xml: string) => void
   setScoreData: (data: ScoreAppData | null) => void
@@ -42,6 +44,8 @@ interface AppState {
   setSelection: (s: MeasureSelection | null) => void
   setStreamProgress: (bar: number | null, total: number | null) => void
   setStreamMode: (mode: 'infill' | 'generate' | 'append' | null) => void
+  /** Force a full re-render of the score SVG. */
+  redrawScore: () => void
 }
 
 const ZOOM_MIN = 25
@@ -62,6 +66,7 @@ export const useStore = create<AppState>((set) => ({
   streamBar: null,
   totalBars: null,
   streamMode: null,
+  redrawNonce: 0,
 
   setXml: (xml) => set({ currentXml: xml, error: null }),
   setScoreData: (data) => set({ scoreData: data }),
@@ -85,4 +90,5 @@ export const useStore = create<AppState>((set) => ({
   setSelection: (s) => set({ selection: s }),
   setStreamProgress: (bar, total) => set({ streamBar: bar, totalBars: total }),
   setStreamMode: (mode) => set({ streamMode: mode }),
+  redrawScore: () => set((s) => ({ redrawNonce: s.redrawNonce + 1 })),
 }))

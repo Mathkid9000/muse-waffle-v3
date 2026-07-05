@@ -29,6 +29,7 @@ export default function ScoreViewer() {
   const selection = useStore((s) => s.selection)
   const setSelection = useStore((s) => s.setSelection)
   const streamMode = useStore((s) => s.streamMode)
+  const redrawNonce = useStore((s) => s.redrawNonce)
 
   const [pages, setPages] = useState<string[]>([])
   const outerRef = useRef<HTMLDivElement>(null)
@@ -93,7 +94,7 @@ export default function ScoreViewer() {
     }
     cachedPagesRef.current = updated
     setPages([...updated])
-  }, [ready, currentXml, streamMode])
+  }, [ready, currentXml, streamMode, redrawNonce])
 
   // Inject selection highlight rects directly into the SVG DOM.
   // When selection.parts is set, highlight only those staff rows within each measure.
