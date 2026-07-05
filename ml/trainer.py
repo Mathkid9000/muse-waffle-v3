@@ -202,10 +202,12 @@ def _train_loop(
     paths = model_paths(name)
     paths["dir"].mkdir(parents=True, exist_ok=True)
 
+    # Get cache, returns a store of (header, measure_tokens, collected, n_parts)
     cache_dir = cache_dir or DEFAULT_CACHE_DIR
     log(f"Building/opening token cache for {name} ({len(data_paths)} scores)...")
     store = build_or_open_cache(data_paths, cache_dir=cache_dir, n_workers=cache_workers, log=log)
 
+    # Gets abs paths
     all_keys = [k for k in (_path_key(p) for p in data_paths) if store.has(k)]
     if not all_keys:
         raise RuntimeError("No sequences in token cache — run 'Download Dataset' first.")

@@ -21,7 +21,7 @@ from ml.model import load_model
 
 OUTPUT_DIR = Path("output")
 
-DEFAULT_MODEL_NAME = "MMT-GAN-D512-L6"
+DEFAULT_MODEL_NAME = "MMT-GEN-D512-L6"
 
 # Instrument indices that use two staves (treble + bass).
 _KEYBOARD_INSTRS = {1, 2, 3, 4}  # piano, harpsichord, organ, accordion
