@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from 'react'
+import { useEffect, useMemo, useState, useRef } from 'react'
 import { useVerovio, getSharedToolkit, loadAndGetPageCount } from '../../hooks/useVerovio'
 import { useStore } from '../../store'
 import styles from './ScoreViewer.module.css'
@@ -6,17 +6,50 @@ import AppendBar from './AppendBar'
 
 const MEASURE_SEL = 'g.measure'
 const STAFF_SEL = 'g.staff'
+const PAGE_SEL = '[data-page-index]'
+
+// Layout constants — must match .pages padding / gap in the CSS module.
+const PAD = 20
+const GAP = 20
+// Fallback page aspect ratio (width / height) for pages not yet rendered.
+const DEFAULT_ASPECT = 1.4
 
 const svgParser = new DOMParser()
 
-function buildMeasureMap(svgs: string[]): Map<number, number> {
-  const map = new Map<number, number>()
-  let measureNum = 1
-  svgs.forEach((svg, pageIdx) => {
-    const count = svgParser.parseFromString(svg, 'image/svg+xml').querySelectorAll(MEASURE_SEL).length
-    for (let i = 0; i < count; i++) map.set(measureNum++, pageIdx)
-  })
-  return map
+interface PageInfo {
+  count: number
+  aspect: number
+}
+
+interface PageMeta {
+  measureCounts: number[]
+  /** Number of measures in all pages before this one (cumulative offset). */
+  offsets: number[]
+  /** width / height of each page's rendered SVG, for placeholder sizing. */
+  aspects: number[]
+  total: number
+}
+
+/** width / height of a rendered Verovio page, from its root <svg> attrs or viewBox. */
+function svgAspect(doc: Document): number {
+  const svg = doc.documentElement
+  const w = parseFloat(svg.getAttribute('width') || '')
+  const h = parseFloat(svg.getAttribute('height') || '')
+  if (w > 0 && h > 0) return w / h
+  const vb = svg.getAttribute('viewBox')
+  if (vb) {
+    const p = vb.split(/[\s,]+/).map(Number)
+    if (p.length === 4 && p[3] > 0) return p[2] / p[3]
+  }
+  return DEFAULT_ASPECT
+}
+
+/** Page index (0-based) containing 1-based global measure `m`, or -1. */
+function pageOfMeasure(meta: PageMeta, m: number): number {
+  for (let i = 0; i < meta.measureCounts.length; i++) {
+    if (meta.offsets[i] < m && m <= meta.offsets[i] + meta.measureCounts[i]) return i
+  }
+  return -1
 }
 
 export default function ScoreViewer() {
@@ -26,6 +59,8 @@ export default function ScoreViewer() {
   const zoom = useStore((s) => s.zoom)
   const panX = useStore((s) => s.panX)
   const panY = useStore((s) => s.panY)
+  const viewportW = useStore((s) => s.viewportW)
+  const viewportH = useStore((s) => s.viewportH)
   const selection = useStore((s) => s.selection)
   const setSelection = useStore((s) => s.setSelection)
   const streamMode = useStore((s) => s.streamMode)
@@ -45,12 +80,74 @@ export default function ScoreViewer() {
   const panningRef = useRef(false)
 
   const cachedPagesRef = useRef<string[]>([])
-  const measureToPageRef = useRef<Map<number, number>>(new Map())
+  // Per-SVG metadata cache keyed by the SVG string, so unchanged pages (which keep
+  // their string identity across streaming updates) are never reparsed.
+  const metaCacheRef = useRef<Map<string, PageInfo>>(new Map())
+
+  // Per-page measure counts / offsets / aspect ratios. Selection maps a page's local
+  // measure indices to global measure numbers via offsets; placeholders size from aspects.
+  const pageMeta = useMemo<PageMeta>(() => {
+    const cache = metaCacheRef.current
+    const measureCounts: number[] = []
+    const aspects: number[] = []
+    const offsets: number[] = []
+    let acc = 0
+    let lastAspect = DEFAULT_ASPECT
+    for (const svg of pages) {
+      offsets.push(acc)
+      if (!svg) {
+        measureCounts.push(0)
+        aspects.push(lastAspect)
+        continue
+      }
+      let info = cache.get(svg)
+      if (!info) {
+        const doc = svgParser.parseFromString(svg, 'image/svg+xml')
+        info = { count: doc.querySelectorAll(MEASURE_SEL).length, aspect: svgAspect(doc) }
+        cache.set(svg, info)
+      }
+      measureCounts.push(info.count)
+      aspects.push(info.aspect)
+      lastAspect = info.aspect
+      acc += info.count
+    }
+    return { measureCounts, offsets, aspects, total: acc }
+  }, [pages])
+
+  // Which pages currently intersect the viewport (plus a one-viewport buffer). Computed
+  // analytically from the camera transform + page layout, since the pan/zoom camera uses
+  // CSS transforms (an IntersectionObserver wouldn't reliably fire on transform changes).
+  const visiblePages = useMemo<Set<number>>(() => {
+    const set = new Set<number>()
+    const n = pageMeta.aspects.length
+    if (n === 0) return set
+    if (viewportW === 0 || viewportH === 0) {
+      for (let i = 0; i < n; i++) set.add(i)
+      return set
+    }
+    const z = zoom / 100
+    const contentH = Math.max(1, viewportH - 2 * PAD)
+    const widths = pageMeta.aspects.map((a) => contentH * a)
+    // Pages lay out left-to-right (flex-start) starting after the container padding.
+    let x = PAD
+    // Pages are full-height and vertically centered, so vertical visibility is shared.
+    const sTop = panY + z * PAD
+    const sBot = panY + z * (PAD + contentH)
+    const vOK = sBot >= -viewportH && sTop <= 2 * viewportH
+    const bufX = viewportW
+    for (let i = 0; i < n; i++) {
+      const sL = panX + z * x
+      const sR = panX + z * (x + widths[i])
+      if (vOK && sR >= -bufX && sL <= viewportW + bufX) set.add(i)
+      x += widths[i] + GAP
+    }
+    return set
+  }, [pageMeta, panX, panY, zoom, viewportW, viewportH])
 
   useEffect(() => {
     if (!ready || !currentXml) {
       cachedPagesRef.current = []
-      measureToPageRef.current = new Map()
+      metaCacheRef.current.clear()
       setPages([])
       return
     }
@@ -61,24 +158,23 @@ export default function ScoreViewer() {
 
     if (!tk || !streamMode || cachedPagesRef.current.length === 0) {
       // Full render: initial load, not streaming, or cache empty (first streaming event)
-      const allPages = renderXml(currentXml, w * 2.5, 40, scoreData.numInstruments)
+      const allPages = renderXml(currentXml, w * 2.5, 40, scoreData?.numInstruments ?? 1)
       cachedPagesRef.current = allPages
-      measureToPageRef.current = buildMeasureMap(allPages)
       setPages(allPages)
       return
     }
 
     // Incremental: loadAndGetPageCount applies options + loads data into the shared tk
     const prevCount = cachedPagesRef.current.length
-    const newCount = loadAndGetPageCount(currentXml, w * 2.5, 40, scoreData.numInstruments)
+    const newCount = loadAndGetPageCount(currentXml, w * 2.5, 40, scoreData?.numInstruments ?? 1)
     if (newCount === 0) return
 
     let startPage: number
     let endPage: number
     if (streamMode === 'infill') {
       const gapStart = sel?.start ?? 1
-      const gapPageIdx = measureToPageRef.current.get(gapStart) ?? prevCount - 1
-      startPage = gapPageIdx + 1  // convert 0-indexed map value to 1-indexed page
+      const gapPageIdx = pageOfMeasure(pageMeta, gapStart)
+      startPage = (gapPageIdx < 0 ? prevCount - 1 : gapPageIdx) + 1  // 0-indexed page -> 1-indexed
       endPage = startPage
     } else {
       // generate/append: re-render from old last page through new last page
@@ -97,13 +193,14 @@ export default function ScoreViewer() {
 
   // Inject selection highlight rects directly into the SVG DOM.
   // When selection.parts is set, highlight only those staff rows within each measure.
+  // Only mounted (visible) pages carry measure elements; measures on off-screen pages
+  // are skipped and re-applied by this effect once those pages scroll into view.
   useEffect(() => {
     const inner = innerRef.current
     if (!inner) return
     inner.querySelectorAll('.mw-sel').forEach((el) => el.remove())
     if (!selection) return
 
-    const measures = inner.querySelectorAll<SVGGraphicsElement>(MEASURE_SEL)
     const ns = 'http://www.w3.org/2000/svg'
 
     function addRect(parent: SVGGraphicsElement, bb: DOMRect | { x: number; y: number; width: number; height: number }) {
@@ -121,7 +218,13 @@ export default function ScoreViewer() {
     }
 
     for (let m = selection.start; m <= selection.end; m++) {
-      const g = measures[m - 1]
+      const pageIdx = pageOfMeasure(pageMeta, m)
+      if (pageIdx < 0) continue
+      const pageEl = inner.querySelector<HTMLElement>(`[data-page-index="${pageIdx}"]`)
+      if (!pageEl) continue
+      const measures = pageEl.querySelectorAll<SVGGraphicsElement>(MEASURE_SEL)
+      if (measures.length === 0) continue // page not mounted
+      const g = measures[m - pageMeta.offsets[pageIdx] - 1]
       if (!g) continue
       try {
         if (!selection.parts) {
@@ -140,7 +243,7 @@ export default function ScoreViewer() {
         }
       } catch { /* getBBox unavailable off-screen */ }
     }
-  }, [selection, pages])
+  }, [selection, pages, visiblePages, pageMeta])
 
   // Wheel: Ctrl/Cmd + wheel zooms toward the cursor; plain wheel pans the camera.
   // Registered manually (not via React's onWheel) so the listener is non-passive and
@@ -175,24 +278,27 @@ export default function ScoreViewer() {
     return () => ro.disconnect()
   }, [])
 
-  // Returns the 1-based measure index and the 0-based staff index for a mouse event.
+  // Returns the 1-based global measure index and the 0-based staff index for a mouse event.
   // staffIdx is null when the click doesn't land on a specific staff (e.g. barlines).
+  // Scopes to the page div under the pointer, then maps the local measure index to a
+  // global measure number via that page's offset.
   // 1. Tries closest() — works when the click lands on a note/rest/barline child.
   // 2. Falls back to geometric hit-test — works when clicking empty staff space.
   function measureAndStaffAt(e: React.MouseEvent): { measure: number; staffIdx: number | null } | null {
     const target = e.target
     if (!(target instanceof Element)) return null
-    const inner = innerRef.current
-    if (!inner) return null
 
-    const allMeasures = inner.querySelectorAll<SVGGraphicsElement>(MEASURE_SEL)
-    if (allMeasures.length === 0) return null
+    const pageEl = target.closest<HTMLElement>(PAGE_SEL)
+    if (!pageEl) return null
+    const offset = pageMeta.offsets[Number(pageEl.dataset.pageIndex)] ?? 0
+    const measures = pageEl.querySelectorAll<SVGGraphicsElement>(MEASURE_SEL)
+    if (measures.length === 0) return null
 
     // Fast path: clicked element is inside a measure group
     const directMeasure = target.closest<Element>(MEASURE_SEL)
-    if (directMeasure) {
-      const mIdx = Array.from(allMeasures).indexOf(directMeasure as SVGGraphicsElement)
-      if (mIdx < 0) return null
+    if (directMeasure && pageEl.contains(directMeasure)) {
+      const local = Array.from(measures).indexOf(directMeasure as SVGGraphicsElement)
+      if (local < 0) return null
       const directStaff = target.closest<Element>(STAFF_SEL)
       let staffIdx: number | null = null
       if (directStaff && directMeasure.contains(directStaff)) {
@@ -200,14 +306,12 @@ export default function ScoreViewer() {
         const si = staffEls.indexOf(directStaff as Element)
         if (si >= 0) staffIdx = si
       }
-      return { measure: mIdx + 1, staffIdx }
+      return { measure: offset + local + 1, staffIdx }
     }
 
     // Geometric fallback: map pointer into SVG coordinates and test bounding boxes.
-    let svg = target.closest('svg') as SVGSVGElement | null
-    if (!svg && target instanceof SVGSVGElement) svg = target
+    const svg = pageEl.querySelector('svg') as SVGSVGElement | null
     if (!svg) return null
-
     const svgRect = svg.getBoundingClientRect()
     const vb = (svg.querySelector('.definition-scale') as SVGSVGElement)?.viewBox?.baseVal
     if (!vb || svgRect.width === 0 || svgRect.height === 0) return null
@@ -217,13 +321,12 @@ export default function ScoreViewer() {
     const x = (e.clientX - svgRect.left) * scaleX + vb.x
     const y = (e.clientY - svgRect.top) * scaleY + vb.y
 
-    for (let i = 0; i < allMeasures.length; i++) {
-      if (!svg.contains(allMeasures[i])) continue
+    for (let i = 0; i < measures.length; i++) {
       try {
-        const mBB = allMeasures[i].getBBox()
+        const mBB = measures[i].getBBox()
         if (x >= mBB.x && x <= mBB.x + mBB.width && y >= mBB.y && y <= mBB.y + mBB.height) {
           // Found the measure — try to narrow down to a specific staff
-          const staffEls = allMeasures[i].querySelectorAll<SVGGraphicsElement>(STAFF_SEL)
+          const staffEls = measures[i].querySelectorAll<SVGGraphicsElement>(STAFF_SEL)
           let staffIdx: number | null = null
           for (let s = 0; s < staffEls.length; s++) {
             try {
@@ -234,7 +337,7 @@ export default function ScoreViewer() {
               }
             } catch { /* off-screen */ }
           }
-          return { measure: i + 1, staffIdx }
+          return { measure: offset + i + 1, staffIdx }
         }
       } catch { }
     }
@@ -242,8 +345,9 @@ export default function ScoreViewer() {
     return null
   }
 
-  // Cache a client-space rect for every staff in every measure, so the drag
-  // marquee can hit-test without thrashing layout on each mousemove.
+  // Cache a client-space rect for every staff in every mounted measure, so the drag
+  // marquee can hit-test without thrashing layout on each mousemove. Off-screen pages
+  // carry no measures and are simply skipped.
   function buildRectCache() {
     const inner = innerRef.current
     const cache: Array<{ measure: number; staff: number; rect: DOMRect }> = []
@@ -252,17 +356,19 @@ export default function ScoreViewer() {
       staffCountRef.current = 0
       return
     }
-    const measures = inner.querySelectorAll<SVGGraphicsElement>(MEASURE_SEL)
     let staffCount = 0
-    measures.forEach((m, mIdx) => {
-      const staffEls = m.querySelectorAll<SVGGraphicsElement>(STAFF_SEL)
-      if (mIdx === 0) staffCount = staffEls.length
-      staffEls.forEach((s, sIdx) => {
-        cache.push({ measure: mIdx + 1, staff: sIdx, rect: s.getBoundingClientRect() })
+    inner.querySelectorAll<HTMLElement>(PAGE_SEL).forEach((pageEl) => {
+      const offset = pageMeta.offsets[Number(pageEl.dataset.pageIndex)] ?? 0
+      pageEl.querySelectorAll<SVGGraphicsElement>(MEASURE_SEL).forEach((m, mLocal) => {
+        const staffEls = m.querySelectorAll<SVGGraphicsElement>(STAFF_SEL)
+        if (staffCount === 0 && staffEls.length) staffCount = staffEls.length
+        staffEls.forEach((s, sIdx) => {
+          cache.push({ measure: offset + mLocal + 1, staff: sIdx, rect: s.getBoundingClientRect() })
+        })
       })
     })
     rectCacheRef.current = cache
-    staffCountRef.current = staffCount
+    staffCountRef.current = staffCount || (scoreData?.numInstruments ?? 1)
   }
 
   function hideMarquee() {
@@ -411,7 +517,13 @@ export default function ScoreViewer() {
           style={{ transform: `translate(${panX}px, ${panY}px) scale(${zoom / 100})` }}
         >
           {pages.map((svg, i) => (
-            <div key={i} className={styles.page} dangerouslySetInnerHTML={{ __html: svg }} />
+            <div
+              key={i}
+              className={styles.page}
+              data-page-index={i}
+              style={{ aspectRatio: String(pageMeta.aspects[i] ?? DEFAULT_ASPECT) }}
+              {...(visiblePages.has(i) ? { dangerouslySetInnerHTML: { __html: svg } } : {})}
+            />
           ))}
           <AppendBar />
         </div>
