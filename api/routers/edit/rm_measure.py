@@ -20,7 +20,7 @@ def _run_edit(body: EditRmMeasureRequest) -> str:
     if not orig_score.parts:
         raise RuntimeError("Remove measures failed: score has no parts")
 
-    start_m, end_m = _ordinal_to_measure_numbers(orig_score, body.start_measure, body.end_measure)
+    start_m, end_m = _ordinal_to_measure_numbers(orig_score, body.measure_start_num, body.measure_end_num)
     if start_m > end_m:
         start_m, end_m = end_m, start_m
 
@@ -44,7 +44,7 @@ def _run_edit(body: EditRmMeasureRequest) -> str:
 
     if not removed_any:
         raise RuntimeError(
-            f"Remove measures failed: no measures in range {body.start_measure}-{body.end_measure}"
+            f"Remove measures failed: no measures in range {body.measure_start_num}-{body.measure_end_num}"
         )
 
     exporter = musicxml.m21ToXml.GeneralObjectExporter(orig_score)

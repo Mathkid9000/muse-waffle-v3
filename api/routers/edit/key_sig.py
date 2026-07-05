@@ -20,15 +20,23 @@ def _run_edit(body: EditKeySigRequest) -> str:
     if not orig_score.parts:
         raise RuntimeError("Key signature edit failed: score has no parts")
 
-    # Index convention matches GenerateRequest.key: 0=6 flats … 6=C … 12=6 sharps.
-    fifths = body.new_key - 6
+    # Normalize the tonic to music21 spelling ("Bb" -> "B-", "F#" -> "F#") and let
+    # music21 derive the sharp/flat count for the requested mode (major/minor/modal).
+    tonic = body.new_tonic.strip()
+    tonic = tonic[:1].upper() + tonic[1:].replace("b", "-").replace("♭", "-").replace("♯", "#")
+    mode = (body.new_mode or "major").strip().lower()
+    try:
+        new_key = m21.key.Key(tonic, mode)
+    except Exception as e:
+        raise RuntimeError(f"Key signature edit failed: bad key {body.new_tonic!r} {body.new_mode!r} ({e})")
+
     measure_num = _ordinal_to_measure_numbers(orig_score, body.measure_num, body.measure_num)[0]
 
     found = False
     for part in orig_score.parts:
         for measure in part.getElementsByClass(m21.stream.Measure):
             if measure.measureNumber == measure_num:
-                measure.keySignature = m21.key.KeySignature(fifths)
+                measure.keySignature = m21.key.KeySignature(new_key.sharps)
                 found = True
                 break
     if not found:

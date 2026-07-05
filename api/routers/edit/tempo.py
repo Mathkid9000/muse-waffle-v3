@@ -15,15 +15,13 @@ def _run_edit(body: EditTempoRequest) -> str:
     import music21 as m21
     import music21.musicxml as musicxml
     from api.routers.infill import _ordinal_to_measure_numbers
-    from ml.tokenizer import TEMPO_BUCKETS
 
     orig_score = m21.converter.parseData(body.xml, format="musicxml")
     if not orig_score.parts:
         raise RuntimeError("Tempo edit failed: score has no parts")
 
-    # Bucket index matches GenerateRequest.tempo (0=slowest … 15=fastest); use the
-    # bucket's lower-boundary BPM as the concrete metronome value.
-    bpm = TEMPO_BUCKETS[body.new_tempo]
+    # new_tempo is a concrete BPM value from the edit tool.
+    bpm = body.new_tempo
     measure_num = _ordinal_to_measure_numbers(orig_score, body.measure_num, body.measure_num)[0]
 
     # Tempo is a global direction; music21/MusicXML attach it to the first staff.

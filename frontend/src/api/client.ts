@@ -54,14 +54,14 @@ export interface EditTimeSigRequest {
 export interface EditKeySigRequest {
   xml: string
   measure_num: number
-  /** 0=6 flats … 6=C … 12=6 sharps */
-  new_key: number // TODO: Fix this format
+  new_tonic: string
+  new_mode: string
 }
 
 export interface EditTempoRequest {
   xml: string
   measure_num: number
-  /** Tempo bucket index 0 (slowest) … 15 (fastest) */
+  /** New tempo in beats per minute */
   new_tempo: number
 }
 
@@ -69,14 +69,17 @@ export interface EditInstrRequest {
   xml: string
   /** Instrument index 0-31 (see INSTR_NAMES) */
   instr: number
-  /** Clef for the new staff (0=treble … 6=bass8vb) */
-  new_clef: number
+}
+
+export interface EditRmStaffRequest {
+  xml: string
+  staff_num: number
 }
 
 export interface EditRmMeasureRequest {
   xml: string
-  start_measure: number
-  end_measure: number
+  measure_start_num: number
+  measure_end_num: number
 }
 
 // Other
@@ -153,6 +156,8 @@ export const api = {
     post<{ xml: string }>('/edit/tempo', req),
   editInstr: (req: EditInstrRequest) =>
     post<{ xml: string }>('/edit/instr', req),
+  editRmStaff: (req: EditRmStaffRequest) =>
+    post<{ xml: string }>('/edit/rm-staff', req),
   editRmMeasure: (req: EditRmMeasureRequest) =>
     post<{ xml: string }>('/edit/rm-measure', req),
 }

@@ -2,6 +2,16 @@ import { useState } from 'react'
 import { useStore } from '../../store'
 import { api } from '../../api/client'
 import styles from './AIPanel.module.css'
+import { promptAnthropic } from '../../api/claudeTools'
+import type {
+  EditClefRequest,
+  EditTimeSigRequest,
+  EditKeySigRequest,
+  EditTempoRequest,
+  EditInstrRequest,
+  EditRmStaffRequest,
+  EditRmMeasureRequest,
+} from '../../api/client'
 
 type Tab = 'infill' | 'generate' | 'append'
 
@@ -23,6 +33,23 @@ const TEMPO_LABELS = [
   '≈20', '≈40', '≈52', '≈63', '≈72', '≈84', '≈96', '≈108',
   '≈116', '≈126', '≈138', '≈152', '≈168', '≈192', '≈216', '≈256',
 ]
+
+// Claude tool string enums → backend indices. Order must match the enums in
+// claudeTools.ts (and the backend index conventions). TIME_SIG_LABELS above already
+// mirrors the time-signature enum, so it doubles as the lookup for new_time.
+const CLEF_ENUM = ['treble', 'bass', 'alto', 'tenor', 'treble8vb', 'treble8va', 'bass8vb']
+const INSTR_ENUM = [
+  'other', 'piano', 'harpsichord', 'organ', 'accordion', 'guitar', 'bass_guitar',
+  'violin', 'viola', 'cello', 'double_bass', 'harp', 'flute', 'oboe', 'clarinet',
+  'bassoon', 'saxophone', 'horn', 'trumpet', 'trombone', 'tuba', 'percussion',
+  'timpani', 'celesta', 'voice_soprano', 'voice_mezzo', 'voice_alto', 'voice_tenor',
+  'voice_baritone', 'voice_bass', 'voice', 'choir',
+]
+
+interface ThoughtProcessEvent {
+  title: string
+  input: string
+}
 
 export default function AIPanel() {
   const [tab, setTab] = useState<Tab>('infill')
@@ -66,6 +93,10 @@ export default function AIPanel() {
   const [appendTemp, setAppendTemp] = useState(0.9)
   const [appendTopK, setAppendTopK] = useState(50)
   const [appendDevice, setAppendDevice] = useState('cpu')
+
+  // Claude prompting
+  const [promptStatus, setPromptStatus] = useState('')
+  const [promptThoughtProcess, setPromptThoughtProcess] = useState<ThoughtProcessEvent[]>([])
 
   async function handleInfill() {
     if (!currentXml) return
@@ -168,22 +199,125 @@ export default function AIPanel() {
 
   async function handleEdit() {
     setLoading(true)
+    setPromptStatus('Prompting...')
+
+    setPromptThoughtProcess([])
+
     try {
       const promptText = document.querySelector("#edit-input-span")?.textContent
       console.log(promptText)
 
-      // const output = await api.editRmMeasure({
-      //   xml: currentXml!,
-      //   start_measure: 3,
-      //   end_measure: 4
-      // })
-      // setXml(output['xml'])
+      if (!promptText) return
 
-      // console.log(output,'success')
+      // Each update must be a NEW array so React re-renders — mutating the existing
+      // array in place and re-setting the same reference is a no-op to React, which is
+      // why logs previously only appeared once some later state change forced a render.
+      setPromptThoughtProcess([
+        { title: "---------------------------", input: "" },
+        { title: "Beginning prompt...", input: promptText },
+      ])
+      const response = await promptAnthropic(promptText, currentXml!, (title: string, input: string) => {
+        setPromptThoughtProcess((prev) => [...prev, { title, input }])
+      }, selection)
+      if (response.length === 0) {
+        setPromptStatus('Nothing was returned')
+        return
+      }
+
+      const edits = response[0]
+      const usage = [ response[1], response[2] ]
+      console.log('Prompt usage: ', usage)
+
+      setPromptStatus(`Found ${edits.length} edits...`)
+
+      // Apply each edit in sequence, threading the updated XML through so later
+      // edits build on earlier ones.
+      let xml = currentXml!
+      let applied = 0
+      for (const { tool, input } of edits) {
+        const args = input as Record<string, unknown>
+        switch (tool) {
+          case "edit_clef": {
+            const new_clef = CLEF_ENUM.indexOf(String(args.new_clef))
+            if (new_clef < 0) break // "none"/unknown — backend has no clef-removal case
+            const req: EditClefRequest = {
+              xml,
+              measure_num: Number(args.measure_num),
+              staff_num: Number(args.staff_num),
+              new_clef,
+            }
+            xml = (await api.editClef(req)).xml
+            applied++
+            break
+          }
+          case "edit_time_sig": {
+            const new_time = TIME_SIG_LABELS.indexOf(String(args.new_time))
+            if (new_time < 0) break
+            const req: EditTimeSigRequest = {
+              xml,
+              measure_num: Number(args.measure_num),
+              new_time,
+            }
+            xml = (await api.editTimeSig(req)).xml
+            applied++
+            break
+          }
+          case "edit_key_sig": {
+            const req: EditKeySigRequest = {
+              xml,
+              measure_num: Number(args.measure_num),
+              new_tonic: String(args.tonic),
+              new_mode: String(args.mode),
+            }
+            xml = (await api.editKeySig(req)).xml
+            applied++
+            break
+          }
+          case "edit_tempo": {
+            const req: EditTempoRequest = {
+              xml,
+              measure_num: Number(args.measure_num),
+              new_tempo: Number(args.new_tempo),
+            }
+            xml = (await api.editTempo(req)).xml
+            applied++
+            break
+          }
+          case "edit_add_instrument": {
+            const instr = INSTR_ENUM.indexOf(String(args.new_instrument))
+            if (instr < 0) break
+            const req: EditInstrRequest = { xml, instr }
+            xml = (await api.editInstr(req)).xml
+            applied++
+            break
+          }
+          case "edit_delete_staff": {
+            const req: EditRmStaffRequest = {
+              xml,
+              staff_num: Number(args.staff_num),
+            }
+            xml = (await api.editRmStaff(req)).xml
+            applied++
+            break
+          }
+          case "edit_delete_measures": {
+            const req: EditRmMeasureRequest = {
+              xml,
+              measure_start_num: Number(args.measure_start_num),
+              measure_end_num: Number(args.measure_end_num),
+            }
+            xml = (await api.editRmMeasure(req)).xml
+            applied++
+            break
+          }
+        }
+      }
+      if (applied > 0) setXml(xml)
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
       setLoading(false)
+      setPromptStatus('')
     }
   }
 
@@ -390,8 +524,18 @@ export default function AIPanel() {
             onClick={handleEdit}
             disabled={loading || !currentXml}
           >
-            {progressLabel('Editing') ?? 'Edit'}
+            {promptStatus === '' ? 'Edit' : promptStatus}
           </button>
+          <div style={{ marginLeft: "5px" }}>
+            {
+              promptThoughtProcess.toReversed().map(event => (
+                <div style={{ marginBottom: "10px" }}>
+                  <span style={{ fontSize: "14px", display: "block", fontWeight: 600 }}>{event.title}</span>
+                  <span style={{ fontSize: "11px", marginLeft: "20px", display: "block", lineHeight: "15px", whiteSpace: "pre-line" }}>{event.input}</span>
+                </div>
+              ))
+            }
+          </div>
         </div>
       </div>
     </>

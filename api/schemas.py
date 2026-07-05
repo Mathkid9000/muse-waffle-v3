@@ -112,7 +112,8 @@ class EditKeySigRequest(BaseModel):
     def resolve_xml(cls, v: str) -> str:
         return _decode_xml(v)
     measure_num: int = Field(1, ge=1)
-    new_key: int = Field(6, ge=0, le=12, description="Key signature index (0=6 flats … 6=C … 12=6 sharps)")
+    new_tonic: str = Field("C", description="Tonic note of the new key, e.g. C, Bb, F#")
+    new_mode: str = Field("major", description="Mode of the new key, e.g. major, minor, mixolydian")
 
 
 class EditTempoRequest(BaseModel):
@@ -123,7 +124,7 @@ class EditTempoRequest(BaseModel):
     def resolve_xml(cls, v: str) -> str:
         return _decode_xml(v)
     measure_num: int = Field(1, ge=1)
-    new_tempo: int = Field(5, ge=0, lt=16, description="Tempo bucket index (0=slowest … 15=fastest)")
+    new_tempo: int = Field(120, ge=10, le=400, description="New tempo in beats per minute")
 
 
 class EditInstrRequest(BaseModel):
@@ -137,6 +138,16 @@ class EditInstrRequest(BaseModel):
     new_clef: int = Field(0, ge=0, lt=7, description="Clef for the new staff (0=treble … 6=bass8vb)")
 
 
+class EditRmStaffRequest(BaseModel):
+    xml: str = Field(..., description="Existing MusicXML content to remove a staff from")
+
+    @field_validator("xml", mode="before")
+    @classmethod
+    def resolve_xml(cls, v: str) -> str:
+        return _decode_xml(v)
+    staff_num: int = Field(..., ge=0, description="0-based index of the staff to remove")
+
+
 class EditRmMeasureRequest(BaseModel):
     xml: str = Field(..., description="Existing MusicXML content to remove measures from")
 
@@ -144,8 +155,8 @@ class EditRmMeasureRequest(BaseModel):
     @classmethod
     def resolve_xml(cls, v: str) -> str:
         return _decode_xml(v)
-    start_measure: int = Field(..., ge=1, description="First measure to remove (inclusive)")
-    end_measure: int = Field(..., ge=1, description="Last measure to remove (inclusive)")
+    measure_start_num: int = Field(..., ge=1, description="First measure to remove (inclusive)")
+    measure_end_num: int = Field(..., ge=1, description="Last measure to remove (inclusive)")
 
 
 class XmlResponse(BaseModel):
