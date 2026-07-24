@@ -1,5 +1,6 @@
 output/
 storage
+.venv
 env.env
 todo.txt
 .claude
