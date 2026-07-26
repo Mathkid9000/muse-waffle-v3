@@ -41,7 +41,7 @@ def load_model_only(
     with open(config_path) as f:
         cfg = json.load(f)
 
-    model = MusicTransformer(cfg).to(device)
+    model = MusicTransformer(**cfg).to(device)
     weights = paths["weights"]
     if weights.exists():
         state = torch.load(weights, map_location=device, weights_only=False)
@@ -63,19 +63,46 @@ def load_config_only(
         return json.load(f)
 
 
+def load_val_split_only(
+    name: str
+) -> list:
+    paths = model_paths(name)
+    val_spilt_path = paths["val_split"]
+    if not val_spilt_path.exists():
+        raise FileNotFoundError(f"No val split path for model '{name}'. Run 'Build Model' first.")
+    with open(val_spilt_path) as f:
+        return json.load(f)
+
+
+def save_val_split_only(
+    name: str,
+    val_splits: list
+) -> list:
+    paths = model_paths(name)
+    val_spilt_path = paths["val_split"]
+    with open(val_spilt_path, 'w') as f:
+        return json.dump(val_splits, f)
+
+
 def load_full_model(
     name: str,
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
 ) -> dict:
+    # map_location is required: these are saved from whatever device trained
+    # them, so a CUDA-trained checkpoint would otherwise fail to load on a
+    # CPU-only box (and would rehydrate the optimizer's exp_avg/exp_avg_sq
+    # onto the wrong device even where CUDA exists but the run is on CPU).
+    # All three are plain state dicts, so weights_only=True is safe.
     paths = model_paths(name)
-    model, cfg = load_model_only(name, device)
-
-    optimizer = torch.load(paths['optimizer'])
-    scheduler = torch.load(paths['scheduler'])
+    with open(paths['config']) as f:
+        cfg = json.load(f)
+    model = torch.load(paths['weights'], map_location=device, weights_only=True)
+    optimizer = torch.load(paths['optimizer'], map_location=device, weights_only=True)
+    scheduler = torch.load(paths['scheduler'], map_location=device, weights_only=True)
     with open(paths['val_split']) as f:
         val_split = json.load(f)
-    
-    return { 'model': model, 'config': cfg, 'scheduler': scheduler, 'optimizer': optimizer, 'val_split': val_split }
+
+    return model, cfg, scheduler, optimizer, val_split
 
 
 def build_model(name: str, cfg: dict | None = None):

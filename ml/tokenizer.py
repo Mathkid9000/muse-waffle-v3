@@ -594,6 +594,28 @@ def load_vocab_list():
         return json.load(f)
 
 
+class QuintupleTokenizer:
+    def __init__(self):
+        vocab_list = load_vocab_list()
+        vocab_dict = [ { tok: idx for idx, tok in enumerate(head) } for head in vocab_list ]
+        self.vocabs = vocab_dict
+        self.field_sizes = [len(v) for v in self.vocabs]
+        self.pad_ids = [None] + [self.vocabs[i][''] for i in range(1, 5)]
+        self.inv = [{i: s for s, i in v.items()} for v in self.vocabs]
+
+    def encode(self, quint_tokens):
+        quint_ids = []
+        for tok_seq in quint_tokens:
+            quint_ids.append((self.vocabs[0][tok_seq[0]], self.vocabs[1][tok_seq[1]], self.vocabs[2][tok_seq[2]], self.vocabs[3][tok_seq[3]], self.vocabs[4][tok_seq[4]]))
+        return quint_ids
+
+    def decode(self, quint_ids):
+        quint_toks = []
+        for tok_seq in quint_ids:
+            quint_toks.append((self.inv[0][tok_seq[0]], self.inv[1][tok_seq[1]], self.inv[2][tok_seq[2]], self.inv[3][tok_seq[3]], self.inv[4][tok_seq[4]]))
+        return quint_toks
+
+
 if __name__  == "__main__":
     # preprocess_dataset()
 
