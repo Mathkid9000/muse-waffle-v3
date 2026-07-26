@@ -1,596 +1,197 @@
-"""
-GPT-style causal transformer for music generation.
-
-Text prompt tokens are prepended as prefix; model is trained with
-next-token prediction over the combined text+music sequence.
-"""
-
-from __future__ import annotations
-import math
-import json
-from pathlib import Path
-
-from dotenv import load_dotenv
-import os
 import torch
-import torch.nn as nn
-from torch import Tensor
-
-from ml.tokenizer import VOCAB_SIZE
-
-load_dotenv('env.env')
-CHECKPOINT_DIR = Path(os.getenv('STORAGE_DIR')) / "checkpoints"
+from torch import nn
+import torch.nn.functional as F
 
 
-def model_paths(name: str) -> dict[str, Path]:
-    model_dir = CHECKPOINT_DIR / name
-    return {
-        "dir":       model_dir,
-        "config":    model_dir / "config.json",
-        "weights":   model_dir / "model.pt",
-        "optimizer": model_dir / "optimizer.pt",
-        "val_split": model_dir / "val_paths.json",
-    }
-
-
-def _disallowed_part_token_ids(target_parts: list[int] | None) -> list[int]:
-    """PART token ids that should be masked so generation only writes target staves.
-
-    Returns the PART token ids whose real part index (combined // voices) is NOT in
-    target_parts. Empty list when target_parts is None (no restriction).
-    """
-    if target_parts is None:
-        return []
-    from ml.tokenizer import PART_OFF, MAX_PARTS, MAX_VOICES_PER_PART
-    allowed = set(target_parts)
-    return [
-        PART_OFF + combined
-        for combined in range(MAX_PARTS)
-        if (combined // MAX_VOICES_PER_PART) not in allowed
-    ]
-
-
-# Legacy aliases — app.py still imports these directly
-CONFIG_FILE = model_paths("infill")["config"]
-WEIGHTS_FILE = model_paths("infill")["weights"]
-OPTIMIZER_FILE = model_paths("infill")["optimizer"]
-VAL_SPLIT_FILE = model_paths("infill")["val_split"]
-
-DEFAULT_CONFIG = dict(
-    vocab_size = VOCAB_SIZE,
-    d_model = 512,
-    n_heads = 8,
-    n_layers = 6,
-    max_seq_len = 2048,
-    dropout = 0.1,
-    epoches = []
-)
-
-class CausalSelfAttention(nn.Module):
-    def __init__(self, d_model: int, n_heads: int, dropout: float):
+class GQA(nn.Module):
+    def __init__(self, hidden_dim, num_heads, num_kv_heads, dropout=0.1):
         super().__init__()
-        assert d_model % n_heads == 0
-        self.n_heads = n_heads
-        self.head_dim = d_model // n_heads
-        self.qkv  = nn.Linear(d_model, 3 * d_model, bias=False)
-        self.proj = nn.Linear(d_model, d_model, bias=False)
-        self.drop = nn.Dropout(dropout)
+        self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads
+        self.head_dim = hidden_dim // num_heads
+        self.num_groups = num_heads // num_kv_heads
+        self.dropout = dropout
+        self.q_proj = nn.Linear(hidden_dim, self.num_heads * self.head_dim)
+        self.k_proj = nn.Linear(hidden_dim, self.num_kv_heads * self.head_dim)
+        self.v_proj = nn.Linear(hidden_dim, self.num_kv_heads * self.head_dim)
+        self.out_proj = nn.Linear(self.num_heads * self.head_dim, hidden_dim)
 
-    def forward(self, x: Tensor) -> Tensor:
-        B, T, C = x.shape
-        q, k, v = self.qkv(x).split(C, dim=2)
-        q = q.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
-        k = k.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
-        v = v.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
-        scale = math.sqrt(self.head_dim)
-        attn  = torch.nn.functional.scaled_dot_product_attention(
-            q, k, v, attn_mask=None, dropout_p=self.drop.p if self.training else 0.0,
-            is_causal=True,
-        )
-        out = attn.transpose(1, 2).contiguous().view(B, T, C)
-        return self.proj(out)
+    def forward(self, q, k, v, mask=None, rope=None):
+        q_batch_size, q_seq_len, hidden_dim = q.shape
+        k_batch_size, k_seq_len, hidden_dim = k.shape
+        v_batch_size, v_seq_len, hidden_dim = v.shape
+
+        # projection
+        q = self.q_proj(q).view(q_batch_size, q_seq_len, -1, self.head_dim).transpose(1, 2)
+        k = self.k_proj(k).view(k_batch_size, k_seq_len, -1, self.head_dim).transpose(1, 2)
+        v = self.v_proj(v).view(v_batch_size, v_seq_len, -1, self.head_dim).transpose(1, 2)
+
+        # apply rotary positional encoding
+        if rope:
+            q = rope(q)
+            k = rope(k)
+
+        # Expand the KV heads to match the query heads so grouped-query
+        # attention works without SDPA's enable_gqa flag (older torch).
+        if self.num_groups > 1:
+            k = k.repeat_interleave(self.num_groups, dim=1)
+            v = v.repeat_interleave(self.num_groups, dim=1)
+
+        # compute grouped query attention
+        q = q.contiguous()
+        k = k.contiguous()
+        v = v.contiguous()
+        output = F.scaled_dot_product_attention(q, k, v,
+                                                attn_mask=mask,
+                                                dropout_p=self.dropout if self.training else 0.0)
+        output = output.transpose(1, 2).reshape(q_batch_size, q_seq_len, hidden_dim).contiguous()
+        output = self.out_proj(output)
+        return output
 
 
-class Block(nn.Module):
-    def __init__(self, d_model: int, n_heads: int, dropout: float):
+class SwiGLU(nn.Module):
+    def __init__(self, hidden_dim, intermediate_dim):
         super().__init__()
-        self.ln1  = nn.LayerNorm(d_model)
-        self.attn = CausalSelfAttention(d_model, n_heads, dropout)
-        self.ln2  = nn.LayerNorm(d_model)
-        self.mlp  = nn.Sequential(
-            nn.Linear(d_model, 4 * d_model),
-            nn.GELU(),
-            nn.Linear(4 * d_model, d_model),
-            nn.Dropout(dropout),
-        )
-
-    def forward(self, x: Tensor) -> Tensor:
-        x = x + self.attn(self.ln1(x))
-        x = x + self.mlp(self.ln2(x))
+        self.gate = nn.Linear(hidden_dim, intermediate_dim)
+        self.up = nn.Linear(hidden_dim, intermediate_dim)
+        self.down = nn.Linear(intermediate_dim, hidden_dim)
+        self.act = nn.SiLU()
+ 
+    def forward(self, x):
+        x = self.act(self.gate(x)) * self.up(x)
+        x = self.down(x)
         return x
 
 
-class MusicTransformer(nn.Module):
-    def __init__(self, cfg: dict):
+class RMSNorm(nn.Module):
+    def __init__(self, normalized_shape, eps=1e-6):
         super().__init__()
-        self.cfg     = cfg
-        d            = cfg["d_model"]
-        self.tok_emb = nn.Embedding(cfg["vocab_size"], d)
-        self.pos_emb = nn.Embedding(cfg["max_seq_len"], d)
-        self.drop    = nn.Dropout(cfg["dropout"])
-        self.blocks  = nn.ModuleList(
-            [Block(d, cfg["n_heads"], cfg["dropout"]) for _ in range(cfg["n_layers"])]
-        )
-        self.ln_f    = nn.LayerNorm(d)
-        self.head    = nn.Linear(d, cfg["vocab_size"], bias=False)
-        self.apply(self._init_weights)
-
-        # Scale residual projections by 1/sqrt(2*n_layers) for stable deep training
-        residual_scale = 1.0 / math.sqrt(2 * cfg["n_layers"])
-        for block in self.blocks:
-            nn.init.normal_(block.attn.proj.weight, std=0.02 * residual_scale)
-            nn.init.normal_(block.mlp[-2].weight, std=0.02 * residual_scale)
-
-        # Weight tying: share embedding and output head weights
-        self.head.weight = self.tok_emb.weight
-
-    def _init_weights(self, m: nn.Module):
-        if isinstance(m, (nn.Linear, nn.Embedding)):
-            nn.init.normal_(m.weight, std=0.02)
-        if isinstance(m, nn.Linear) and m.bias is not None:
-            nn.init.zeros_(m.bias)
-
-    def forward(self, idx: Tensor) -> Tensor:
-        B, T = idx.shape
-        pos  = torch.arange(T, device=idx.device)
-        x    = self.drop(self.tok_emb(idx) + self.pos_emb(pos))
-        for block in self.blocks:
-            x = block(x)
-        return self.head(self.ln_f(x))
-
-    def num_params(self) -> int:
-        return sum(p.numel() for p in self.parameters())
-
-    @torch.no_grad()
-    def generate(
-        self,
-        prompt_tokens: list[int],
-        max_new: int = 400,
-        temperature: float = 1.0,
-        top_k: int = 50,
-        device: str = "cuda" if __import__("torch").cuda.is_available() else "cpu",
-    ) -> list[int]:
-        from ml.tokenizer import EOS
-        self.eval()
-        idx = torch.tensor([prompt_tokens], dtype=torch.long, device=device)
-        max_ctx = self.cfg["max_seq_len"]
-        for _ in range(max_new):
-            idx_cond = idx[:, -max_ctx:]
-            logits   = self(idx_cond)[:, -1, :] / max(temperature, 1e-6)
-            if top_k > 0:
-                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = float("-inf")
-            probs  = torch.softmax(logits, dim=-1)
-            next_t = torch.multinomial(probs, 1)
-            idx    = torch.cat([idx, next_t], dim=1)
-            if next_t.item() == EOS:
-                break
-        return idx[0].tolist()
-
-    @torch.no_grad()
-    def generate_infill(
-        self,
-        prefix_tokens: list[int],
-        suffix_tokens: list[int],
-        header_tokens: list[int] | None = None,
-        target_bars: int = 4,
-        max_new: int = 400,
-        temperature: float = 1.0,
-        top_k: int = 50,
-        device: str = "cuda" if __import__("torch").cuda.is_available() else "cpu",
-        kept_gap_tokens: list[int] | None = None,
-        target_parts: list[int] | None = None,
-    ) -> list[int]:
-        """Generate tokens to fill a gap using FIM (fill-in-the-middle) approach.
-
-        Constructs the prompt
-            [BOS] + header + prefix + [FILL_START] + suffix + [FILL_END]
-                  + kept_gap + [FILL_GEN]
-        then generates autoregressively until EOS or target bar count is reached.
-
-        Args:
-            prefix_tokens: Tokens before the gap (without BOS)
-            suffix_tokens: Tokens after the gap (without EOS)
-            header_tokens: Instrument header tokens for the score (optional)
-            target_bars: Number of BAR tokens to generate (matches gap size)
-            max_new: Maximum tokens to generate
-            temperature: Sampling temperature
-            top_k: Top-k sampling parameter
-            device: Device to run on
-            kept_gap_tokens: Gap measures restricted to the kept staves (vertical
-                context for partial-staff infill). None/empty for full-staff infill.
-            target_parts: Real part indices being regenerated. When given, PART
-                tokens for any other staff are masked so the model only writes the
-                target staves.
-
-        Returns:
-            Generated fill tokens (without special markers)
-        """
-        from ml.tokenizer import BOS, EOS, BAR, FILL_START, FILL_END, FILL_GEN
-
-        self.eval()
-
-        hdr  = header_tokens or []
-        kept = kept_gap_tokens or []
-        prompt = ([BOS] + hdr + prefix_tokens + [FILL_START] + suffix_tokens
-                  + [FILL_END] + kept + [FILL_GEN])
-        idx = torch.tensor([prompt], dtype=torch.long, device=device)
-        max_ctx = self.cfg["max_seq_len"]
-
-        part_mask = _disallowed_part_token_ids(target_parts)
-
-        generated: list[int] = []
-        bar_count = 0
-
-        for _ in range(max_new):
-            idx_cond = idx[:, -max_ctx:]
-            logits = self(idx_cond)[:, -1, :] / max(temperature, 1e-6)
-
-            if top_k > 0:
-                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = float("-inf")
-
-            # Restrict PART tokens to the target staves (partial-staff infill).
-            if part_mask:
-                logits[:, part_mask] = float("-inf")
-
-            # Prevent EOS until the target number of bars has been generated
-            if bar_count < target_bars:
-                logits[:, EOS] = float("-inf")
-
-            probs = torch.softmax(logits, dim=-1)
-            next_t = torch.multinomial(probs, 1)
-            next_token = next_t.item()
-
-            if next_token == EOS:
-                break
-
-            if next_token == BAR:
-                bar_count += 1
-                if bar_count > target_bars:
-                    break  # next measure starting — all target measures are complete
-
-            generated.append(next_token)
-            idx = torch.cat([idx, next_t], dim=1)
-
-        return generated
-
-    @torch.no_grad()
-    def generate_standard(
-        self,
-        header_tokens: list[int],
-        first_bar_prefix: list[int] | None = None,
-        target_bars: int = 4,
-        max_new: int = 1000,
-        temperature: float = 0.9,
-        top_k: int = 50,
-        device: str = "cuda" if __import__("torch").cuda.is_available() else "cpu",
-        max_parts: int | None = None,
-    ) -> list[int]:
-        """Generate tokens from scratch using the standard autoregressive format.
-
-        Uses [BOS] + header + first_bar_prefix as the prompt, then samples
-        autoregressively. This is in-distribution for the 50% standard training
-        examples, unlike generate_infill() with empty prefix/suffix which the
-        model has never seen during training.
-
-        Args:
-            header_tokens: Instrument header tokens (INSTR_OFF + idx)
-            first_bar_prefix: Tokens to force after the header, e.g.
-                [BAR, KEY_SIG_token, TIME_SIG_token, TEMPO_token]. Forces the
-                model into a known key/meter/tempo before free sampling begins.
-                Defaults to [BAR] if None.
-            target_bars: Total number of BAR tokens to produce (including any
-                BAR tokens in first_bar_prefix)
-            max_new: Maximum tokens to generate autoregressively
-            temperature: Sampling temperature (0.8–1.0 recommended)
-            top_k: Top-k sampling parameter
-            device: Device to run on
-
-        Returns:
-            Generated measure tokens (without BOS/EOS; prepend header and
-            wrap with BOS/EOS when constructing the full sequence)
-        """
-        from ml.tokenizer import BOS, EOS, BAR, PART_OFF, MAX_PARTS, MAX_VOICES_PER_PART
-
-        self.eval()
-
-        forced = first_bar_prefix if first_bar_prefix is not None else [BAR]
-        # Count any BAR tokens already committed via first_bar_prefix
-        bar_count = forced.count(BAR)
-
-        prompt = [BOS] + header_tokens + forced
-        idx = torch.tensor([prompt], dtype=torch.long, device=device)
-        max_ctx = self.cfg["max_seq_len"]
-
-        generated: list[int] = []
-
-        for _ in range(max_new):
-            idx_cond = idx[:, -max_ctx:]
-            logits = self(idx_cond)[:, -1, :] / max(temperature, 1e-6)
-
-            if top_k > 0:
-                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = float("-inf")
-
-            if max_parts is not None:
-                valid_end = PART_OFF + max_parts * MAX_VOICES_PER_PART
-                logits[:, valid_end:PART_OFF + MAX_PARTS] = float("-inf")
-
-            if bar_count < target_bars:
-                logits[:, EOS] = float("-inf")
-
-            probs = torch.softmax(logits, dim=-1)
-            next_t = torch.multinomial(probs, 1)
-            next_token = next_t.item()
-
-            if next_token == EOS:
-                break
-
-            if next_token == BAR:
-                bar_count += 1
-                if bar_count > target_bars:
-                    break
-
-            generated.append(next_token)
-            idx = torch.cat([idx, next_t], dim=1)
-
-        return generated
-
-    @torch.no_grad()
-    def generate_standard_stream(
-        self,
-        header_tokens: list[int],
-        first_bar_prefix: list[int] | None = None,
-        target_bars: int = 4,
-        max_new: int = 1000,
-        temperature: float = 0.9,
-        top_k: int = 50,
-        device: str = "cuda" if __import__("torch").cuda.is_available() else "cpu",
-        max_parts: int | None = None,
-    ):
-        """Like generate_standard but yields accumulated token list after each completed BAR."""
-        from ml.tokenizer import BOS, EOS, BAR, PART_OFF, MAX_PARTS, MAX_VOICES_PER_PART
-
-        self.eval()
-
-        forced = first_bar_prefix if first_bar_prefix is not None else [BAR]
-        bar_count = forced.count(BAR)
-
-        prompt = [BOS] + header_tokens + forced
-        idx = torch.tensor([prompt], dtype=torch.long, device=device)
-        max_ctx = self.cfg["max_seq_len"]
-
-        generated: list[int] = []
-
-        for i in range(max_new):
-            idx_cond = idx[:, -max_ctx:]
-            logits = self(idx_cond)[:, -1, :] / max(temperature, 1e-6)
-
-            if top_k > 0:
-                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = float("-inf")
-
-            if max_parts is not None:
-                valid_end = PART_OFF + max_parts * MAX_VOICES_PER_PART
-                logits[:, valid_end:PART_OFF + MAX_PARTS] = float("-inf")
-
-            if bar_count < target_bars:
-                logits[:, EOS] = float("-inf")
-
-            probs = torch.softmax(logits, dim=-1)
-            next_t = torch.multinomial(probs, 1)
-            next_token = next_t.item()
-
-            if next_token == EOS:
-                break
-
-            if next_token == BAR:
-                bar_count += 1
-                if bar_count > target_bars:
-                    break
-
-            generated.append(next_token)
-            idx = torch.cat([idx, next_t], dim=1)
-
-            if i % 2 == 0:
-                yield list(generated)
-
-        yield list(generated)
-
-    @torch.no_grad()
-    def generate_infill_stream(
-        self,
-        prefix_tokens: list[int],
-        suffix_tokens: list[int],
-        header_tokens: list[int] | None = None,
-        target_bars: int = 4,
-        max_new: int = 400,
-        temperature: float = 1.0,
-        top_k: int = 50,
-        device: str = "cuda" if __import__("torch").cuda.is_available() else "cpu",
-        kept_gap_tokens: list[int] | None = None,
-        target_parts: list[int] | None = None,
-    ):
-        """Like generate_infill but yields accumulated token list after each completed BAR."""
-        from ml.tokenizer import BOS, EOS, BAR, FILL_START, FILL_END, FILL_GEN
-
-        self.eval()
-
-        hdr  = header_tokens or []
-        kept = kept_gap_tokens or []
-        prompt = ([BOS] + hdr + prefix_tokens + [FILL_START] + suffix_tokens
-                  + [FILL_END] + kept + [FILL_GEN])
-        idx = torch.tensor([prompt], dtype=torch.long, device=device)
-        max_ctx = self.cfg["max_seq_len"]
-
-        part_mask = _disallowed_part_token_ids(target_parts)
-
-        generated: list[int] = []
-        bar_count = 0
-
-        for i in range(max_new):
-            idx_cond = idx[:, -max_ctx:]
-            logits = self(idx_cond)[:, -1, :] / max(temperature, 1e-6)
-
-            if top_k > 0:
-                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = float("-inf")
-
-            if part_mask:
-                logits[:, part_mask] = float("-inf")
-
-            if bar_count < target_bars:
-                logits[:, EOS] = float("-inf")
-
-            probs = torch.softmax(logits, dim=-1)
-            next_t = torch.multinomial(probs, 1)
-            next_token = next_t.item()
-
-            if next_token == EOS:
-                break
-
-            if next_token == BAR:
-                bar_count += 1
-                if bar_count > target_bars:
-                    break
-
-            generated.append(next_token)
-            idx = torch.cat([idx, next_t], dim=1)
-
-            if i % 2 == 0:
-                yield list(generated)
-
-        yield list(generated)
-
-
-def append_epoch_to_config(name: str, cfg: dict, training_loss, val_loss):
-    if cfg is None:
-        return
-
-    if 'epoches' not in cfg:
-        cfg['epoches'] = [(training_loss, val_loss)]
-    else:
-        cfg['epoches'].append((training_loss, val_loss))
-
-    with open(model_paths(name)["config"], "w") as f:
-        json.dump(cfg, f, indent=2)
-
-def load_model(
-    name: str,
-    device: str = "cuda" if torch.cuda.is_available() else "cpu",
-) -> tuple[MusicTransformer, dict]:
-    paths = model_paths(name)
-    config_path = paths["config"]
-    if not config_path.exists() and name == "infill":
-        legacy = CHECKPOINT_DIR / "config.json"
-        if legacy.exists():
-            config_path = legacy
-    if not config_path.exists():
-        raise FileNotFoundError(f"No config for model '{name}'. Run 'Build Model' first.")
-    with open(config_path) as f:
-        cfg = json.load(f)
-    model = MusicTransformer(cfg).to(device)
-    weights = paths["weights"]
-    if not weights.exists() and name == "infill":
-        legacy_w = CHECKPOINT_DIR / "infill_model.pt"
-        if legacy_w.exists():
-            weights = legacy_w
-    if weights.exists():
-        state = torch.load(weights, map_location=device, weights_only=False)
-        model.load_state_dict(state)
-    return model, cfg
-
-def expand_embeddings_for_infill(
-    model: MusicTransformer,
-    old_vocab_size: int = 412
-) -> MusicTransformer:
-    """Expand model embeddings and head for infill tokens.
-
-    Adds space for 3 new tokens: FILL_START, FILL_END, EMPTY_BAR.
-    Initializes new tokens from semantically similar existing tokens:
-    - FILL_START: initialized from BOS (marks a boundary)
-    - FILL_END: initialized from EOS (marks end of context)
-    - EMPTY_BAR: initialized from BAR (represents a measure)
-
-    Args:
-        model: Existing MusicTransformer model
-        old_vocab_size: Original vocabulary size (default 412)
-
-    Returns:
-        Model with expanded embeddings
+        self.weight = nn.Parameter(torch.ones(normalized_shape))
+        self.variance_epsilon = eps
+
+    def forward(self, x):
+        input_dtype = x.dtype
+        x = x.to(torch.float32)
+        variance = x.pow(2).mean(-1, keepdim=True)
+        x = x * torch.rsqrt(variance + self.variance_epsilon)
+        return (self.weight * x).to(input_dtype)
+nn.RMSNorm = RMSNorm
+
+
+def rotate_half(x):
+    x1, x2 = x.chunk(2, dim=-1)
+    return torch.cat((-x2, x1), dim=-1)
+
+def apply_rotary_pos_emb(x, cos, sin):
+    return (x * cos) + (rotate_half(x) * sin)
+
+class RotaryPositionalEncoding(nn.Module):
+    def __init__(self, dim, max_seq_len=1024):
+        super().__init__()
+        N = 10000
+        inv_freq = 1. / (N ** (torch.arange(0, dim, 2).float() / dim))
+        position = torch.arange(max_seq_len).float()
+        inv_freq = torch.cat((inv_freq, inv_freq), dim=-1)
+        sinusoid_inp = torch.outer(position, inv_freq)
+        self.register_buffer("cos", sinusoid_inp.cos())
+        self.register_buffer("sin", sinusoid_inp.sin())
+
+    def forward(self, x, seq_len=None):
+        # x is (batch, num_heads, seq_len, head_dim) at the call site in GQA,
+        # so the sequence axis is dim -2 and cos/sin broadcast over the heads.
+        if seq_len is None:
+            seq_len = x.size(-2)
+        cos = self.cos[:seq_len].view(1, 1, seq_len, -1)
+        sin = self.sin[:seq_len].view(1, 1, seq_len, -1)
+        return apply_rotary_pos_emb(x, cos, sin)
+
+
+class DecoderLayer(nn.Module):
+    def __init__(self, hidden_dim, num_heads, num_kv_heads, dropout=0.1):
+        super().__init__()
+        self.self_attn = GQA(hidden_dim, num_heads, num_kv_heads, dropout)
+        self.mlp = SwiGLU(hidden_dim, 4 * hidden_dim)
+        self.norm1 = nn.RMSNorm(hidden_dim)
+        self.norm2 = nn.RMSNorm(hidden_dim)
+        self.drop = nn.Dropout(dropout)
+
+    def forward(self, x, mask=None, rope=None):
+        # self-attention sublayer
+        out = self.norm1(x)
+        out = self.self_attn(out, out, out, mask, rope)
+        x = self.drop(out) + x
+        # MLP sublayer
+        out = self.norm2(x)
+        out = self.mlp(out)
+        return self.drop(out) + x
+
+
+class MusicTransformer(nn.Module):
+    """Compound / factorized decoder for quintuple music tokens.
+
+    Each of the ``len(field_sizes)`` fields is embedded separately; the field
+    embeddings are concatenated and projected to ``hidden_dim`` before the
+    transformer stack.
+
+    The output heads form an intra-row autoregressive chain (CP-word style):
+    head i predicts field i from the hidden state concatenated with the
+    embeddings of fields 0..i-1 of the SAME row being predicted. Independent
+    heads cannot represent within-row consistency whenever the context is ambiguous about
+    the row's type — sampling then produces field combinations that never occur
+    in the data. The chain makes p(field_i | context, field_<i) learnable, so
+    the joint row distribution factorizes exactly.
     """
-    from ml.tokenizer import BOS, EOS, BAR, VOCAB_SIZE
 
-    new_vocab_size = VOCAB_SIZE  # 415
-    d_model = model.cfg["d_model"]
+    def __init__(self, num_layers, num_heads, num_kv_heads, hidden_dim,
+                 max_seq_len, field_sizes, embed_dims, dropout=0.1, epoches=[]):
+        super().__init__()
+        assert len(field_sizes) == len(embed_dims)
+        self.num_fields = len(field_sizes)
+        self.rope = RotaryPositionalEncoding(hidden_dim // num_heads, max_seq_len)
+        self.field_embeddings = nn.ModuleList([
+            nn.Embedding(vocab, dim) for vocab, dim in zip(field_sizes, embed_dims)
+        ])
+        self.input_proj = nn.Linear(sum(embed_dims), hidden_dim)
+        self.embed_drop = nn.Dropout(dropout)
+        self.decoders = nn.ModuleList([
+            DecoderLayer(hidden_dim, num_heads, num_kv_heads, dropout)
+            for _ in range(num_layers)
+        ])
+        self.norm = nn.RMSNorm(hidden_dim)
+        # Head i sees [hidden ; emb(field_0) ; ... ; emb(field_{i-1})]; the
+        # conditioning reuses the input embedding tables (shared weights).
+        self.heads = nn.ModuleList([
+            nn.Linear(hidden_dim + sum(embed_dims[:i]), vocab)
+            for i, vocab in enumerate(field_sizes)
+        ])
 
-    if model.cfg["vocab_size"] >= new_vocab_size:
-        return model  # Already expanded
+    def hidden(self, ids, mask=None):
+        """Trunk only: (B, T, num_fields) ids -> (B, T, hidden_dim)."""
+        embeds = [emb(ids[..., i]) for i, emb in enumerate(self.field_embeddings)]
+        x = self.embed_drop(self.input_proj(torch.cat(embeds, dim=-1)))
+        for decoder in self.decoders:
+            x = decoder(x, mask, self.rope)
+        return self.norm(x)
 
-    # Create new embedding layer
-    old_tok_emb = model.tok_emb.weight.data
-    new_tok_emb = nn.Embedding(new_vocab_size, d_model)
-    nn.init.normal_(new_tok_emb.weight, std=0.02)
+    def field_logits(self, i, h, prev_fields):
+        """Logits for field ``i`` given hidden state ``h`` (..., hidden_dim) and
+        the row's already-chosen earlier fields ``prev_fields`` (list of i long
+        tensors broadcastable to h's leading dims). Used at sampling time."""
+        cond = [h] + [self.field_embeddings[j](prev_fields[j]) for j in range(i)]
+        return self.heads[i](torch.cat(cond, dim=-1))
 
-    # Copy old embeddings
-    new_tok_emb.weight.data[:old_vocab_size] = old_tok_emb
+    def forward(self, ids, mask=None, target_fields=None):
+        """Teacher-forced logits: one (B, T, field_size_i) tensor per field.
 
-    # Initialize new tokens from similar existing tokens
-    # FILL_START (412) ← BOS (1)
-    new_tok_emb.weight.data[old_vocab_size] = old_tok_emb[BOS].clone()
-    # FILL_END (413) ← EOS (2)
-    new_tok_emb.weight.data[old_vocab_size + 1] = old_tok_emb[EOS].clone()
-    # EMPTY_BAR (414) ← BAR (3)
-    new_tok_emb.weight.data[old_vocab_size + 2] = old_tok_emb[BAR].clone()
-
-    model.tok_emb = new_tok_emb
-
-    # Create new output head
-    old_head = model.head.weight.data
-    new_head = nn.Linear(d_model, new_vocab_size, bias=False)
-    nn.init.normal_(new_head.weight, std=0.02)
-
-    # Copy old weights
-    new_head.weight.data[:old_vocab_size] = old_head
-
-    # Initialize new output weights similarly
-    new_head.weight.data[old_vocab_size] = old_head[BOS].clone()
-    new_head.weight.data[old_vocab_size + 1] = old_head[EOS].clone()
-    new_head.weight.data[old_vocab_size + 2] = old_head[BAR].clone()
-
-    model.head = new_head
-
-    # Update config
-    model.cfg["vocab_size"] = new_vocab_size
-
-    return model
-
-
-def build_model(name: str, cfg: dict | None = None, override_cfg=False):
-    """Build a model with expanded vocabulary."""
-    from ml.tokenizer import VOCAB_SIZE
-
-    paths = model_paths(name)
-    if not cfg and paths["config"].exists():
-        with open(paths["config"], "r") as f:
-            cfg = json.load(f)
-
-    cfg = DEFAULT_CONFIG.copy() if override_cfg else (cfg or DEFAULT_CONFIG.copy())
-    cfg["vocab_size"] = VOCAB_SIZE
-
-    paths["dir"].mkdir(parents=True, exist_ok=True)
-    with open(paths["config"], "w") as f:
-        json.dump(cfg, f, indent=2)
-
-    return MusicTransformer(cfg), cfg
+        ``target_fields`` (B, T, num_fields) is the row each position predicts
+        (the usual one-step-shifted targets). Head i conditions on that row's
+        fields < i — the within-row chain rule; no cross-row leak because
+        position t is being scored on exactly that row anyway.
+        """
+        if target_fields is None:
+            raise ValueError(
+                "forward() needs target_fields for the intra-row chain; "
+                "use hidden() + field_logits() for step-wise sampling")
+        h = self.hidden(ids, mask)
+        return [self.field_logits(i, h, [target_fields[..., j] for j in range(i)])
+                for i in range(self.num_fields)]

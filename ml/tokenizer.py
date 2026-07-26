@@ -1,16 +1,9 @@
 from __future__ import annotations
 import music21, os, math, json, re, itertools, copy
 from dotenv import load_dotenv
-from pathlib import Path
 import numpy as np
 from tqdm import tqdm
-
-# file paths
-load_dotenv('env.env')
-STORAGE_DIR = os.getenv('STORAGE_DIR')
-VOCAB_LIST_PATH = Path(STORAGE_DIR) / 'vocab.json'
-VOCAB_LIST_PLOT_PATH = Path(STORAGE_DIR) / 'vocab_plot.json'
-DATASET_PATH = Path(STORAGE_DIR) / 'data.npz'
+from helpers import STORAGE_DIR, DATA_DIR, DATASET_PATH, VOCAB_LIST_PATH, VOCAB_LIST_PLOT_PATH
 
 # params
 SUBDIVISIONS_PER_QUARTER = 24
@@ -25,7 +18,7 @@ CHORD_SLOTS = { 0: 0, 2: 1, 3: 1, 4: 1, 5: 1, 6: 2, 7: 2, 8: 2, 10: 3, 11: 3 } #
 #  
 
 def preprocess_dataset():
-    openscore_path = Path(STORAGE_DIR) / "data/openscore"
+    openscore_path = DATA_DIR / "openscore"
     files = [ f for f in openscore_path.iterdir() if f.is_file() and f.suffix == ".mxl" ]
 
     # build vocab
@@ -293,7 +286,7 @@ def tokenize_score_as_text(score: music21.stream.Score, return_chords=False, tra
         ('EOS', '', '', '', '')
     ]
 
-    with open(Path(STORAGE_DIR) / 'urmom.txt', 'w') as f:
+    with open(STORAGE_DIR / 'urmom.txt', 'w') as f:
         f.writelines('\n'.join([ str(t) for t in output ]))
 
     if return_chords:
@@ -559,7 +552,7 @@ def tokens_to_score(tokens):
     # makeNotation=False: the default export path re-fills every measure/voice up
     # to a guessed bar duration (fillGaps+timeRangeFromBarDuration), which pads
     # incomplete measures back up instead of keeping their real, shorter length.
-    score.write("musicxml", Path(STORAGE_DIR) / "output.mxl", makeNotation=True)
+    score.write("musicxml", STORAGE_DIR / "output.mxl", makeNotation=True)
 
 
 def build_vocab_list(token_sequences, plot=False):
