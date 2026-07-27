@@ -1,5 +1,5 @@
 from __future__ import annotations
-import music21, os, math, json, re, itertools, copy
+import music21, os, math, json, re, itertools
 from dotenv import load_dotenv
 import numpy as np
 from tqdm import tqdm
@@ -9,6 +9,7 @@ from helpers import STORAGE_DIR, DATA_DIR, DATASET_PATH, VOCAB_LIST_PATH, VOCAB_
 SUBDIVISIONS_PER_QUARTER = 24
 CHORD_QUALITIES = ('', 'm', 'm7', '7', 'o7', 'dim', '7sus', 'sus2', 'sus', '7+', '+', 'maj7')
 CHORD_SLOTS = { 0: 0, 2: 1, 3: 1, 4: 1, 5: 1, 6: 2, 7: 2, 8: 2, 10: 3, 11: 3 } # semitones above root -> root/third/fifth/seventh
+TRANSPOSE_INTERVALS = range(-5, 7)
 
 # TODO:
 # 
@@ -19,32 +20,27 @@ CHORD_SLOTS = { 0: 0, 2: 1, 3: 1, 4: 1, 5: 1, 6: 2, 7: 2, 8: 2, 10: 3, 11: 3 } #
 
 def preprocess_dataset():
     openscore_path = DATA_DIR / "openscore"
-    files = [ f for f in openscore_path.iterdir() if f.is_file() and f.suffix == ".mxl" ]
+    pdmx_path = DATA_DIR / "pdmx"
+    openscore_files = [ f for f in openscore_path.iterdir() if f.is_file() and f.suffix == ".mxl" ]
+    pdmx_files = [ f for f in pdmx_path.iterdir() if f.is_file() and f.suffix == ".mxl" ]
+    files = openscore_files + pdmx_files
 
     # build vocab
     token_seqs = []
     idx = -1
     for path in tqdm(files, "Processing..."):
         idx += 1
-        found_error = False
         score = music21.converter.parse(path)
-        # process 0 first
         try:
-            tokenized, chord_toks = tokenize_score_as_text(score, return_chords=True)
-            token_seqs.append(tokenized)
+            token_seqs.append(tokenize_score_as_text(score))
         except Exception as e:
             print(f'Error: {e}. Skipping: {idx}')
-            found_error = True
-
-        if not found_error:
-            # process the rest
-            for interval in tqdm(range(-5, 7), "Intervals", total=12, leave=False):
-                if interval == 0: continue
-                transposed = score.transpose(music21.interval.Interval(interval))
-                tokenized = tokenize_score_as_text(transposed, transpose_chord_toks=(chord_toks, interval))
-                token_seqs.append(tokenized)
 
     vocab = build_vocab_list(token_seqs, plot=True)
+    # only the original key is stored; the dataset transposes on load, so the vocab still has to
+    # carry every shifted token (appending keeps the ids of everything already in it)
+    for head in vocab:
+        head.extend(sorted({ transpose_tok(tok, i) for tok in head for i in TRANSPOSE_INTERVALS } - set(head)))
     save_vocab_list(vocab)
     
     # convert to dataset
@@ -62,6 +58,15 @@ def tokenize_text_to_ids(quint_tokens, vocab_list):
     for tok_seq in quint_tokens:
         quint_ids.append((vocab_list[0].index(tok_seq[0]), vocab_list[1].index(tok_seq[1]), vocab_list[2].index(tok_seq[2]), vocab_list[3].index(tok_seq[3]), vocab_list[4].index(tok_seq[4])))
     return quint_ids
+
+
+def transpose_tok(tok, interval):
+    # only pitch moves under transposition: an absolute midi pitch just slides, while a key's tonic
+    # and a chord's root are pitch classes that wrap inside the octave. Scale degrees are already
+    # relative to the key, and nothing else in a row has anything to do with pitch.
+    if not tok.startswith(('PITCH', 'KEY', 'ROOT')): return tok
+    value = int(tok.split('_')[-1]) + interval
+    return f"{tok.split('_')[0]}_{value if tok.startswith('PITCH') else value % 12}"
 
 
 def detokenize_ids(quint_ids, vocab_list):
@@ -107,7 +112,10 @@ def analyze_chord(weights, voicing, key_ctx):
         if not kind: continue
         quality = re.split(r'/|add|omit|dim5', figure[len(c.root().name):])[0]
         if quality not in CHORD_QUALITIES: continue
-        return music21.roman.romanNumeralFromChord(c, key_ctx).scaleDegree, c.root().midi % 12, quality
+        rn = music21.roman.romanNumeralFromChord(c, key_ctx)
+        base = (key_ctx.pitchFromDegree(rn.scaleDegree).pitchClass - key_ctx.tonic.pitchClass) % 12
+        alter = int(rn.frontAlterationAccidental.alter) if rn.frontAlterationAccidental else 0
+        return (base + alter) % 12, c.root().midi % 12, quality
     return None
 
 
@@ -142,7 +150,21 @@ def chord_walker(chordified_measure, key_ctx):
     return [ (pos, *chords[pos][0]) for pos in sorted(chords) ]
 
 
-def tokenize_score_as_text(score: music21.stream.Score, return_chords=False, transpose_chord_toks=None):
+def canonical_instrument(instr):
+    # the same instrument reaches us under every name a typesetter felt like ("Grand Piano",
+    # "Piano (2)", "Klavier", "Hautbois"), which splits it across that many vocab entries. Run the
+    # name through music21's own multilingual lookup and keep the plain name of whatever class it
+    # matched; parenthesized asides are stripped first so they can't outvote the real name (eg.
+    # "Horn (bass clef)" matching "bass"). When the name means nothing to music21 ("Men", "Traverso"),
+    # the class it already resolved from the part's midi program still says what the instrument is.
+    try:
+        matched = music21.instrument.fromString(re.sub(r'\(.*?\)', '', instr.instrumentName or ''))
+    except music21.instrument.InstrumentException:
+        matched = instr
+    return type(matched)().instrumentName or instr.instrumentName
+
+
+def tokenize_score_as_text(score: music21.stream.Score):
     def tokify(classifier, tok, lower=True):
         tok_str = str(tok).replace('.0', '')
         return f'{classifier}_{tok_str.lower() if lower else tok_str}'
@@ -159,12 +181,11 @@ def tokenize_score_as_text(score: music21.stream.Score, return_chords=False, tra
     # construct instruments
     instr_toks = []
     for idx, part in enumerate(score.parts):
-        name = part.getInstrument().instrumentName
+        name = canonical_instrument(part.getInstrument())
         instr_toks.append((tokify('INSTR', name), '', '', '', tokify('VOICE', idx)))
 
     chordified = score.chordify()
     score_toks = []
-    CHORD_TOKS_RECORD = []
     seen_bars = set()
     last_chord = (None, None)
     for voz_idx, part in tqdm(enumerate(score.parts), "Scanning voices...", leave=False, total=len(score.parts)):
@@ -247,7 +268,7 @@ def tokenize_score_as_text(score: music21.stream.Score, return_chords=False, tra
 
             # walk the measure for chords, analyzed across all staves; skip repeats of the same chord
             chord_toks = []
-            if voz_idx == 0 and transpose_chord_toks == None:
+            if voz_idx == 0:
                 chordified_measure = chordified.measure(m_num)
                 if chordified_measure is not None:
                     key_ctx = (measure.getContextByClass(music21.key.KeySignature) or music21.key.KeySignature(0)).asKey()
@@ -255,7 +276,6 @@ def tokenize_score_as_text(score: music21.stream.Score, return_chords=False, tra
                         if (root, quality) == last_chord: continue
                         last_chord = (root, quality)
                         chord_toks.append((tokify('M', m_num), tokify('POS', pos * SUBDIVISIONS_PER_QUARTER), tokify('DEG', degree), tokify('ROOT', root), tokify('QUAL', quality, lower=False)))
-                CHORD_TOKS_RECORD.extend(copy.deepcopy(chord_toks))
 
             # extend all to score_toks
             score_toks.extend(note_toks)
@@ -266,13 +286,6 @@ def tokenize_score_as_text(score: music21.stream.Score, return_chords=False, tra
             score_toks.extend(clef_toks)
             score_toks.extend(bar_toks)
             score_toks.extend(chord_toks)
-
-    # add chords if non transposed are given
-    if transpose_chord_toks != None:
-        original_chords, interval = transpose_chord_toks
-        for t in original_chords:
-            new_root = tokify('ROOT', (int(t[3].split('_')[-1]) + interval) % 12)
-            score_toks.append((t[0], t[1], t[2], new_root, t[4]))
 
     # final sort
     score_toks.sort(key=lambda x: tok_priority(x))
@@ -289,9 +302,7 @@ def tokenize_score_as_text(score: music21.stream.Score, return_chords=False, tra
     with open(STORAGE_DIR / 'urmom.txt', 'w') as f:
         f.writelines('\n'.join([ str(t) for t in output ]))
 
-    if return_chords:
-        return output, CHORD_TOKS_RECORD
-    else: return output
+    return output
 
 
 def pretty(d, indent=0):
@@ -617,7 +628,7 @@ class QuintupleTokenizer:
 
 
 if __name__  == "__main__":
-    # preprocess_dataset()
+    preprocess_dataset()
 
     # validate
     rng = np.random.default_rng()

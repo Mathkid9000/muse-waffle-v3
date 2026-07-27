@@ -5,7 +5,7 @@ from tqdm import tqdm
 import random, math, os
 
 from model import MusicTransformer
-from model_util import create_causal_mask, load_val_split_only, build_model, load_full_model, save_model, append_epoch_to_config
+from model_util import load_val_split_only, build_model, load_full_model, save_model, append_epoch_to_config
 from helpers import BATCH_SIZE, VAL_SPLIT, SEQ_LEN
 from tokenizer import QuintupleTokenizer, load_dataset
 from dataset import QuintupleDataset, make_dataloader
@@ -63,8 +63,7 @@ def evaluate_val(model, val_loader, pad_ids, device, max_batches=100):
         if i >= max_batches:
             break
         x, y = x.to(device), y.to(device)
-        mask = create_causal_mask(x.shape[1], device)
-        logits = model(x, mask.unsqueeze(0), target_fields=y)
+        logits = model(x, target_fields=y)
         weights = torch.ones_like(y[..., 0], dtype=torch.float32)
         total += compound_loss(logits, y, pad_ids, weights).item()
         n += 1
@@ -186,13 +185,12 @@ def main():
             steps_run = step
             x = x.to(device)          # (B, T, 5)
             y = y.to(device)          # (B, T, 5)
-            mask = create_causal_mask(x.shape[1], device)
             weights = torch.ones_like(y[..., 0], dtype=torch.float32)
 
             with torch.cuda.amp.autocast(dtype=amp_dtype, enabled=use_amp):
                 # Teacher forcing for the intra-row chain: head i conditions on
                 # the target row's fields < i (see MusicGenerationModel).
-                logits = model(x, mask.unsqueeze(0), target_fields=y)
+                logits = model(x, target_fields=y)
                 loss = compound_loss(logits, y, pad_ids, weights)
 
             # Normalize so accumulated grads match a full-batch average.

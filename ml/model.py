@@ -41,8 +41,12 @@ class GQA(nn.Module):
         q = q.contiguous()
         k = k.contiguous()
         v = v.contiguous()
+        # a mask handed over as a tensor rules out SDPA's flash kernel, which is the one that
+        # never materializes the T x T scores; asking for causal by name instead keeps attention
+        # memory linear in the sequence length, so pass no mask unless it isn't just causal
         output = F.scaled_dot_product_attention(q, k, v,
                                                 attn_mask=mask,
+                                                is_causal=mask is None,
                                                 dropout_p=self.dropout if self.training else 0.0)
         output = output.transpose(1, 2).reshape(q_batch_size, q_seq_len, hidden_dim).contiguous()
         output = self.out_proj(output)

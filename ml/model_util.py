@@ -139,13 +139,13 @@ def get_field_sizes():
 def get_model_config(field_sizes):
     field_sizes = list(field_sizes)
     return {
-        "num_layers": 8,
-        "num_heads": 8,
-        "num_kv_heads": 4,
+        "num_layers": 12,
+        "num_heads": 12,
+        "num_kv_heads": 6,
         "hidden_dim": 768,
         "max_seq_len": SEQ_LEN,
         "field_sizes": field_sizes,
-        "embed_dims": [96, 96, 96, 96, 96],
+        "embed_dims": [160, 128, 96, 96, 48],
         "dropout": 0.1,
         "epoches": []
     }
