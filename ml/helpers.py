@@ -3,7 +3,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 # Paths
-load_dotenv('./../env.env')
+load_dotenv('env.env')
 STORAGE_DIR = Path(os.getenv('STORAGE_DIR'))
 DATA_DIR = STORAGE_DIR / 'data'
 CHECKPOINT_DIR = STORAGE_DIR / 'checkpoints'

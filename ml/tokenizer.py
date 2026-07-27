@@ -1,5 +1,6 @@
 from __future__ import annotations
-import music21, os, math, json, re, itertools
+import music21, os, math, json, re, itertools, sys
+from concurrent.futures import ProcessPoolExecutor
 from dotenv import load_dotenv
 import numpy as np
 from tqdm import tqdm
@@ -7,7 +8,7 @@ from helpers import STORAGE_DIR, DATA_DIR, DATASET_PATH, VOCAB_LIST_PATH, VOCAB_
 
 # params
 SUBDIVISIONS_PER_QUARTER = 24
-CHORD_QUALITIES = ('', 'm', 'm7', '7', 'o7', 'dim', '7sus', 'sus2', 'sus', '7+', '+', 'maj7')
+CHORD_QUALITIES = ('', 'm', 'm7', '7', 'o7', 'ø7', 'dim', '7sus', 'sus2', 'sus', '7+', '+', 'maj7')
 CHORD_SLOTS = { 0: 0, 2: 1, 3: 1, 4: 1, 5: 1, 6: 2, 7: 2, 8: 2, 10: 3, 11: 3 } # semitones above root -> root/third/fifth/seventh
 TRANSPOSE_INTERVALS = range(-5, 7)
 
@@ -18,23 +19,36 @@ TRANSPOSE_INTERVALS = range(-5, 7)
 # - add grace notes
 #  
 
-def preprocess_dataset():
+def tokenize_file(path):
+    # one score, start to finish, in whatever process the pool hands it to. Errors come back as a
+    # value rather than killing the worker, since a few hundred of the corpus's files fail to parse.
+    try:
+        return tokenize_score_as_text(music21.converter.parse(path)), None
+    except Exception as e:
+        return None, f'{type(e).__name__}: {e}'
+
+
+def preprocess_dataset(workers=None):
     openscore_path = DATA_DIR / "openscore"
     pdmx_path = DATA_DIR / "pdmx"
     openscore_files = [ f for f in openscore_path.iterdir() if f.is_file() and f.suffix == ".mxl" ]
     pdmx_files = [ f for f in pdmx_path.iterdir() if f.is_file() and f.suffix == ".mxl" ]
     files = openscore_files + pdmx_files
 
-    # build vocab
+    # build vocab. Scores are independent, so this is pure fan-out; the chunksize keeps the pool from
+    # paying a task round trip per file, and the big scores are spread out rather than bunched.
+    workers = workers or max(1, (os.cpu_count() or 2) - 1)
     token_seqs = []
-    idx = -1
-    for path in tqdm(files, "Processing..."):
-        idx += 1
-        score = music21.converter.parse(path)
-        try:
-            token_seqs.append(tokenize_score_as_text(score))
-        except Exception as e:
-            print(f'Error: {e}. Skipping: {idx}')
+    failures = 0
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        for seq, err in tqdm(pool.map(tokenize_file, files, chunksize=8), "Processing...", total=len(files)):
+            if err is not None:
+                failures += 1
+                continue
+            # every distinct token appears millions of times across the corpus, but each worker
+            # pickles its own copy of every string; interning collapses them back to one object
+            token_seqs.append([ tuple(map(sys.intern, quint)) for quint in seq ])
+    print(f'Tokenized {len(token_seqs)}/{len(files)} scores ({failures} skipped)')
 
     vocab = build_vocab_list(token_seqs, plot=True)
     # only the original key is stored; the dataset transposes on load, so the vocab still has to
@@ -42,9 +56,10 @@ def preprocess_dataset():
     for head in vocab:
         head.extend(sorted({ transpose_tok(tok, i) for tok in head for i in TRANSPOSE_INTERVALS } - set(head)))
     save_vocab_list(vocab)
-    
+
     # convert to dataset
-    tokenized = [ tokenize_text_to_ids(seq, vocab) for seq in token_seqs ]
+    lookup = build_vocab_lookup(vocab)
+    tokenized = [ tokenize_text_to_ids(seq, vocab, lookup) for seq in token_seqs ]
     np.savez(DATASET_PATH, *tokenized)
 
 
@@ -53,11 +68,18 @@ def load_dataset():
     return [ loaded[f] for f in loaded ]
 
 
-def tokenize_text_to_ids(quint_tokens, vocab_list):
+def tokenize_text_to_ids(quint_tokens, vocab_list, lookup=None):
+    # lookup is the vocab inverted once by the caller; .index() is a linear scan of the head per
+    # field per token, which over the whole corpus costs more than the scan that produced the tokens
+    if lookup is None: lookup = build_vocab_lookup(vocab_list)
     quint_ids = []
     for tok_seq in quint_tokens:
-        quint_ids.append((vocab_list[0].index(tok_seq[0]), vocab_list[1].index(tok_seq[1]), vocab_list[2].index(tok_seq[2]), vocab_list[3].index(tok_seq[3]), vocab_list[4].index(tok_seq[4])))
+        quint_ids.append((lookup[0][tok_seq[0]], lookup[1][tok_seq[1]], lookup[2][tok_seq[2]], lookup[3][tok_seq[3]], lookup[4][tok_seq[4]]))
     return quint_ids
+
+
+def build_vocab_lookup(vocab_list):
+    return [ { tok: idx for idx, tok in enumerate(head) } for head in vocab_list ]
 
 
 def transpose_tok(tok, interval):
@@ -76,47 +98,90 @@ def detokenize_ids(quint_ids, vocab_list):
     return quint_toks
 
 
-def analyze_chord(weights, voicing, key_ctx):
+# Naming chords through music21 is ~95% of tokenization, and a score plays the same handful of
+# voicings over and over, so every step that reaches into music21 is memoized on exactly the values
+# it reads. The caches live for the process and only grow to the number of distinct chords in the
+# corpus, which is a few thousand.
+_root_cache = {}
+_subset_cache = {}
+_analyze_cache = {}
+
+
+def _root_pitch_class(midis):
+    if midis not in _root_cache:
+        _root_cache[midis] = music21.chord.Chord(list(midis)).root().pitchClass
+    return _root_cache[midis]
+
+
+def _name_subset(midis, key_ctx, key_id):
+    # name one candidate set of pitches as (degree, root, quality), or None when music21 can't spell
+    # it as something CHORD_QUALITIES covers. Keyed on the pitches and the key, which is all it reads.
+    ck = (midis, key_id)
+    if ck in _subset_cache: return _subset_cache[ck]
+    c = music21.chord.Chord(list(midis))
+    # flip enharmonics (eg. F,G#,C -> F,Ab,C) to find the spelling with the shortest chord symbol
+    c = min(
+        (music21.chord.Chord([ p.getEnharmonic() if flip else p for p, flip in zip(c.pitches, flips) ]) for flips in itertools.product(*[ (False, True) if p.accidental else (False,) for p in c.pitches ])),
+        key=lambda cand: len(music21.harmony.chordSymbolFigureFromChord(cand, includeChordType=True)[0])
+    )
+    # NOTE: chordSymbolFigureFromChord is not idempotent -- it leaves state on the chord that makes a
+    # second call answer differently (eg. E2/A4/D5 names as 'EsusaddD,omitB' first and 'Cannot Be
+    # Identified' after), so the winner having already been named inside the min() above silently
+    # drops some chords here. Kept as-is on purpose: fixing it changes which chords the corpus gets.
+    figure, kind = music21.harmony.chordSymbolFigureFromChord(c, includeChordType=True)
+    result = None
+    if kind:
+        quality = re.split(r'/|add|omit|dim5', figure[len(c.root().name):])[0]
+        if quality in CHORD_QUALITIES:
+            rn = music21.roman.romanNumeralFromChord(c, key_ctx)
+            base = (key_ctx.pitchFromDegree(rn.scaleDegree).pitchClass - key_ctx.tonic.pitchClass) % 12
+            alter = int(rn.frontAlterationAccidental.alter) if rn.frontAlterationAccidental else 0
+            result = (base + alter) % 12, c.root().midi % 12, quality
+    _subset_cache[ck] = result
+    return result
+
+
+def analyze_chord(weights, voicing, key_ctx, key_id=None, key_pcs=None):
     # name a window's pitch classes (weights = how long each sounds, voicing = the lowest pitch it
     # sounds at, kept so the real bass still drives root detection) as (degree, root, quality), or
     # None if they make no chord we have a token for. Only the heaviest tone of each slot above the
     # root survives, so 9ths/11ths/13ths are stripped and a 7th is the richest possible result, and
     # whatever the slots can't settle (eg. E and F over C) falls to whichever sounds longer.
-    root = music21.chord.Chord(sorted(voicing.values())).root().pitchClass
-    kept = {}
+    # key_id/key_pcs are the caller's cached read of key_ctx; derived here when called standalone.
+    if key_id is None: key_id = (key_ctx.tonic.name, key_ctx.mode)
+    if key_pcs is None: key_pcs = { p.pitchClass for p in key_ctx.pitches }
     # longest sounding tone claims each slot, and the lower voice wins an outright tie
-    for pc in sorted(weights, key=lambda pc: (-weights[pc], voicing[pc])):
+    order = tuple(sorted(weights, key=lambda pc: (-weights[pc], voicing[pc])))
+    ck = (order, tuple(sorted(voicing.items())), key_id)
+    if ck in _analyze_cache: return _analyze_cache[ck]
+
+    root = _root_pitch_class(tuple(sorted(voicing.values())))
+    kept = {}
+    for pc in order:
         kept.setdefault(CHORD_SLOTS.get((pc - root) % 12, -1), pc)
     kept.pop(-1, None)
     # two lone tones spell a chord only when they form a real third; a second or a fourth between
     # them is a melodic collision rather than a suspension, and a lone root+seventh is nothing
-    if len(kept) == 2 and (kept.get(1, root) - root) % 12 not in (3, 4): return None
+    if len(kept) == 2 and (kept.get(1, root) - root) % 12 not in (3, 4):
+        _analyze_cache[ck] = None
+        return None
     # music21 can't name a chord that has no fifth, but an omitted fifth doesn't change what the
     # chord is, so stand one in, taking its alteration from the key so a leading tone gets the
     # diminished fifth it wants (B in C major -> F, not F#); a real fifth would fill the slot itself
     if 2 not in kept:
-        scale = { p.pitchClass for p in key_ctx.pitches }
-        fifth = next((f for f in (7, 6, 8) if (root + f) % 12 in scale), 7)
+        fifth = next((f for f in (7, 6, 8) if (root + f) % 12 in key_pcs), 7)
         kept[2] = (root + fifth) % 12
         voicing[kept[2]] = voicing[root] + fifth
     # the 7th chord first, then the bare triad if that wasn't nameable
+    result = None
     for subset in dict.fromkeys([ tuple(sorted(kept)), tuple(slot for slot in sorted(kept) if slot != 3) ]):
         if len(subset) < 3: continue
-        c = music21.chord.Chord(sorted(voicing[kept[slot]] for slot in subset))
-        # flip enharmonics (eg. F,G#,C -> F,Ab,C) to find the spelling with the shortest chord symbol
-        c = min(
-            (music21.chord.Chord([ p.getEnharmonic() if flip else p for p, flip in zip(c.pitches, flips) ]) for flips in itertools.product(*[ (False, True) if p.accidental else (False,) for p in c.pitches ])),
-            key=lambda cand: len(music21.harmony.chordSymbolFigureFromChord(cand, includeChordType=True)[0])
-        )
-        figure, kind = music21.harmony.chordSymbolFigureFromChord(c, includeChordType=True)
-        if not kind: continue
-        quality = re.split(r'/|add|omit|dim5', figure[len(c.root().name):])[0]
-        if quality not in CHORD_QUALITIES: continue
-        rn = music21.roman.romanNumeralFromChord(c, key_ctx)
-        base = (key_ctx.pitchFromDegree(rn.scaleDegree).pitchClass - key_ctx.tonic.pitchClass) % 12
-        alter = int(rn.frontAlterationAccidental.alter) if rn.frontAlterationAccidental else 0
-        return (base + alter) % 12, c.root().midi % 12, quality
-    return None
+        named = _name_subset(tuple(sorted(voicing[kept[slot]] for slot in subset)), key_ctx, key_id)
+        if named is not None:
+            result = named
+            break
+    _analyze_cache[ck] = result
+    return result
 
 
 def chord_walker(chordified_measure, key_ctx):
@@ -124,6 +189,8 @@ def chord_walker(chordified_measure, key_ctx):
     # analyzing a window only when nothing finer inside it already resolved, so wide spans just
     # pool the leftovers of a slow harmonic rhythm instead of blurring chords that were found
     bar_ql = float(chordified_measure.barDuration.quarterLength)
+    # read the key once for the whole measure instead of once per window
+    key_id, key_pcs = (key_ctx.tonic.name, key_ctx.mode), { p.pitchClass for p in key_ctx.pitches }
     # the 4th field is the tuplet's plain note value (eg. 0.5 for triplet 8ths), 0 when not a tuplet
     spans = [ (float(c.offset), float(c.offset + c.quarterLength), { p.midi for p in c.pitches }, float(c.duration.tuplets[0].durationNormal.quarterLength) if c.duration.tuplets and c.duration.tuplets[0].durationNormal else 0) for c in chordified_measure.getElementsByClass(music21.chord.Chord) ]
     chords = {}
@@ -145,7 +212,7 @@ def chord_walker(chordified_measure, key_ctx):
                     weights[pc] = weights.get(pc, 0) + overlap
                     voicing[pc] = min(voicing.get(pc, midi), midi)
             if len(weights) < min_pcs: continue
-            named = analyze_chord(weights, voicing, key_ctx)
+            named = analyze_chord(weights, voicing, key_ctx, key_id, key_pcs)
             if named: chords[pos] = (named, step)
     return [ (pos, *chords[pos][0]) for pos in sorted(chords) ]
 
@@ -188,9 +255,11 @@ def tokenize_score_as_text(score: music21.stream.Score):
     score_toks = []
     seen_bars = set()
     last_chord = (None, None)
-    for voz_idx, part in tqdm(enumerate(score.parts), "Scanning voices...", leave=False, total=len(score.parts)):
-        measure_offset = 0  
-        for measure in tqdm(part.getElementsByClass(music21.stream.Measure), "Scanning measures...", leave=False):
+    # no progress bars in here: this runs inside a worker pool, where per-measure bars from every
+    # process interleave into noise and the writes themselves cost more than the work they track
+    for voz_idx, part in enumerate(score.parts):
+        measure_offset = 0
+        for measure in part.getElementsByClass(music21.stream.Measure):
             suffix = measure.measureNumberWithSuffix()
             if 'X' in suffix: measure_offset += 1
 
@@ -299,10 +368,14 @@ def tokenize_score_as_text(score: music21.stream.Score):
         ('EOS', '', '', '', '')
     ]
 
-    with open(STORAGE_DIR / 'urmom.txt', 'w') as f:
-        f.writelines('\n'.join([ str(t) for t in output ]))
-
     return output
+
+
+def dump_tokens(tokens, path=None):
+    # eyeball a single score's tokens; used to be written on every tokenize, which cost a full
+    # str()+join of the score per file and made the whole pass unsafe to run in parallel
+    with open(path or STORAGE_DIR / 'urmom.txt', 'w') as f:
+        f.writelines('\n'.join([ str(t) for t in tokens ]))
 
 
 def pretty(d, indent=0):
@@ -572,7 +645,9 @@ def build_vocab_list(token_sequences, plot=False):
     for seq in token_sequences:
         for quint_tok in seq:
             for idx, tok in enumerate(quint_tok):
-                if tok not in vocab[idx]:
+                # membership is checked against the histogram, not the list: `tok not in vocab[idx]`
+                # is a linear scan of the whole head on every one of the corpus's ~20M tokens
+                if tok not in histogram[idx]:
                     vocab[idx].append(tok)
                     histogram[idx][tok] = 0
                 histogram[idx][tok] += 1
