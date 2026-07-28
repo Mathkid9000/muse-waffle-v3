@@ -111,10 +111,17 @@ class RotaryPositionalEncoding(nn.Module):
 
 
 class DecoderLayer(nn.Module):
-    def __init__(self, hidden_dim, num_heads, num_kv_heads, dropout=0.1):
+    def __init__(self, hidden_dim, num_heads, num_kv_heads, dropout=0.1,
+                 intermediate_dim=None):
         super().__init__()
+        # SwiGLU spends three matrices where a plain GELU MLP spends two, so the
+        # usual 4x width is really 1.5x the parameters that convention sizes for;
+        # 8/3x is the width that holds them equal. Defaulting to 4x here keeps
+        # configs written before intermediate_dim existed loading unchanged.
+        if intermediate_dim is None:
+            intermediate_dim = 4 * hidden_dim
         self.self_attn = GQA(hidden_dim, num_heads, num_kv_heads, dropout)
-        self.mlp = SwiGLU(hidden_dim, 4 * hidden_dim)
+        self.mlp = SwiGLU(hidden_dim, intermediate_dim)
         self.norm1 = nn.RMSNorm(hidden_dim)
         self.norm2 = nn.RMSNorm(hidden_dim)
         self.drop = nn.Dropout(dropout)
@@ -147,7 +154,8 @@ class MusicTransformer(nn.Module):
     """
 
     def __init__(self, num_layers, num_heads, num_kv_heads, hidden_dim,
-                 max_seq_len, field_sizes, embed_dims, dropout=0.1, epoches=[]):
+                 max_seq_len, field_sizes, embed_dims, dropout=0.1, epoches=[],
+                 intermediate_dim=None):
         super().__init__()
         assert len(field_sizes) == len(embed_dims)
         self.num_fields = len(field_sizes)
@@ -158,7 +166,7 @@ class MusicTransformer(nn.Module):
         self.input_proj = nn.Linear(sum(embed_dims), hidden_dim)
         self.embed_drop = nn.Dropout(dropout)
         self.decoders = nn.ModuleList([
-            DecoderLayer(hidden_dim, num_heads, num_kv_heads, dropout)
+            DecoderLayer(hidden_dim, num_heads, num_kv_heads, dropout, intermediate_dim)
             for _ in range(num_layers)
         ])
         self.norm = nn.RMSNorm(hidden_dim)

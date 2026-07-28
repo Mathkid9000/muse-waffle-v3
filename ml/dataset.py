@@ -16,7 +16,11 @@ class QuintupleDataset(torch.utils.data.Dataset):
         ids = [ { tok: idx for idx, tok in enumerate(head) } for head in vocab ]
         # the vocab's outermost pitches exist only as transposition targets, so they have nowhere
         # further to go; no stored score uses them, so mapping them to themselves is never read
-        tables = { i: [ np.array([ ids[f].get(transpose_tok(tok, i), idx) for idx, tok in enumerate(vocab[f]) ]) for f in range(5) ] for i in TRANSPOSE_INTERVALS }
+        # int16 rather than the int64 the tables would default to: the widest head
+        # is a few hundred entries, and the concatenated stream is every score in
+        # all 12 keys, so the dtype is the difference between ~2GB and ~9GB resident
+        # (double that at the concatenate, which holds source and destination at once)
+        tables = { i: [ np.array([ ids[f].get(transpose_tok(tok, i), idx) for idx, tok in enumerate(vocab[f]) ], dtype=np.int16) for f in range(5) ] for i in TRANSPOSE_INTERVALS }
         # score-major, since evaluate_val only reads the first batches of the val stream and would
         # otherwise see a single key
         self.encoded = np.concatenate([
@@ -29,8 +33,10 @@ class QuintupleDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         chunk = self.encoded[idx:idx + self.seq_len + 1]
-        x = torch.from_numpy(chunk[:-1].copy())
-        y = torch.from_numpy(chunk[1:].copy())
+        # widen at the window boundary, since nn.Embedding and cross_entropy both
+        # want int64; one window is 5 * seq_len ids, so the cast costs nothing
+        x = torch.from_numpy(chunk[:-1].copy()).long()
+        y = torch.from_numpy(chunk[1:].copy()).long()
         return x, y
 
 

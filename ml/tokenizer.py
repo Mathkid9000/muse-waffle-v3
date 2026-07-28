@@ -63,6 +63,25 @@ def preprocess_dataset(workers=None):
     np.savez(DATASET_PATH, *tokenized)
 
 
+def plot_vocab():
+    with open(VOCAB_LIST_PLOT_PATH, 'r') as f:
+        histogram = json.load(f)
+
+    print(len(histogram))
+    print(', '.join(histogram[0]))
+
+    import matplotlib.pyplot as plt
+    for idx, histo in enumerate(histogram):
+        pairs = sorted(zip(histo.keys(), histo.values()), key=lambda x: x[0], reverse=True)
+        keys, values = zip(*pairs)
+        plt.bar(keys, values, color=['red', 'orange', 'lime', 'cyan', 'violet'][idx], edgecolor='black')
+        plt.xticks(rotation=90, ha='right') 
+        plt.title(f"HEAD {idx + 1}")
+        plt.tight_layout()
+        # plt.show()
+    # axs[1,2].hist([ len(seq) for seq in token_sequences ], bins=200, edgecolor='black', color='yellow')
+
+
 def load_dataset():
     loaded = np.load(DATASET_PATH)
     return [ loaded[f] for f in loaded ]
@@ -703,12 +722,13 @@ class QuintupleTokenizer:
 
 
 if __name__  == "__main__":
-    preprocess_dataset()
+    # preprocess_dataset()
 
-    # validate
-    rng = np.random.default_rng()
-    quint_id_seqs = load_dataset()
-    vocab_list = load_vocab_list()
-    detokenized = [ detokenize_ids(seq, vocab_list) for seq in quint_id_seqs ]
-    chosen = detokenized[rng.choice(len(detokenized))]
-    tokens_to_score(chosen)
+    # # validate
+    # rng = np.random.default_rng()
+    # quint_id_seqs = load_dataset()
+    # vocab_list = load_vocab_list()
+    # detokenized = [ detokenize_ids(seq, vocab_list) for seq in quint_id_seqs ]
+    # chosen = detokenized[rng.choice(len(detokenized))]
+    # tokens_to_score(chosen)
+    plot_vocab()

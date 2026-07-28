@@ -123,6 +123,7 @@ def main():
 
     # Training hyperparameters
     N_EPOCHS = 200
+    TOTAL_OPT_STEPS = 60000       # the step budget the run is actually given
     LR = 0.0005
     WARMUP_STEPS = 200
     CLIP_NORM = 6.0
@@ -144,8 +145,12 @@ def main():
         1, min(len(dataloader), MAX_STEPS_PER_EPOCH) // GRAD_ACCUM_STEPS)
     warmup_scheduler = optim.lr_scheduler.LinearLR(
         optimizer, start_factor=0.01, end_factor=1.0, total_iters=WARMUP_STEPS)
+    # Anneal over TOTAL_OPT_STEPS, NOT N_EPOCHS * opt_steps_per_epoch: the latter is
+    # ~1.5M steps (~200 T4-hours), a horizon no run reaches, so cosine stays in its
+    # flat opening and the LR never leaves its peak. The budget is decoupled from
+    # N_EPOCHS on purpose; N_EPOCHS is only the outer cap.
     cosine_scheduler = optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=max(1, N_EPOCHS * opt_steps_per_epoch - WARMUP_STEPS), eta_min=0)
+        optimizer, T_max=max(1, TOTAL_OPT_STEPS - WARMUP_STEPS), eta_min=LR * 0.05)
     scheduler = optim.lr_scheduler.SequentialLR(
         optimizer, schedulers=[warmup_scheduler, cosine_scheduler],
         milestones=[WARMUP_STEPS])
@@ -172,6 +177,12 @@ def main():
     stale_epochs = 0
 
     for epoch in range(N_EPOCHS):
+        # past T_max a CosineAnnealingLR turns back up rather than staying at eta_min,
+        # so the budget has to stop the loop as well as shape the curve
+        if scheduler.last_epoch >= TOTAL_OPT_STEPS:
+            print(f"Reached the {TOTAL_OPT_STEPS}-step budget; stopping.")
+            break
+
         steps_this_epoch = min(len(dataloader), MAX_STEPS_PER_EPOCH)
         model.train()
         epoch_loss = 0

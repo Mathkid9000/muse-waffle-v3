@@ -138,11 +138,15 @@ def get_field_sizes():
 
 def get_model_config(field_sizes):
     field_sizes = list(field_sizes)
+    # ~47M params. The corpus is ~19M unique events, so capacity is not the
+    # bottleneck and never was; the win from a smaller trunk is the ~2x cheaper
+    # step, which buys more passes over the data in the same T4-hours.
     return {
-        "num_layers": 12,
-        "num_heads": 12,
-        "num_kv_heads": 6,
-        "hidden_dim": 768,
+        "num_layers": 10,
+        "num_heads": 8,
+        "num_kv_heads": 4,
+        "hidden_dim": 640,
+        "intermediate_dim": 1728,   # 8/3 x hidden, rounded to a multiple of 64
         "max_seq_len": SEQ_LEN,
         "field_sizes": field_sizes,
         "embed_dims": [160, 128, 96, 96, 48],
