@@ -21,11 +21,17 @@ class QuintupleDataset(torch.utils.data.Dataset):
         # all 12 keys, so the dtype is the difference between ~2GB and ~9GB resident
         # (double that at the concatenate, which holds source and destination at once)
         tables = { i: [ np.array([ ids[f].get(transpose_tok(tok, i), idx) for idx, tok in enumerate(vocab[f]) ], dtype=np.int16) for f in range(5) ] for i in TRANSPOSE_INTERVALS }
-        # score-major, since evaluate_val only reads the first batches of the val stream and would
-        # otherwise see a single key
+        # the (score, interval) segments are shuffled (seeded, so every run of the same data sees
+        # the same stream) before concatenating. Laid out score-major instead, a 2048-row window
+        # regularly held a score followed by ITS OWN transposition a semitone up (the median score
+        # is ~1000 rows), and "copy the previous section shifted" is a shortcut that drives train
+        # loss down without teaching composition. Shuffling makes adjacent neighbors different
+        # scores, and gives evaluate_val's first batches key and score diversity for free.
+        segments = [ (s, i) for s in range(len(encoded)) for i in TRANSPOSE_INTERVALS ]
+        np.random.default_rng(0).shuffle(segments)
         self.encoded = np.concatenate([
-            np.stack([ tables[i][f][seq[:, f]] for f in range(5) ], axis=1)
-            for seq in encoded for i in TRANSPOSE_INTERVALS
+            np.stack([ tables[i][f][encoded[s][:, f]] for f in range(5) ], axis=1)
+            for s, i in segments
         ], axis=0)
 
     def __len__(self):

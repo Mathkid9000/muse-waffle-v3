@@ -5,7 +5,9 @@ from helpers import DATA_DIR
 # sources
 OPENSCORE_URL = 'https://codeload.github.com/OpenScore/Lieder/tar.gz/refs/heads/main'
 PDMX_RECORD = 'https://zenodo.org/api/records/14648209'
-PDMX_SUBSET = 'rated_deduplicated' # 13187 of PDMX's 254077 scores: the ones users rated, near duplicates dropped
+PDMX_SUBSET = 'deduplicated' # ~214k of PDMX's 254077 scores, near duplicates dropped. The previous
+                             # 'rated_deduplicated' (13187 curated scores) overfit a 47M model by
+                             # epoch ~3; ~10x the data is the strongest regularizer available
 
 
 def zenodo_url(filename):

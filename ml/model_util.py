@@ -149,7 +149,9 @@ def get_model_config(field_sizes):
         "intermediate_dim": 1728,   # 8/3 x hidden, rounded to a multiple of 64
         "max_seq_len": SEQ_LEN,
         "field_sizes": field_sizes,
-        "embed_dims": [160, 128, 96, 96, 48],
+        # field 0 is ~40 tokens now that bars are relative (M_SAME/M_NEXT/M_SKIP_k + INSTR +
+        # structurals), so its width moved to field 3, where pitch actually lives; total stays 528
+        "embed_dims": [64, 128, 96, 192, 48],
         "dropout": 0.1,
         "epoches": []
     }

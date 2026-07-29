@@ -43,10 +43,13 @@ def compound_loss(logits, y, pad_ids, weights):
     valid = weights * row_valid                 # loop-invariant
     denom = valid.sum().clamp(min=1)
     for i, logit in enumerate(logits):
+        # label smoothing: the model exists to be sampled from, and the pitch/duration heads
+        # otherwise converge to overconfident modes that top-k sampling then can't escape
         ce = F.cross_entropy(
             logit.reshape(-1, logit.shape[-1]),
             y[..., i].reshape(-1),
             reduction="none",
+            label_smoothing=0.05,
         ).view(y.shape[0], y.shape[1])
         total = total + (ce * valid).sum() / denom
     return total / len(logits)
@@ -80,20 +83,27 @@ def main():
     GRAD_ACCUM_STEPS = max(1, BATCH_SIZE // MICRO_BATCH_SIZE)
     MAX_STEPS_PER_EPOCH = 15000   # stride-1 windows make full epochs enormous
 
-    tokenized_events = load_dataset()
+    score_names, tokenized_events = load_dataset()
     tokenizer = QuintupleTokenizer()
     pad_ids = tokenizer.pad_ids
 
-    # split dataset
+    # split dataset by score NAME, not position: names survive a re-preprocess, while a stored
+    # positional index would silently re-point at a different score whenever data.npz is rebuilt.
+    # A persisted split that names scores no longer in the dataset is stale by definition and is
+    # rebuilt rather than half-honored (its train/val boundary no longer means anything).
     try:
-        val_split_indices = load_val_split_only(MODEL_NAME)
-    except:
-        # shuffle
-        indexed = list(range(len(tokenized_events)))
-        random.shuffle(indexed)
-        val_split_indices = indexed[:math.ceil(len(indexed)*VAL_SPLIT)]
-    train_events = [ tokenized_events[i] for i in range(len(tokenized_events)) if i not in val_split_indices ]
-    val_events = [ tokenized_events[i] for i in val_split_indices ]
+        val_names = set(load_val_split_only(MODEL_NAME))
+        if not val_names <= set(score_names):
+            raise ValueError(f'val split for "{MODEL_NAME}" names scores absent from data.npz (stale split)')
+    except (FileNotFoundError, ValueError) as e:
+        print(f'Drawing a fresh val split: {e}')
+        # seeded, so an interrupted first epoch (which never reaches save_model) still
+        # draws the same split on the rerun instead of quietly mixing val into train
+        shuffled = list(score_names)
+        random.Random(1234).shuffle(shuffled)
+        val_names = set(shuffled[:math.ceil(len(shuffled) * VAL_SPLIT)])
+    train_events = [ ev for name, ev in zip(score_names, tokenized_events) if name not in val_names ]
+    val_events = [ ev for name, ev in zip(score_names, tokenized_events) if name in val_names ]
 
     # # The vocab is built from the train split only; a few valid chorales are
     # # longer than any train chorale (unseen BEAT_x) or hold rare durations.
@@ -126,13 +136,19 @@ def main():
     TOTAL_OPT_STEPS = 60000       # the step budget the run is actually given
     LR = 0.0005
     WARMUP_STEPS = 200
-    CLIP_NORM = 6.0
-    PATIENCE = 60                 # early-stop epochs without val improvement
+    CLIP_NORM = 1.0               # standard for fp16 AMP; 6.0 effectively never clipped
+    PATIENCE = 5                  # early-stop epochs without val improvement; val has been
+                                  # diverging by epoch ~3, so 60 stale epochs was pure wasted GPU
 
-    # Decay only matmul weights + embeddings; 1-D params (biases, RMSNorm
-    # gains) are scale parameters and decaying them just fights the norms.
-    decay = [p for p in model.parameters() if p.requires_grad and p.dim() >= 2]
-    no_decay = [p for p in model.parameters() if p.requires_grad and p.dim() < 2]
+    # Decay only matmul weights; 1-D params (biases, RMSNorm gains) are scale
+    # parameters and decaying them just fights the norms. The field embeddings
+    # are excluded too: they double as conditioning inputs to the chained heads,
+    # and decay drags every rare token's embedding (rare pitches, qualities)
+    # toward zero on each of the many steps it doesn't appear in.
+    decay = [p for n, p in model.named_parameters()
+             if p.requires_grad and p.dim() >= 2 and 'field_embeddings' not in n]
+    no_decay = [p for n, p in model.named_parameters()
+                if p.requires_grad and (p.dim() < 2 or 'field_embeddings' in n)]
     optimizer = optim.AdamW(
         [{"params": decay, "weight_decay": 0.1},
          {"params": no_decay, "weight_decay": 0.0}], lr=LR)
@@ -235,7 +251,7 @@ def main():
         if val_loss < best_val:
             best_val = val_loss
             stale_epochs = 0
-            save_model(MODEL_NAME, config, model, optimizer, scheduler, val_split_indices)
+            save_model(MODEL_NAME, config, model, optimizer, scheduler, sorted(val_names))
             print(f"Saved checkpoint (val {best_val:.4f})")
         else:
             stale_epochs += 1

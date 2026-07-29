@@ -11,6 +11,10 @@ SUBDIVISIONS_PER_QUARTER = 24
 CHORD_QUALITIES = ('', 'm', 'm7', '7', 'o7', 'ø7', 'dim', '7sus', 'sus2', 'sus', '7+', '+', 'maj7')
 CHORD_SLOTS = { 0: 0, 2: 1, 3: 1, 4: 1, 5: 1, 6: 2, 7: 2, 8: 2, 10: 3, 11: 3 } # semitones above root -> root/third/fifth/seventh
 TRANSPOSE_INTERVALS = range(-5, 7)
+MAX_BAR_SKIP = 16      # any wider gap between consecutive rows is musically just "big gap"
+MIN_PITCH, MAX_PITCH = 21, 108   # piano range; keeps transposition inside 16..114
+MIN_TEMPO, MAX_TEMPO = 10, 400   # anything outside is typesetter garbage (corpus has 1.2M "BPM")
+MAX_VOICES = 17        # VOICE_0..VOICE_16; parts past that merge into the last voice
 
 # TODO:
 # 
@@ -38,15 +42,18 @@ def preprocess_dataset(workers=None):
     # build vocab. Scores are independent, so this is pure fan-out; the chunksize keeps the pool from
     # paying a task round trip per file, and the big scores are spread out rather than bunched.
     workers = workers or max(1, (os.cpu_count() or 2) - 1)
-    token_seqs = []
+    token_seqs, names = [], []
     failures = 0
     with ProcessPoolExecutor(max_workers=workers) as pool:
-        for seq, err in tqdm(pool.map(tokenize_file, files, chunksize=8), "Processing...", total=len(files)):
+        # map preserves input order, so zipping the results back onto files pairs each
+        # sequence with the score it came from
+        for file, (seq, err) in tqdm(zip(files, pool.map(tokenize_file, files, chunksize=8)), "Processing...", total=len(files)):
             if err is not None:
                 failures += 1
                 continue
             # every distinct token appears millions of times across the corpus, but each worker
             # pickles its own copy of every string; interning collapses them back to one object
+            names.append(f'{file.parent.name}/{file.name}')
             token_seqs.append([ tuple(map(sys.intern, quint)) for quint in seq ])
     print(f'Tokenized {len(token_seqs)}/{len(files)} scores ({failures} skipped)')
 
@@ -57,10 +64,12 @@ def preprocess_dataset(workers=None):
         head.extend(sorted({ transpose_tok(tok, i) for tok in head for i in TRANSPOSE_INTERVALS } - set(head)))
     save_vocab_list(vocab)
 
-    # convert to dataset
+    # convert to dataset. Arrays are saved under each score's own name (dir/file), NOT positionally:
+    # the val split is persisted as a list of these names, so re-preprocessing with a different
+    # corpus can never silently re-point the split at different scores the way indices would
     lookup = build_vocab_lookup(vocab)
     tokenized = [ tokenize_text_to_ids(seq, vocab, lookup) for seq in token_seqs ]
-    np.savez(DATASET_PATH, *tokenized)
+    np.savez(DATASET_PATH, **{ name: np.array(ids, dtype=np.int64) for name, ids in zip(names, tokenized) })
 
 
 def plot_vocab():
@@ -83,8 +92,10 @@ def plot_vocab():
 
 
 def load_dataset():
+    """Returns (names, arrays): each score's dir/file name alongside its (N, 5) id array."""
     loaded = np.load(DATASET_PATH)
-    return [ loaded[f] for f in loaded ]
+    names = list(loaded.files)
+    return names, [ loaded[n] for n in names ]
 
 
 def tokenize_text_to_ids(quint_tokens, vocab_list, lookup=None):
@@ -240,14 +251,19 @@ def canonical_instrument(instr):
     # the same instrument reaches us under every name a typesetter felt like ("Grand Piano",
     # "Piano (2)", "Klavier", "Hautbois"), which splits it across that many vocab entries. Run the
     # name through music21's own multilingual lookup and keep the plain name of whatever class it
-    # matched; parenthesized asides are stripped first so they can't outvote the real name (eg.
-    # "Horn (bass clef)" matching "bass"). When the name means nothing to music21 ("Men", "Traverso"),
-    # the class it already resolved from the part's midi program still says what the instrument is.
+    # matched; parenthesized asides, digits and punctuation are stripped first so they can't outvote
+    # the real name (eg. "Horn (bass clef)" matching "bass", "Piano (2)" not matching at all). When
+    # the name means nothing to music21 ("Men", "Traverso"), the class it already resolved from the
+    # part's midi program still says what the instrument is; when even that is the generic
+    # Instrument base class (whose default name is None), fall back to Piano rather than letting the
+    # raw typesetter string ("bass2 ou instr.", "(10)") become its own vocab entry.
+    name = re.sub(r'\(.*?\)', '', instr.instrumentName or '')
+    name = re.sub(r'[\d()\[\].,;:!?]+', ' ', name).strip()
     try:
-        matched = music21.instrument.fromString(re.sub(r'\(.*?\)', '', instr.instrumentName or ''))
+        matched = music21.instrument.fromString(name) if name else instr
     except music21.instrument.InstrumentException:
         matched = instr
-    return type(matched)().instrumentName or instr.instrumentName
+    return type(matched)().instrumentName or 'Piano'
 
 
 def tokenize_score_as_text(score: music21.stream.Score):
@@ -264,9 +280,10 @@ def tokenize_score_as_text(score: music21.stream.Score):
         if x[2].startswith('DEG'): priority -= 0.5 # chord
         if x[2].startswith('DYN'): priority -= 0.1 # time
         return priority
-    # construct instruments
+    # construct instruments; parts past MAX_VOICES merge into the last voice (a 69-slot voice head
+    # is a long tail of orchestral scores that mostly steals capacity from chord qualities)
     instr_toks = []
-    for idx, part in enumerate(score.parts):
+    for idx, part in enumerate(score.parts[:MAX_VOICES]):
         name = canonical_instrument(part.getInstrument())
         instr_toks.append((tokify('INSTR', name), '', '', '', tokify('VOICE', idx)))
 
@@ -277,6 +294,7 @@ def tokenize_score_as_text(score: music21.stream.Score):
     # no progress bars in here: this runs inside a worker pool, where per-measure bars from every
     # process interleave into noise and the writes themselves cost more than the work they track
     for voz_idx, part in enumerate(score.parts):
+        voz = min(voz_idx, MAX_VOICES - 1)
         measure_offset = 0
         for measure in part.getElementsByClass(music21.stream.Measure):
             suffix = measure.measureNumberWithSuffix()
@@ -292,32 +310,39 @@ def tokenize_score_as_text(score: music21.stream.Score):
             else:
                 notesAndRests.extend(measure.notesAndRests)
 
-            # read all notes and convert to text toks
+            # read all notes and convert to text toks. Offsets/durations are rounded to the
+            # subdivision grid rather than left fractional (quintuplets etc. produce POS_4.8 and
+            # DUR_1.5 tokens the decoder can't turn back into numbers), negative offsets are
+            # music21 parse artifacts (the corpus holds a POS_-4026), and pitches outside the
+            # piano keep ~30 never-musical embedding rows out of the vocab
             note_toks = []
             for note in notesAndRests:
                 if note.isRest:
                     continue
 
-                pos = note.offset * SUBDIVISIONS_PER_QUARTER
-                dur = note.duration.quarterLength * SUBDIVISIONS_PER_QUARTER
-                if dur == 0: continue
+                pos = round(note.offset * SUBDIVISIONS_PER_QUARTER)
+                dur = round(note.duration.quarterLength * SUBDIVISIONS_PER_QUARTER)
+                if dur == 0 or pos < 0: continue
 
                 for pitch in note.pitches:
-                    note_toks.append((tokify('M', m_num), tokify('POS', pos), tokify('DUR', dur), tokify('PITCH', pitch.midi), tokify('VOICE', voz_idx)))
+                    if not (MIN_PITCH <= pitch.midi <= MAX_PITCH): continue
+                    note_toks.append((tokify('M', m_num), tokify('POS', pos), tokify('DUR', dur), tokify('PITCH', pitch.midi), tokify('VOICE', voz)))
 
             # read all key sigs
             key_toks = []
             if voz_idx == 0:
                 for key_sig in measure.getElementsByClass(music21.key.KeySignature):
                     tonic = key_sig.asKey().tonic.midi % 12
-                    pos = key_sig.offset * SUBDIVISIONS_PER_QUARTER
+                    pos = round(key_sig.offset * SUBDIVISIONS_PER_QUARTER)
+                    if pos < 0: continue
                     key_toks.append((tokify('M', m_num), tokify('POS', pos), tokify('KEY', tonic), '', ''))
 
             # read all time sigs
             time_toks = []
             if voz_idx == 0:
                 for ts in measure.getElementsByClass(music21.meter.TimeSignature):
-                    pos = ts.offset * SUBDIVISIONS_PER_QUARTER
+                    pos = round(ts.offset * SUBDIVISIONS_PER_QUARTER)
+                    if pos < 0: continue
                     time_toks.append((tokify('M', m_num), tokify('POS', pos), tokify('NUM', ts.numerator), tokify('DEN', ts.denominator), ''))
 
             # read all tempo markings (~16 buckets), including text tempos like "Andante"
@@ -329,26 +354,31 @@ def tokenize_score_as_text(score: music21.stream.Score):
                     mm.offset = te.offset
                     text_tempos.append(mm)
                 for mm in [ *measure.getElementsByClass(music21.tempo.MetronomeMark), *text_tempos ]:
-                    if mm.number is None: continue
-                    pos = mm.offset * SUBDIVISIONS_PER_QUARTER
+                    # clamp: the corpus carries TEMPO_75000 (1.2M BPM) and TEMPO_0 typesetter garbage
+                    if mm.number is None or not (MIN_TEMPO <= mm.number <= MAX_TEMPO): continue
+                    pos = round(mm.offset * SUBDIVISIONS_PER_QUARTER)
+                    if pos < 0: continue
                     tempo_toks.append((tokify('M', m_num), tokify('POS', pos), tokify('TEMPO', round(mm.number / 16)), '', ''))
 
             # read all dynamics
             dynamic_toks = []
             for dyn in measure.getElementsByClass(music21.dynamics.Dynamic):
-                pos = dyn.offset * SUBDIVISIONS_PER_QUARTER
-                dynamic_toks.append((tokify('M', m_num), tokify('POS', pos), tokify('DYN', dyn.value), '', tokify('VOICE', voz_idx)))
+                pos = round(dyn.offset * SUBDIVISIONS_PER_QUARTER)
+                if pos < 0: continue
+                dynamic_toks.append((tokify('M', m_num), tokify('POS', pos), tokify('DYN', dyn.value), '', tokify('VOICE', voz)))
 
             # read all clefs
             clef_toks = []
             for clef in measure.getElementsByClass(music21.clef.Clef):
-                pos = clef.offset * SUBDIVISIONS_PER_QUARTER
-                clef_toks.append((tokify('M', m_num), tokify('POS', pos), tokify('CLEF', clef.name), '', tokify('VOICE', voz_idx)))
+                pos = round(clef.offset * SUBDIVISIONS_PER_QUARTER)
+                if pos < 0: continue
+                clef_toks.append((tokify('M', m_num), tokify('POS', pos), tokify('CLEF', clef.name), '', tokify('VOICE', voz)))
 
             # read all bar lines (including repeats); not always on the first staff, so check every part
             bar_toks = []
             for barline in measure.getElementsByClass(music21.bar.Barline):
-                pos = barline.offset * SUBDIVISIONS_PER_QUARTER
+                pos = round(barline.offset * SUBDIVISIONS_PER_QUARTER)
+                if pos < 0: continue
                 if (m_num, pos) in seen_bars: continue
                 seen_bars.add((m_num, pos))
                 bar_type = f'repeat-{barline.direction}' if isinstance(barline, music21.bar.Repeat) else barline.type
@@ -363,7 +393,7 @@ def tokenize_score_as_text(score: music21.stream.Score):
                     for pos, degree, root, quality in chord_walker(chordified_measure, key_ctx):
                         if (root, quality) == last_chord: continue
                         last_chord = (root, quality)
-                        chord_toks.append((tokify('M', m_num), tokify('POS', pos * SUBDIVISIONS_PER_QUARTER), tokify('DEG', degree), tokify('ROOT', root), tokify('QUAL', quality, lower=False)))
+                        chord_toks.append((tokify('M', m_num), tokify('POS', round(pos * SUBDIVISIONS_PER_QUARTER)), tokify('DEG', degree), tokify('ROOT', root), tokify('QUAL', quality, lower=False)))
 
             # extend all to score_toks
             score_toks.extend(note_toks)
@@ -377,7 +407,27 @@ def tokenize_score_as_text(score: music21.stream.Score):
 
     # final sort
     score_toks.sort(key=lambda x: tok_priority(x))
-    
+
+    # remap absolute bar numbers to relative advance tokens. The sort above needs absolute bars,
+    # but as vocab entries M_0..M_2270 are a ~2.3k-way head of near-uniform counters the model can
+    # only memorize (99.5% of field-0 mass), and no score can outgrow the largest bar index seen in
+    # training. "Does time advance?" is the musical content, so keep only that: M_SAME within a
+    # bar, M_NEXT into the next, M_SKIP_<k> (clamped) over a gap. tokens_to_score reverses this
+    # with a running counter; bars are non-decreasing here by construction of tok_priority.
+    rel_toks = []
+    prev_bar = None
+    for tok in score_toks:
+        bar = int(tok[0].split('_')[-1])
+        if prev_bar is None or bar == prev_bar:
+            m_tok = 'M_SAME'
+        elif bar - prev_bar == 1:
+            m_tok = 'M_NEXT'
+        else:
+            m_tok = f'M_SKIP_{min(bar - prev_bar, MAX_BAR_SKIP)}'
+        prev_bar = bar
+        rel_toks.append((m_tok, *tok[1:]))
+    score_toks = rel_toks
+
     # constructed
     output = [
         ('SOG', '', '', '',''),
@@ -404,6 +454,30 @@ def pretty(d, indent=0):
             pretty(value, indent+1)
         else:
             print('  ' * (indent+1) + str(key) + str(value))
+
+
+def resolve_bars(tokens):
+    # invert the relative-bar remap in tokenize_score_as_text: walk the rows with a running
+    # absolute counter so every downstream consumer keeps seeing plain M_<n>. Legacy absolute
+    # tokens pass through untouched, so pre-remap token dumps still decode.
+    resolved = []
+    bar = 0
+    for tok in tokens:
+        f0 = tok[0]
+        if f0.startswith('M_'):
+            tail = f0[2:]
+            if tail == 'SAME':
+                pass
+            elif tail == 'NEXT':
+                bar += 1
+            elif tail.startswith('SKIP_'):
+                bar += int(tail.split('_')[-1])
+            else:
+                bar = int(tail)
+            resolved.append((f'M_{bar}', *tok[1:]))
+        else:
+            resolved.append(tok)
+    return resolved
 
 
 def tokens_to_score(tokens):
@@ -443,6 +517,7 @@ def tokens_to_score(tokens):
             return pitch.getEnharmonic()
         return pitch
 
+    tokens = resolve_bars(tokens)
     score = music21.stream.Score()
     parts = []
     general_score_elements: dict[int, list[music21.base.Music21Object]] = {} # measure num -> objects
@@ -707,6 +782,12 @@ class QuintupleTokenizer:
         self.field_sizes = [len(v) for v in self.vocabs]
         self.pad_ids = [None] + [self.vocabs[i][''] for i in range(1, 5)]
         self.inv = [{i: s for s, i in v.items()} for v in self.vocabs]
+        # structural-consistency sets for constrained sampling (generate.py): rows whose field 0
+        # is structural carry '' in fields 1-3 and either '' (SOG/SOS/EOS) or a VOICE (INSTR) in
+        # field 4; everything the model samples outside that is a malformed row by construction
+        self.struct_f0 = { idx for tok, idx in self.vocabs[0].items() if tok in ('SOG', 'SOS', 'EOS') or tok.startswith('INSTR') }
+        self.instr_f0 = { idx for tok, idx in self.vocabs[0].items() if tok.startswith('INSTR') }
+        self.voice_f4 = { idx for tok, idx in self.vocabs[4].items() if tok.startswith('VOICE') }
 
     def encode(self, quint_tokens):
         quint_ids = []
