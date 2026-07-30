@@ -227,6 +227,27 @@ export default function ScoreViewer() {
       if (measures.length === 0) continue // page not mounted
       const g = measures[m - pageMeta.offsets[pageIdx] - 1]
       if (!g) continue
+
+      if (m == selection.start) {
+        const promptButton = document.createElement('button')
+        promptButton.textContent = "Type something..."
+
+        const bb = g.getBBox()
+        const point = pageEl.querySelector('svg')!.createSVGPoint()
+        point.x = bb.x
+        point.y = bb.y
+        const matrix = g.getScreenCTM()
+        const viewportPos = point.matrixTransform(matrix!)
+        const rootMatrix = pageEl.querySelector('svg')!.getScreenCTM()?.inverse()
+        const svgPos = viewportPos.matrixTransform(rootMatrix)
+
+        promptButton.style = `top: ${svgPos.y + 50}px; left: ${svgPos.x + parseFloat(pageEl.style.left.replace('px', ''))}px`
+        promptButton.className = styles.promptButton
+
+        pageEl.appendChild(promptButton)
+        console.log(g, pageEl, pageEl.style.left)
+      }
+
       try {
         if (!selection.parts) {
           // Highlight entire measure

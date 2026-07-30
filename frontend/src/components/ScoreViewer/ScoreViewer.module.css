@@ -84,3 +84,9 @@
   color: #aaa;
   font-size: 14px;
 }
+
+.promptButton {
+  position: absolute;
+  width: 150px;
+  height: 30px
+}
