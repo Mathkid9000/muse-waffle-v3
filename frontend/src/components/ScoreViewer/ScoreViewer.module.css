@@ -32,6 +32,7 @@
    so a whole page fits vertically and is vertically centered by align-items. */
 .page {
   height: 100%;
+  padding: 100px 0;
   background: #fff;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6);
   border-radius: 1px;
@@ -39,9 +40,11 @@
 }
 
 .page svg {
-  display: block;
+  display: flex;
   height: 100%;
-  width: auto;
+  width: 100%;
+  align-items: center;
+  justify-content: center;
 }
 
 /* Empty state: show a blank paper rectangle on the dark canvas */

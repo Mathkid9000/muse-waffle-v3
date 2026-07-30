@@ -35,7 +35,7 @@ function svgAspect(doc: Document): number {
   const svg = doc.documentElement
   const w = parseFloat(svg.getAttribute('width') || '')
   const h = parseFloat(svg.getAttribute('height') || '')
-  if (w > 0 && h > 0) return w / h
+  if (w > 0 && h > 0) return w / h * 0.9
   const vb = svg.getAttribute('viewBox')
   if (vb) {
     const p = vb.split(/[\s,]+/).map(Number)
