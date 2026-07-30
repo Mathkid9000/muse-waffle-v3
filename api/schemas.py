@@ -45,14 +45,14 @@ class InfillRequest(BaseModel):
     )
     temperature: float = Field(0.9, ge=0.1, le=2.0)
     top_k: int = Field(50, ge=1, le=200)
-    model_name: str = Field("INFILL-D1024-H16-L8", description="Infill model checkpoint name")
+    model_name: str = Field("the-waffler", description="Model checkpoint name")
     device: str = Field("cpu", description="Inference device: cpu or cuda")
 
 
 class GenerateRequest(BaseModel):
     instruments: list[int] = Field(
         [1],
-        description="List of instrument indices (0-31, see INSTR_NAMES in ml/tokenizer.py)",
+        description="List of instrument indices (0-31, see INSTR_NAMES in ml/api.py)",
     )
     key: int = Field(6, ge=0, le=12, description="Key signature index (0=6 flats … 6=C … 12=6 sharps)")
     time_sig: int = Field(2, ge=0, le=5, description="Time signature index (0=2/4, 1=3/4, 2=4/4, 3=6/8, 4=3/8, 5=12/8)")
@@ -61,7 +61,7 @@ class GenerateRequest(BaseModel):
     max_new: int = Field(2000, ge=100, le=4096)
     temperature: float = Field(0.9, ge=0.1, le=2.0)
     top_k: int = Field(50, ge=1, le=200)
-    model_name: str = Field("GEN-D1024-H16-L8", description="Generation model checkpoint name")
+    model_name: str = Field("the-waffler", description="Model checkpoint name")
     device: str = Field("cpu", description="Inference device: cpu or cuda")
 
 
@@ -76,7 +76,7 @@ class AppendRequest(BaseModel):
     max_new: int = Field(1024, ge=100, le=4096)
     temperature: float = Field(0.9, ge=0.1, le=2.0)
     top_k: int = Field(50, ge=1, le=200)
-    model_name: str = Field("GEN-D1024-H16-L8", description="Generation model checkpoint name")
+    model_name: str = Field("the-waffler", description="Model checkpoint name")
     device: str = Field("cpu", description="Inference device: cpu or cuda")
 
 

@@ -14,6 +14,10 @@ from api.routers.edit import clef, time_sig, key_sig, tempo, instr, rm_staff, rm
 # Ensure the project root is on sys.path so ml/ imports resolve
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
+# ml/ modules import each other by bare name (they are run as scripts too), so ml/ has to be
+# importable in its own right; appended rather than inserted so nothing in there can shadow a
+# package the app depends on -- ml/api.py in particular must not outrank the api/ package
+sys.path.append(str(PROJECT_ROOT / "ml"))
 # Also set working directory to project root so relative paths (storage/) work
 os.chdir(PROJECT_ROOT)
 

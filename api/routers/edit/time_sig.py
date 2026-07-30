@@ -15,7 +15,7 @@ def _run_edit(body: EditTimeSigRequest) -> str:
     import music21 as m21
     import music21.musicxml as musicxml
     from api.routers.infill import _ordinal_to_measure_numbers
-    from ml.tokenizer import TIME_SIGS
+    from ml.api import TIME_SIGS
 
     orig_score = m21.converter.parseData(body.xml, format="musicxml")
     if not orig_score.parts:

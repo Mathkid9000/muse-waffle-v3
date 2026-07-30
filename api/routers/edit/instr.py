@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# Display names + GM MIDI programs, indexed to match INSTR_NAMES in ml/tokenizer.py.
+# Display names + GM MIDI programs, indexed to match INSTR_NAMES in ml/api.py.
 _INSTR_DISPLAY = [
     "Part", "Piano", "Harpsichord", "Organ", "Accordion",
     "Guitar", "Bass Guitar", "Violin", "Viola", "Cello",

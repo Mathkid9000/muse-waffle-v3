@@ -14,31 +14,33 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-def _run_generate(body: GenerateRequest) -> str:
-    from ml.tokenizer import BAR, KEY_OFF, TIME_OFF, TEMPO_OFF
-    from ml.generation_generator import generate_and_export
+def _stream(body: GenerateRequest):
+    from ml.api import generate_stream
 
-    first_bar_prefix = [BAR, KEY_OFF + body.key, TIME_OFF + body.time_sig, TEMPO_OFF + body.tempo]
-
-    logs: list[str] = []
-    result = generate_and_export(
-        instr_indices=body.instruments,
-        first_bar_prefix=first_bar_prefix,
-        target_bars=body.num_bars,
+    return generate_stream(
+        instruments=body.instruments,
+        key=body.key,
+        time_sig=body.time_sig,
+        tempo=body.tempo,
+        num_bars=body.num_bars,
         max_new=body.max_new,
         temperature=body.temperature,
         top_k=body.top_k,
-        log=logs.append,
         device=body.device,
         model_name=body.model_name,
+        log=logger.info,
     )
 
-    xml_path = result.get("xml", "")
-    if not xml_path:
-        raise RuntimeError("Generation failed: " + " | ".join(logs[-5:]))
 
-    with open(xml_path, "r", encoding="utf-8") as f:
-        return f.read()
+def _run_generate(body: GenerateRequest) -> str:
+    # the one-shot endpoint is the streaming one drained: the model has a single way to build a
+    # score, and the last snapshot is the finished one
+    xml = ""
+    for _, xml, _, _ in _stream(body):
+        pass
+    if not xml:
+        raise RuntimeError("Generation failed: the model produced no complete bar")
+    return xml
 
 
 @router.post("/generate", response_model=XmlResponse)
@@ -54,26 +56,12 @@ async def generate(body: GenerateRequest):
 
 @router.post("/generate/stream")
 async def generate_stream(body: GenerateRequest):
-    from ml.tokenizer import BAR, KEY_OFF, TIME_OFF, TEMPO_OFF
-    from ml.generation_generator import generate_and_stream
-
-    first_bar_prefix = [BAR, KEY_OFF + body.key, TIME_OFF + body.time_sig, TEMPO_OFF + body.tempo]
-
     loop = asyncio.get_running_loop()
     q: asyncio.Queue = asyncio.Queue()
 
     def run():
         try:
-            for bar, xml, total, num_instr in generate_and_stream(
-                instr_indices=body.instruments,
-                first_bar_prefix=first_bar_prefix,
-                target_bars=body.num_bars,
-                max_new=body.max_new,
-                temperature=body.temperature,
-                top_k=body.top_k,
-                device=body.device,
-                model_name=body.model_name,
-            ):
+            for bar, xml, total, num_instr in _stream(body):
                 asyncio.run_coroutine_threadsafe(q.put(("data", bar, xml, total, num_instr)), loop).result()
             asyncio.run_coroutine_threadsafe(q.put(("done",)), loop).result()
         except Exception as e:

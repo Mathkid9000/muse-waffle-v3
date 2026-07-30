@@ -41,57 +41,34 @@ def _ordinal_to_measure_numbers(score, start: int, end: int) -> tuple[int, int]:
     return at(start), at(end)
 
 
-def _mark_measures_empty(score, start: int, end: int, parts: list[int] | None = None) -> None:
-    """Replace note content in [start, end] with a hidden rest; preserve time/key/tempo.
+def _stream(body: InfillRequest):
+    from ml.api import infill_stream
 
-    If *parts* is given, only those 0-indexed part indices are blanked; the rest keep
-    their content so the model can use them as cross-staff context.
-    """
-    import music21 as m21
-
-    _structural = (m21.key.KeySignature, m21.meter.TimeSignature, m21.tempo.MetronomeMark, m21.clef.Clef)
-    for idx, part in enumerate(score.parts):
-        if parts is not None and idx not in parts:
-            continue
-        for measure in part.getElementsByClass(m21.stream.Measure):
-            m_num = measure.number if measure.number is not None else 0
-            if start <= m_num <= end:
-                keep = [el for el in measure if isinstance(el, _structural)]
-                measure.elements = []
-                rest = m21.note.Rest(quarterLength=4)
-                rest.style.hideObjectOnPrint = True
-                measure.insert(0, rest)
-                for el in keep:
-                    measure.insert(el.offset, el)
+    # measures go over as the ordinals the frontend selected: the model reads the score as a
+    # stream of bars, so the Nth rendered measure is the Nth bar of that stream and no translation
+    # through music21's numbering (which _ordinal_to_measure_numbers does for the edit endpoints)
+    # is needed here
+    return infill_stream(
+        xml_str=body.xml,
+        start_measure=body.start_measure,
+        end_measure=body.end_measure,
+        parts=body.parts,
+        temperature=body.temperature,
+        top_k=body.top_k,
+        device=body.device,
+        model_name=body.model_name,
+        log=logger.info,
+    )
 
 
 def _run_infill(body: InfillRequest) -> str:
-    import music21 as m21
-    from ml.infill_generator import infill_and_export
-
-    score = m21.converter.parseData(body.xml, format="musicxml")
-    start, end = _ordinal_to_measure_numbers(score, body.start_measure, body.end_measure)
-    _mark_measures_empty(score, start, end, body.parts)
-
-    logs: list[str] = []
-    result = infill_and_export(
-        score=score,
-        model_name=body.model_name,
-        max_new=500,
-        temperature=body.temperature,
-        top_k=body.top_k,
-        log=logs.append,
-        device=body.device,
-        gaps=[(start, end)],
-        target_parts=body.parts,
-    )
-
-    xml_path = result.get("xml", "")
-    if not xml_path:
-        raise RuntimeError("Infill failed: " + " | ".join(logs[-5:]))
-
-    with open(xml_path, "r", encoding="utf-8") as f:
-        return f.read()
+    # the one-shot endpoint is the streaming one drained; the last snapshot is the filled score
+    xml = ""
+    for _, xml, _ in _stream(body):
+        pass
+    if not xml:
+        raise RuntimeError("Infill failed: the model produced no complete bar")
+    return xml
 
 
 @router.post("/infill", response_model=XmlResponse)
@@ -107,27 +84,12 @@ async def infill(body: InfillRequest):
 
 @router.post("/infill/stream")
 async def infill_stream(body: InfillRequest):
-    import music21 as m21
-    from ml.infill_generator import infill_and_stream
-
     loop = asyncio.get_running_loop()
     q: asyncio.Queue = asyncio.Queue()
 
     def run():
         try:
-            score = m21.converter.parseData(body.xml, format="musicxml")
-            start, end = _ordinal_to_measure_numbers(score, body.start_measure, body.end_measure)
-            _mark_measures_empty(score, start, end, body.parts)
-            for bar, xml, total in infill_and_stream(
-                score=score,
-                model_name=body.model_name,
-                max_new=500,
-                temperature=body.temperature,
-                top_k=body.top_k,
-                device=body.device,
-                gaps=[(start, end)],
-                target_parts=body.parts,
-            ):
+            for bar, xml, total in _stream(body):
                 asyncio.run_coroutine_threadsafe(q.put(("data", bar, xml, total)), loop).result()
             asyncio.run_coroutine_threadsafe(q.put(("done",)), loop).result()
         except Exception as e:

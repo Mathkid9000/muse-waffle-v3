@@ -14,27 +14,29 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-def _run_append(body: AppendRequest) -> str:
-    from ml.append_generator import append_and_export
+def _stream(body: AppendRequest):
+    from ml.api import append_stream
 
-    logs: list[str] = []
-    result = append_and_export(
+    return append_stream(
         xml_str=body.xml,
         num_bars=body.num_bars,
         max_new=body.max_new,
         temperature=body.temperature,
         top_k=body.top_k,
-        log=logs.append,
         device=body.device,
         model_name=body.model_name,
+        log=logger.info,
     )
 
-    xml_path = result.get("xml", "")
-    if not xml_path:
-        raise RuntimeError("Append generation failed: " + " | ".join(logs[-5:]))
 
-    with open(xml_path, "r", encoding="utf-8") as f:
-        return f.read()
+def _run_append(body: AppendRequest) -> str:
+    # the one-shot endpoint is the streaming one drained; the last snapshot is the finished score
+    xml = ""
+    for _, xml, _ in _stream(body):
+        pass
+    if not xml:
+        raise RuntimeError("Append generation failed: the model produced no complete bar")
+    return xml
 
 
 @router.post("/append", response_model=XmlResponse)
@@ -50,22 +52,12 @@ async def append(body: AppendRequest):
 
 @router.post("/append/stream")
 async def append_stream(body: AppendRequest):
-    from ml.append_generator import append_and_stream
-
     loop = asyncio.get_running_loop()
     q: asyncio.Queue = asyncio.Queue()
 
     def run():
         try:
-            for bar, xml, total in append_and_stream(
-                xml_str=body.xml,
-                num_bars=body.num_bars,
-                max_new=body.max_new,
-                temperature=body.temperature,
-                top_k=body.top_k,
-                device=body.device,
-                model_name=body.model_name,
-            ):
+            for bar, xml, total in _stream(body):
                 asyncio.run_coroutine_threadsafe(q.put(("data", bar, xml, total)), loop).result()
             asyncio.run_coroutine_threadsafe(q.put(("done",)), loop).result()
         except Exception as e:
