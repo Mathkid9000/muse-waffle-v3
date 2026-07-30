@@ -68,8 +68,9 @@ export async function promptAnthropic(prompt: string, xml: string, pushCallback:
         ...toolTypes
             .map(t => getPromptContext(t, xml))
             .filter((c): c is string => !!c),
-        READ_SCORE_HINT,
+        READ_SCORE_HINT(selection),
     ].join("\n\n");
+    console.log(READ_SCORE_HINT(selection, xml))
 
     // Stage 2 — an agentic read → edit loop. tool_choice "auto" lets Claude either call
     // read_score (to gather context we didn't pre-send) or emit the edit tool calls.
@@ -603,11 +604,13 @@ function countMeasures(xml: string): number {
 }
 
 // Extra line appended to the stage-2 system prompt telling Claude the read tool exists.
-const READ_SCORE_HINT = [
+const READ_SCORE_HINT = (selection, xml) => [
     "Call read_score FIRST whenever needed information was not given —",
-    "Ex: locating the measure where something happens (\"where the key changes to D major\"),",
-    "or acting on the user's on-screen selection (\"the selected staff\", \"here\"). If no location if given, use the selection. ",
-    "If all staves are seleced, apply to all staves. If a range is selected and only one measure is allowed, use to start of the range per each staff selected. Request only the aspects you need.",
+    "Ex: locating the measure where something happens (\"where the key changes to D major\").",
+    "If the user's request requires on-screen selection (\"the selected staff\", \"here\"), or if no location if given, use the selection. ",
+    "If all staves are seleced, apply to all staves. If a range is selected and only one measure is allowed, use to start of the range per each staff selected. ", 
+    "The user's selection is: " + getReadResults([ 'selection' ], xml, selection),
+    "Request only the aspects you need.",
     "Once you have enough information, emit the edit tool call(s) and stop calling read_score.",
 ].join(" ");
 

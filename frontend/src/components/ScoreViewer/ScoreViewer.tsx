@@ -200,6 +200,7 @@ export default function ScoreViewer() {
     const inner = innerRef.current
     if (!inner) return
     inner.querySelectorAll('.mw-sel').forEach((el) => el.remove())
+    inner.querySelectorAll(`.${styles.promptButton}`).forEach((el) => el.remove())
     if (!selection) return
 
     const ns = 'http://www.w3.org/2000/svg'
@@ -228,24 +229,40 @@ export default function ScoreViewer() {
       const g = measures[m - pageMeta.offsets[pageIdx] - 1]
       if (!g) continue
 
+      // type something button
       if (m == selection.start) {
+        const promptContainer = document.createElement('div')
+        promptContainer.className = styles.promptContainer
+        promptContainer.addEventListener('mousedown', (e) => e.stopPropagation())
+        const promptInput = document.createElement('textarea')
+        promptInput.placeholder = "Type something..."
+        promptInput.className = styles.promptInput
+        promptInput.rows = 1
+        promptContainer.appendChild(promptInput)
         const promptButton = document.createElement('button')
-        promptButton.textContent = "Type something..."
-
-        const bb = g.getBBox()
-        const point = pageEl.querySelector('svg')!.createSVGPoint()
-        point.x = bb.x
-        point.y = bb.y
-        const matrix = g.getScreenCTM()
-        const viewportPos = point.matrixTransform(matrix!)
-        const rootMatrix = pageEl.querySelector('svg')!.getScreenCTM()?.inverse()
-        const svgPos = viewportPos.matrixTransform(rootMatrix)
-
-        promptButton.style = `top: ${svgPos.y + 50}px; left: ${svgPos.x + parseFloat(pageEl.style.left.replace('px', ''))}px`
+        promptButton.textContent = 'go'
         promptButton.className = styles.promptButton
+        promptContainer.appendChild(promptButton)
+        promptButton.onclick = () => {
+          console.log()
+        }
 
-        pageEl.appendChild(promptButton)
-        console.log(g, pageEl, pageEl.style.left)
+        const svg = pageEl.querySelector('svg') as SVGSVGElement | null
+        if (svg) {
+          const bb = g.getBBox()
+          const ctm = g.getScreenCTM()
+          if (ctm) {
+            const pt = svg.createSVGPoint()
+            pt.x = bb.x
+            pt.y = bb.y
+            const screenPt = pt.matrixTransform(ctm)
+            const pageRect = pageEl.getBoundingClientRect()
+            const z = zoomRef.current / 100
+            promptContainer.style.cssText = `top: ${(screenPt.y - pageRect.top) / z - 60}px; left: ${(screenPt.x - pageRect.left) / z}px`
+          }
+        }
+
+        pageEl.appendChild(promptContainer)
       }
 
       try {

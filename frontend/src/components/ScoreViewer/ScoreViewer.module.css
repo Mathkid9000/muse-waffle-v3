@@ -31,6 +31,7 @@
 /* Each page fills the viewport height (minus padding) and keeps its aspect ratio,
    so a whole page fits vertically and is vertically centered by align-items. */
 .page {
+  position: relative;
   height: 100%;
   padding: 100px 0;
   background: #fff;
@@ -85,8 +86,36 @@
   font-size: 14px;
 }
 
-.promptButton {
+.promptContainer {
   position: absolute;
-  width: 150px;
-  height: 30px
+  width: 270px;
+  height: fit-content;
+  min-height: 40px;
+  font-size: 19px;
+  pointer-events: auto;
+  display: flex;
+  flex-direction: row;
+}
+
+.promptInput {
+  position: relative;
+  width: calc(100% - 40px);
+  height: fit-content;
+  min-height: 40px;
+  top: 0;
+  left: 0;
+  padding: 10px;
+  font: inherit;
+  pointer-events: auto;
+  field-sizing: content;
+  resize: none;
+}
+
+.promptButton {
+  position: relative;
+  width: 40px;
+  top: 0;
+  left: 0;
+  font: inherit;
+  padding: 5px;
 }
