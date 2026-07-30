@@ -1,10 +1,10 @@
 from __future__ import annotations
-import music21, os, math, json, re, itertools, sys
+import music21, os, math, json, re, itertools, gzip, zlib, zipfile
 from concurrent.futures import ProcessPoolExecutor
 from dotenv import load_dotenv
 import numpy as np
 from tqdm import tqdm
-from helpers import STORAGE_DIR, DATA_DIR, DATASET_PATH, VOCAB_LIST_PATH, VOCAB_LIST_PLOT_PATH
+from helpers import STORAGE_DIR, DATA_DIR, DATASET_PATH, VOCAB_LIST_PATH, VOCAB_LIST_PLOT_PATH, TOKEN_CACHE_DIR
 
 # params
 SUBDIVISIONS_PER_QUARTER = 24
@@ -32,32 +32,152 @@ def tokenize_file(path):
         return None, f'{type(e).__name__}: {e}'
 
 
+def score_files():
+    return [ f
+             for dataset in ('openscore', 'pdmx')
+             for f in (DATA_DIR / dataset).iterdir()
+             if f.is_file() and f.suffix == '.mxl' ]
+
+
+def score_name(file):
+    return f'{file.parent.name}/{file.name}'
+
+
 def preprocess_dataset(workers=None):
-    openscore_path = DATA_DIR / "openscore"
-    pdmx_path = DATA_DIR / "pdmx"
-    openscore_files = [ f for f in openscore_path.iterdir() if f.is_file() and f.suffix == ".mxl" ]
-    pdmx_files = [ f for f in pdmx_path.iterdir() if f.is_file() and f.suffix == ".mxl" ]
-    files = openscore_files + pdmx_files
+    # two stages, because parsing the full PDMX takes longer than a remote session lasts: stage one
+    # parses scores to token text in a resumable on-disk cache, stage two turns that cache into
+    # vocab.json + data.npz. Rerunning is always safe -- stage one picks up where it left off and
+    # stage two is a few minutes over the finished cache. Delete TOKEN_CACHE_DIR to force a reparse.
+    files = score_files()
+    tokenize_to_cache(files, workers)
+    build_dataset_from_cache()
 
-    # build vocab. Scores are independent, so this is pure fan-out; the chunksize keeps the pool from
-    # paying a task round trip per file, and the big scores are spread out rather than bunched.
+
+# ---------------------------------------------------------------- stage 1: parse -> token cache
+
+CACHE_SHARD_SCORES = 20000   # scores per shard; a shard is closed and never touched again
+CACHE_FLUSH_SCORES = 500     # scores between flushes, ie. the most work a kill -9 can cost
+
+
+def shard_paths():
+    """Every shard's token text, oldest first. Shards are enumerated from the directory rather than
+    from a count, so a hand-deleted shard just drops out instead of shifting what the others mean."""
+    return sorted(TOKEN_CACHE_DIR.glob('shard_*.tsv.gz'))
+
+
+def sidecar_path(data_path):
+    # the data shard holds the token text; the sidecar lists the names it contains, so a resume can
+    # tell what is done without decompressing (and reparsing) gigabytes of shard
+    return data_path.with_name(data_path.name.replace('.tsv.gz', '.names'))
+
+
+def open_shard():
+    """A fresh, empty shard, numbered past every shard already there."""
+    used = [ int(re.search(r'\d+', p.name).group()) for p in shard_paths() ]
+    data_path = TOKEN_CACHE_DIR / f'shard_{max(used, default=-1) + 1:03d}.tsv.gz'
+    return (gzip.open(data_path, 'wt', encoding='utf-8', newline='\n', compresslevel=1),
+            open(sidecar_path(data_path), 'w', encoding='utf-8', newline='\n'))
+
+
+def cached_names():
+    """Every score already parsed (or already known unparseable), by dir/file name."""
+    names = set()
+    for data_path in shard_paths():
+        sidecar = sidecar_path(data_path)
+        if sidecar.exists():
+            # splitlines, not split: plenty of scores have spaces in their filenames
+            names |= set(sidecar.read_text(encoding='utf-8').splitlines())
+    return names
+
+
+def tokenize_to_cache(files, workers=None):
+    """Parse every score missing from the token cache and append its rows to the current shard.
+    Scores are independent, so this is pure fan-out; the chunksize keeps the pool from paying a task
+    round trip per file, and the big scores are spread out rather than bunched."""
+    TOKEN_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    done = cached_names()
+    # names carry the '!' prefix for failures, which is not part of any file's name; comparing the
+    # stripped form means a score that failed to parse last run is not retried on this one
+    todo = [ f for f in files if score_name(f) not in done and f'!{score_name(f)}' not in done ]
+    print(f'Token cache holds {len(done)}/{len(files)} scores; tokenizing the remaining {len(todo)}')
+    if not todo: return
+
     workers = workers or max(1, (os.cpu_count() or 2) - 1)
-    token_seqs, names = [], []
-    failures = 0
-    with ProcessPoolExecutor(max_workers=workers) as pool:
-        # map preserves input order, so zipping the results back onto files pairs each
-        # sequence with the score it came from
-        for file, (seq, err) in tqdm(zip(files, pool.map(tokenize_file, files, chunksize=8)), "Processing...", total=len(files)):
-            if err is not None:
-                failures += 1
-                continue
-            # every distinct token appears millions of times across the corpus, but each worker
-            # pickles its own copy of every string; interning collapses them back to one object
-            names.append(f'{file.parent.name}/{file.name}')
-            token_seqs.append([ tuple(map(sys.intern, quint)) for quint in seq ])
-    print(f'Tokenized {len(token_seqs)}/{len(files)} scores ({failures} skipped)')
+    written, pending = 0, []
+    # a resumed run starts a fresh shard rather than reopening the last one, so a shard is only ever
+    # written by the process that created it (its length is bookkeeping, not something to preserve)
+    data, names = open_shard()
+    try:
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            # map preserves input order, so zipping the results back onto files pairs each
+            # sequence with the score it came from
+            for file, (seq, err) in tqdm(zip(todo, pool.map(tokenize_file, todo, chunksize=8)), 'Tokenizing...', total=len(todo)):
+                name = score_name(file)
+                if err is None:
+                    # written straight through instead of accumulated: 20k scores of token text is
+                    # several GB of python strings, and holding them only to write them at the
+                    # checkpoint would make the checkpoint interval a memory limit
+                    data.write(f'#{name}\n' + ''.join('\t'.join(quint) + '\n' for quint in seq))
+                pending.append(name if err is None else f'!{name}')
+                written += 1
+                if len(pending) >= CACHE_FLUSH_SCORES:
+                    flush_shard(data, names, pending)
+                if written >= CACHE_SHARD_SCORES:
+                    flush_shard(data, names, pending)
+                    data.close(); names.close()
+                    data, names, written = *open_shard(), 0
+    finally:
+        flush_shard(data, names, pending)
+        data.close(); names.close()
+    print(f'Token cache now holds {len(cached_names())} scores')
 
-    vocab = build_vocab_list(token_seqs, plot=True)
+
+def flush_shard(data, names, pending):
+    # rows first, then the sidecar, never the other way round: a crash in between leaves rows that no
+    # sidecar claims, which the next run simply parses again, whereas naming them first would mark
+    # them done while their rows were still sitting in a buffer and lose them for good
+    if not pending: return
+    data.flush()
+    names.write(''.join(f'{name}\n' for name in pending))
+    names.flush()
+    pending.clear()
+
+
+def iter_token_cache():
+    """Yields (name, [(tok, tok, tok, tok, tok), ...]) for every score in the cache, in shard order."""
+    for data_path in shard_paths():
+        sidecar = sidecar_path(data_path)
+        if not sidecar.exists(): continue
+        # only scores the sidecar claims are read back: a shard the killed run never closed ends in a
+        # half-written score, and dropping it here is what keeps the cache's two halves in step. The
+        # claimed names are exactly the ones whose rows were flushed before the sidecar named them,
+        # and everything unclaimed is what the next run reparses.
+        claimed = set(sidecar.read_text(encoding='utf-8').splitlines())
+        name, seq = None, []
+        try:
+            with gzip.open(data_path, 'rt', encoding='utf-8') as f:
+                for line in f:
+                    # a row cut off mid-write is the one row with no newline after it, and it can end
+                    # mid-token ('VOI' for 'VOICE_0') without looking short, so stop rather than parse
+                    if not line.endswith('\n'): break
+                    if line.startswith('#'):
+                        if name in claimed: yield name, seq
+                        name, seq = line[1:-1], []
+                    else:
+                        seq.append(tuple(line[:-1].split('\t')))
+        except (EOFError, OSError, zlib.error) as e:
+            # the same unclosed shard, now hitting the missing gzip trailer
+            print(f'{data_path.name}: truncated ({type(e).__name__}), keeping the scores read so far')
+        if name in claimed: yield name, seq
+
+
+# ---------------------------------------------------------------- stage 2: token cache -> dataset
+
+def build_dataset_from_cache():
+    """Vocab + data.npz from the token cache. Streams it twice rather than holding the corpus in
+    memory: the shards are the copy of record, so nothing has to be kept between the passes."""
+    counts, names = count_tokens(iter_token_cache())
+    vocab = build_vocab_list(counts, plot=True)
     # only the original key is stored; the dataset transposes on load, so the vocab still has to
     # carry every shifted token (appending keeps the ids of everything already in it)
     for head in vocab:
@@ -68,8 +188,41 @@ def preprocess_dataset(workers=None):
     # the val split is persisted as a list of these names, so re-preprocessing with a different
     # corpus can never silently re-point the split at different scores the way indices would
     lookup = build_vocab_lookup(vocab)
-    tokenized = [ tokenize_text_to_ids(seq, vocab, lookup) for seq in token_seqs ]
-    np.savez(DATASET_PATH, **{ name: np.array(ids, dtype=np.int64) for name, ids in zip(names, tokenized) })
+    seen, stored, events = { name: 0 for name in names }, 0, 0
+    tmp = DATASET_PATH.with_name(DATASET_PATH.name + '.tmp')
+    # np.savez in all-arrays-at-once form would hold the whole encoded corpus (~8 GB on full PDMX)
+    # alongside the file it is writing; the archive it produces is just uncompressed .npy members,
+    # so writing them one at a time keeps only one score resident and leaves data.npz identical.
+    # It lands under a temp name so an interrupted stage 2 cannot leave a half-written data.npz
+    with zipfile.ZipFile(tmp, 'w', zipfile.ZIP_STORED, allowZip64=True) as archive:
+        for name, seq in tqdm(iter_token_cache(), 'Encoding...', total=len(names)):
+            seen[name] += 1
+            # a name in the cache twice (two preprocess runs at once, say) would otherwise become two
+            # archive members under one key, of which np.load would show whichever it happened to
+            # index; keeping only the last copy is the same rule stage 1's resume follows
+            if seen[name] < names[name]: continue
+            # a score that tokenized to nothing would be saved as a (0,) array rather than (0,5),
+            # which every consumer indexes as (N,5); it has no events to train on either way
+            if not seq: continue
+            ids = np.array(tokenize_text_to_ids(seq, vocab, lookup), dtype=np.int64)
+            stored, events = stored + 1, events + len(ids)
+            with archive.open(f'{name}.npy', 'w', force_zip64=True) as member:
+                np.lib.format.write_array(member, ids, allow_pickle=False)
+    os.replace(tmp, DATASET_PATH)
+    print(f'Wrote {DATASET_PATH.name}: {stored} scores, {events} events, vocab heads {[ len(head) for head in vocab ]}')
+
+
+def count_tokens(cache):
+    """One pass over the cache: how often each token appears per field, and how many times each
+    score name appears (so the encode pass can tell a superseded copy from the one to keep)."""
+    counts = [{}, {}, {}, {}, {}]
+    names = {}
+    for name, seq in tqdm(cache, 'Counting tokens...'):
+        names[name] = names.get(name, 0) + 1
+        for quint in seq:
+            for idx, tok in enumerate(quint):
+                counts[idx][tok] = counts[idx].get(tok, 0) + 1
+    return counts, names
 
 
 def plot_vocab():
@@ -733,35 +886,15 @@ def tokens_to_score(tokens):
     score.write("musicxml", STORAGE_DIR / "output.mxl", makeNotation=True)
 
 
-def build_vocab_list(token_sequences, plot=False):
-    vocab = [[], [], [], [], []]
-    histogram = [{}, {}, {}, {}, {}]
-    for seq in token_sequences:
-        for quint_tok in seq:
-            for idx, tok in enumerate(quint_tok):
-                # membership is checked against the histogram, not the list: `tok not in vocab[idx]`
-                # is a linear scan of the whole head on every one of the corpus's ~20M tokens
-                if tok not in histogram[idx]:
-                    vocab[idx].append(tok)
-                    histogram[idx][tok] = 0
-                histogram[idx][tok] += 1
-
-    # plot freqs
+def build_vocab_list(counts, plot=False):
+    """One head per field, ids in order of first appearance in the corpus. `counts` is count_tokens'
+    per-field token -> occurrences, which is already keyed by every token there is."""
+    # the frequencies are only ever plotted, and plotting cannot happen during a headless remote
+    # preprocess run, so they are saved for plot_vocab() to draw later instead of drawn here
     if plot:
-        import matplotlib.pyplot as plt
-        fig, axs = plt.subplots(2, 3, figsize=(12, 8), layout='constrained')
-        for idx, histo in enumerate(histogram):
-            pairs = sorted(zip(histo.keys(), histo.values()), key=lambda x: x[0], reverse=True)
-            keys, values = zip(*pairs)
-            axs[idx % 2, idx // 2].bar(keys, values, color=['red', 'orange', 'lime', 'cyan', 'violet'][idx], edgecolor='black')
-            axs[idx % 2, idx // 2].tick_params(axis='x', rotation=90)
-            axs[idx % 2, idx // 2].set_title(f"HEAD {idx + 1}")
-        axs[1,2].hist([ len(seq) for seq in token_sequences ], bins=200, edgecolor='black', color='yellow')
-        plt.tight_layout()
-        plt.show()
         with open(VOCAB_LIST_PLOT_PATH, 'w') as f:
-            json.dump(histogram, f)
-    return vocab
+            json.dump(counts, f)
+    return [ list(head) for head in counts ]
 
 
 def save_vocab_list(vocab):

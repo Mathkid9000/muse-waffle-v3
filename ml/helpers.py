@@ -11,6 +11,7 @@ CHECKPOINT_DIR = STORAGE_DIR / 'checkpoints'
 VOCAB_LIST_PATH = STORAGE_DIR / 'vocab.json'
 VOCAB_LIST_PLOT_PATH = STORAGE_DIR / 'vocab_plot.json'
 DATASET_PATH = STORAGE_DIR / 'data.npz'
+TOKEN_CACHE_DIR = STORAGE_DIR / 'tokens'   # parsed-but-not-yet-encoded token text, in shards
 
 # Params
 SEQ_LEN = 2048
