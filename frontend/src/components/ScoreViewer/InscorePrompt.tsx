@@ -168,12 +168,6 @@ promptButton.onclick = (e) => {
 const TEST_OBJ = JSON.parse(`
 [
     {
-        "title": "-----------------",
-        "input": "",
-        "tokensIn": 0,
-        "tokensOut": 0
-    },
-    {
         "title": "Beginning prompt...",
         "input": "Change key to F#minor",
         "tokensIn": 0,
@@ -236,11 +230,13 @@ export default function InscorePrompt({ getXml, getSelection, setXml }: InscoreP
     const [ promptState, setPromptState ] = useState<('input' | 'eval' | 'done')>('input')
     const [ promptThoughtProcess, setPromptThoughtProcess ] = useState<ThoughtProcessEvent[]>([]) 
     const [ promptStatus, setPromptStatus ] = useState<string>('') 
+    const [ currentPrompt, setCurrentPrompt ] = useState<string>('') 
 
     function handleSubmit(prompt: string | null) {
         if (!prompt) return
 
         console.log(prompt)
+		setCurrentPrompt(prompt)
         setInscorePrompt(null)
         setPromptState('eval')
 
@@ -307,7 +303,8 @@ export default function InscorePrompt({ getXml, getSelection, setXml }: InscoreP
                     </button>
                 </>
             ) : (
-                <>
+                <div style={{ display: 'block' }}>
+					<div className={styles.thoughtPanelTitle}>{currentPrompt}</div>
                     <div className={styles.thoughtPanel}>
                         {
                             promptThoughtProcess.map(event => (
@@ -320,7 +317,7 @@ export default function InscorePrompt({ getXml, getSelection, setXml }: InscoreP
                             ))
                         }
                     </div>
-                </>
+                </div>
             )}
         </div>
     )
