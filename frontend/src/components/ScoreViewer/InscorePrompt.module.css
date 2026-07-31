@@ -1,6 +1,6 @@
 .promptContainer {
   position: absolute;
-  width: 270px;
+  width: fit-content;
   height: fit-content;
   min-height: 40px;
   font-size: 19px;
@@ -15,7 +15,7 @@
 
 .promptInput {
   position: relative;
-  width: 100%;
+  width: 270px;
   height: fit-content;
   min-height: 40px;
   top: 0;
@@ -53,8 +53,9 @@
 }
 
 .thoughtPanel {
-  padding: 10px;
+  padding: 10px 0;
   display: block;
+  width: 400px;
 }
 
 .thoughtPanelTitle {
@@ -65,17 +66,19 @@
   position: relative;
   left: 0;
   top: 0;
-  padding: 10px 20px;
+  padding: 10px 10px;
 }
 
 .thoughtContainer {
   margin-bottom: 10px;
+  background: rgba(240, 240, 242)
 }
 
 .thoughtTitle {
   font-size: 19px;
   display: block;
-  font-weight: 600
+  font-weight: 600;
+  padding: 10px 20px;
 }
 
 .thoughtText {
@@ -84,4 +87,26 @@
   display: block;
   line-height: 15px;
   white-space: pre-line
+}
+
+.loading:after {
+  overflow: hidden;
+  display: inline-block;
+  vertical-align: bottom;
+  -webkit-animation: ellipsis steps(4, end) 900ms infinite;
+  animation: ellipsis steps(4, end) 900ms infinite;
+  content: "\2026";
+  width: 0px;
+}
+
+@keyframes ellipsis {
+  to {
+    width: 40px;
+  }
+}
+
+@-webkit-keyframes ellipsis {
+  to {
+    width: 40px;
+  }
 }

@@ -165,7 +165,7 @@ promptButton.onclick = (e) => {
 
 */
 
-const TEST_OBJ = JSON.parse(`
+const TEST_OBJ = 
 [
     {
         "title": "Beginning prompt...",
@@ -181,7 +181,7 @@ const TEST_OBJ = JSON.parse(`
     },
     {
         "title": "Queried for key_signature...",
-        "input": "Key signature by measure (1-based; listed at m1 and every change):whole score: m1=2 flats, m4=3 flats",
+        "input": "Key signature by measure (1-based; listed at m1 and every change):\nwhole score: m1=2 flats, m4=3 flats",
         "tokensIn": 541,
         "tokensOut": 30.5
     },
@@ -209,8 +209,7 @@ const TEST_OBJ = JSON.parse(`
         "tokensIn": 0,
         "tokensOut": 0
     }
-]
-    `) as ThoughtProcessEvent[]
+] as ThoughtProcessEvent[]
 
 interface ThoughtProcessEvent {
   title: string
@@ -307,14 +306,15 @@ export default function InscorePrompt({ getXml, getSelection, setXml }: InscoreP
 					<div className={styles.thoughtPanelTitle}>{currentPrompt}</div>
                     <div className={styles.thoughtPanel}>
                         {
-                            promptThoughtProcess.map(event => (
-                                <div className={styles.thoughtContainer}>
-                                    <span className={styles.thoughtTitle}>{event.title}</span>
-                                    <span className={styles.thoughtText}>
-                                        {event.input}
-                                    </span>
-                                </div>
-                            ))
+                            promptThoughtProcess.map((event, idx) => {
+                                const isLastAndLoading = idx === promptThoughtProcess.length - 1 //&& promptState === 'done'
+                                const classList = isLastAndLoading ? [styles.thoughtTitle, styles.loading] : [styles.thoughtTitle]
+                                return (
+                                    <div className={styles.thoughtContainer}>
+                                        <span className={classList.join(' ')}>{event.title}</span>
+                                    </div>
+                                )
+                            })
                         }
                     </div>
                 </div>
