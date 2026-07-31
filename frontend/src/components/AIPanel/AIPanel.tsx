@@ -15,36 +15,11 @@ import type {
 
 type Tab = 'infill' | 'generate' | 'append'
 
-const INSTR_NAMES = [
-  'Other', 'Piano', 'Harpsichord', 'Organ', 'Accordion', 'Guitar', 'Bass Guitar',
-  'Violin', 'Viola', 'Cello', 'Double Bass', 'Harp', 'Flute', 'Oboe',
-  'Clarinet', 'Bassoon', 'Saxophone', 'Horn', 'Trumpet', 'Trombone', 'Tuba',
-  'Percussion', 'Timpani', 'Celesta', 'Soprano', 'Mezzo-Soprano', 'Alto',
-  'Tenor', 'Baritone', 'Bass Voice', 'Voice', 'Choir',
-]
 
-const KEY_LABELS = [
-  '6♭', '5♭', '4♭', '3♭', '2♭', '1♭', 'C', '1♯', '2♯', '3♯', '4♯', '5♯', '6♯',
-]
-
-const TIME_SIG_LABELS = ['2/4', '3/4', '4/4', '6/8', '3/8', '12/8']
-
-const TEMPO_LABELS = [
-  '≈20', '≈40', '≈52', '≈63', '≈72', '≈84', '≈96', '≈108',
-  '≈116', '≈126', '≈138', '≈152', '≈168', '≈192', '≈216', '≈256',
-]
 
 // Claude tool string enums → backend indices. Order must match the enums in
 // claudeTools.ts (and the backend index conventions). TIME_SIG_LABELS above already
 // mirrors the time-signature enum, so it doubles as the lookup for new_time.
-const CLEF_ENUM = ['treble', 'bass', 'alto', 'tenor', 'treble8vb', 'treble8va', 'bass8vb']
-const INSTR_ENUM = [
-  'other', 'piano', 'harpsichord', 'organ', 'accordion', 'guitar', 'bass_guitar',
-  'violin', 'viola', 'cello', 'double_bass', 'harp', 'flute', 'oboe', 'clarinet',
-  'bassoon', 'saxophone', 'horn', 'trumpet', 'trombone', 'tuba', 'percussion',
-  'timpani', 'celesta', 'voice_soprano', 'voice_mezzo', 'voice_alto', 'voice_tenor',
-  'voice_baritone', 'voice_bass', 'voice', 'choir',
-]
 
 interface ThoughtProcessEvent {
   title: string

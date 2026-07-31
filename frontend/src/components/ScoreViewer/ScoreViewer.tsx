@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState, useRef } from 'react'
+import { createRoot } from 'react-dom/client'
 import { useVerovio, getSharedToolkit, loadAndGetPageCount } from '../../hooks/useVerovio'
 import { useStore } from '../../store'
 import styles from './ScoreViewer.module.css'
 import AppendBar from './AppendBar'
+import InscorePrompt from './InscorePrompt'
 
 const MEASURE_SEL = 'g.measure'
 const STAFF_SEL = 'g.staff'
@@ -55,6 +57,7 @@ function pageOfMeasure(meta: PageMeta, m: number): number {
 export default function ScoreViewer() {
   const { ready, renderXml } = useVerovio()
   const currentXml = useStore((s) => s.currentXml)
+  const setXml = useStore((s) => s.setXml)
   const scoreData = useStore((s) => s.scoreData)
   const zoom = useStore((s) => s.zoom)
   const panX = useStore((s) => s.panX)
@@ -84,6 +87,20 @@ export default function ScoreViewer() {
   // Per-SVG metadata cache keyed by the SVG string, so unchanged pages (which keep
   // their string identity across streaming updates) are never reparsed.
   const metaCacheRef = useRef<Map<string, PageInfo>>(new Map())
+
+  // The prompt is a single DOM node + React root created once and reused for the
+  // lifetime of ScoreViewer. Each redraw just moves this same node to its new
+  // position instead of destroying/recreating it, so InscorePrompt's internal state
+  // (e.g. the typed-in text) survives redraws.
+  const promptHostRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => resetPromptHost(), [])
+
+  const resetPromptHost = () => {
+    const host = document.createElement('div')
+    createRoot(host).render(<InscorePrompt getXml={() => currentXml!} getSelection={() => selection!} setXml={setXml} />)
+    promptHostRef.current = host
+    return () => host.remove()
+  }
 
   // Per-page measure counts / offsets / aspect ratios. Selection maps a page's local
   // measure indices to global measure numbers via offsets; placeholders size from aspects.
@@ -200,7 +217,7 @@ export default function ScoreViewer() {
     const inner = innerRef.current
     if (!inner) return
     inner.querySelectorAll('.mw-sel').forEach((el) => el.remove())
-    inner.querySelectorAll(`.${styles.promptButton}`).forEach((el) => el.remove())
+    promptHostRef.current?.remove()
     if (!selection) return
 
     const ns = 'http://www.w3.org/2000/svg'
@@ -230,22 +247,8 @@ export default function ScoreViewer() {
       if (!g) continue
 
       // type something button
-      if (m == selection.start) {
-        const promptContainer = document.createElement('div')
-        promptContainer.className = styles.promptContainer
-        promptContainer.addEventListener('mousedown', (e) => e.stopPropagation())
-        const promptInput = document.createElement('textarea')
-        promptInput.placeholder = "Type something..."
-        promptInput.className = styles.promptInput
-        promptInput.rows = 1
-        promptContainer.appendChild(promptInput)
-        const promptButton = document.createElement('button')
-        promptButton.textContent = 'go'
-        promptButton.className = styles.promptButton
-        promptContainer.appendChild(promptButton)
-        promptButton.onclick = () => {
-          console.log()
-        }
+      if (m == selection.start && promptHostRef.current) {
+        const prompt = promptHostRef.current
 
         const svg = pageEl.querySelector('svg') as SVGSVGElement | null
         if (svg) {
@@ -258,11 +261,11 @@ export default function ScoreViewer() {
             const screenPt = pt.matrixTransform(ctm)
             const pageRect = pageEl.getBoundingClientRect()
             const z = zoomRef.current / 100
-            promptContainer.style.cssText = `top: ${(screenPt.y - pageRect.top) / z - 60}px; left: ${(screenPt.x - pageRect.left) / z}px`
+            prompt.style.cssText = `position: absolute; top: ${(screenPt.y - pageRect.top) / z - 10}px; left: ${(screenPt.x - pageRect.left) / z}px`
           }
         }
 
-        pageEl.appendChild(promptContainer)
+        pageEl.appendChild(prompt)
       }
 
       try {
@@ -432,6 +435,7 @@ export default function ScoreViewer() {
     const hit = measureAndStaffAt(e)
     if (hit === null) {
       setSelection(null)
+      resetPromptHost()
       return
     }
     const staffCount = staffCountRef.current

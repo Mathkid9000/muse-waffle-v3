@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { getSharedToolkit } from '../hooks/useVerovio';
 import type { ToolUseBlock } from '@anthropic-ai/sdk/resources';
+import type { MeasureSelection } from '../store';
 
 // Local dev only: the API key is bundled into the client, so never deploy this
 // build publicly — move the call behind the FastAPI backend before sharing.
@@ -26,7 +27,7 @@ export interface ScoreSelection {
 // read can never spin forever (each turn is one API call).
 const MAX_STAGE2_TURNS = 4;
 
-export async function promptAnthropic(prompt: string, xml: string, pushCallback: (title: string, input: string) => void, selection?: ScoreSelection | null): Promise<any> {
+export async function promptAnthropic(prompt: string, xml: string, pushCallback: (title: string, input: string, tokensIn: number, tokensOut: number) => void, selection?: ScoreSelection | null): Promise<any> {
     // Stage 1 — decide which edit tool TYPES the request needs. Cheap: only the tiny
     // trigger_tool schema is sent, and the reply is just a list of tool names.
     const message = await anthropic.messages.create({
@@ -58,7 +59,7 @@ export async function promptAnthropic(prompt: string, xml: string, pushCallback:
     const toolTypes = Array.from(new Set(requested));
     if (toolTypes.length === 0) return [];
 
-    pushCallback(`Selected ${toolTypes.length} tools...`, ' * ' + toolTypes.join('\n * '))
+    pushCallback(`Selected ${toolTypes.length} tools...`, ' * ' + toolTypes.join('\n * '), message.usage.input_tokens, message.usage.output_tokens)
 
     // Build the tool schema + context once per selected type — send only what stage 2 needs.
     // read_score is always offered on top so Claude can look up any OTHER aspect on demand
@@ -68,9 +69,8 @@ export async function promptAnthropic(prompt: string, xml: string, pushCallback:
         ...toolTypes
             .map(t => getPromptContext(t, xml))
             .filter((c): c is string => !!c),
-        READ_SCORE_HINT(selection),
+        READ_SCORE_HINT(selection, xml),
     ].join("\n\n");
-    console.log(READ_SCORE_HINT(selection, xml))
 
     // Stage 2 — an agentic read → edit loop. tool_choice "auto" lets Claude either call
     // read_score (to gather context we didn't pre-send) or emit the edit tool calls.
@@ -94,12 +94,14 @@ export async function promptAnthropic(prompt: string, xml: string, pushCallback:
 
         const toolUses = commandMessage.content.filter((b): b is ToolUseBlock => b.type === "tool_use");
         const reads = toolUses.filter(b => b.name === "read_score");
+        const tokensIn = commandMessage.usage.input_tokens
+        const tokensOut = commandMessage.usage.output_tokens
 
         // No read requested this turn → whatever tool calls came back are the edits. Done.
         if (reads.length === 0) {
             edits = toolUses.map(b => ({ tool: b.name, input: b.input }));
 
-            pushCallback(`Found ${edits.length} edits...`, ' * ' + edits.map(e => e.tool).join('\n * '))
+            pushCallback(`Found ${edits.length} edits...`, ' * ' + edits.map(e => e.tool).join('\n * '), tokensIn, tokensOut)
             console.log(context, commandMessage, edits);
             break;
         }
@@ -109,7 +111,7 @@ export async function promptAnthropic(prompt: string, xml: string, pushCallback:
             const queries = (r.input as { queries?: ReadQuery[] }).queries
             queries?.forEach(query => {
                 const result = getReadResults([ query ], xml, selection)
-                pushCallback(`Queried for ${query}...`, result)
+                pushCallback(`Queried for ${query}...`, result, tokensIn / queries.length, tokensOut / queries.length)
             })
         })
 
@@ -124,7 +126,7 @@ export async function promptAnthropic(prompt: string, xml: string, pushCallback:
         });
     }
 
-    pushCallback(`Thinking complete...`, `${totalInputUsage} in / ${totalOutputUsage} out`)
+    pushCallback(`Thinking complete...`, `${totalInputUsage} in / ${totalOutputUsage} out`, 0, 0)
     return [ edits, totalInputUsage, totalOutputUsage ]
 }
 
@@ -604,12 +606,12 @@ function countMeasures(xml: string): number {
 }
 
 // Extra line appended to the stage-2 system prompt telling Claude the read tool exists.
-const READ_SCORE_HINT = (selection, xml) => [
+const READ_SCORE_HINT = (selection: MeasureSelection, xml: string) => [
     "Call read_score FIRST whenever needed information was not given —",
     "Ex: locating the measure where something happens (\"where the key changes to D major\").",
     "If the user's request requires on-screen selection (\"the selected staff\", \"here\"), or if no location if given, use the selection. ",
     "If all staves are seleced, apply to all staves. If a range is selected and only one measure is allowed, use to start of the range per each staff selected. ", 
-    "The user's selection is: " + getReadResults([ 'selection' ], xml, selection),
+    getReadResults([ 'selection' ], xml, selection),
     "Request only the aspects you need.",
     "Once you have enough information, emit the edit tool call(s) and stop calling read_score.",
 ].join(" ");

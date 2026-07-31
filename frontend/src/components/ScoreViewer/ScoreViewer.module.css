@@ -33,19 +33,19 @@
 .page {
   position: relative;
   height: 100%;
-  padding: 100px 0;
+  padding: 50px 0;
   background: #fff;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6);
   border-radius: 1px;
   flex-shrink: 0;
 }
 
+/* Flexbox does not lay out SVG children — the engraving is centered by re-framing the
+   inner .definition-scale viewBox around the content (see ScoreViewer.tsx). */
 .page svg {
-  display: flex;
+  display: block;
   height: 100%;
   width: 100%;
-  align-items: center;
-  justify-content: center;
 }
 
 /* Empty state: show a blank paper rectangle on the dark canvas */
@@ -84,38 +84,4 @@
   height: 100%;
   color: #aaa;
   font-size: 14px;
-}
-
-.promptContainer {
-  position: absolute;
-  width: 270px;
-  height: fit-content;
-  min-height: 40px;
-  font-size: 19px;
-  pointer-events: auto;
-  display: flex;
-  flex-direction: row;
-}
-
-.promptInput {
-  position: relative;
-  width: calc(100% - 40px);
-  height: fit-content;
-  min-height: 40px;
-  top: 0;
-  left: 0;
-  padding: 10px;
-  font: inherit;
-  pointer-events: auto;
-  field-sizing: content;
-  resize: none;
-}
-
-.promptButton {
-  position: relative;
-  width: 40px;
-  top: 0;
-  left: 0;
-  font: inherit;
-  padding: 5px;
 }
