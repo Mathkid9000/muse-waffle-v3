@@ -1,4 +1,4 @@
-"""POST /api/generate — create a new score from scratch."""
+"""POST /api/generate — create a score from scratch, or generate measures into an existing one."""
 
 from __future__ import annotations
 import asyncio
@@ -18,11 +18,15 @@ def _stream(body: GenerateRequest):
     from ml.api import generate_stream
 
     return generate_stream(
+        xml_str=body.xml,
+        start_measure=body.start_measure,
         instruments=body.instruments,
+        parts=body.parts,
         key=body.key,
         time_sig=body.time_sig,
         tempo=body.tempo,
         num_bars=body.num_bars,
+        overwrite=body.overwrite,
         max_new=body.max_new,
         temperature=body.temperature,
         top_k=body.top_k,

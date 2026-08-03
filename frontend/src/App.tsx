@@ -15,9 +15,6 @@ export default function App() {
           </main>
           <PlaybackBar />
         </div>
-        <aside className={styles.panel}>
-          <AIPanel />
-        </aside>
       </div>
     </div>
   )

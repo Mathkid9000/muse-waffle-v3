@@ -50,14 +50,27 @@ class InfillRequest(BaseModel):
 
 
 class GenerateRequest(BaseModel):
+    xml: str = Field(..., description="MusicXML content as a string")
+
+    @field_validator("xml", mode="before")
+    @classmethod
+    def resolve_xml(cls, v: str) -> str:
+        return _decode_xml(v)
+
+    start_measure: int = Field(..., ge=1, description="First measure of the generated block (inclusive)")
     instruments: list[int] = Field(
-        [1],
-        description="List of instrument indices (0-31, see INSTR_NAMES in ml/api.py)",
+        [],
+        description="Instrument indices (0-31, see INSTR_NAMES in ml/api.py); only read when there is no score yet",
     )
-    key: int = Field(6, ge=0, le=12, description="Key signature index (0=6 flats … 6=C … 12=6 sharps)")
-    time_sig: int = Field(2, ge=0, le=5, description="Time signature index (0=2/4, 1=3/4, 2=4/4, 3=6/8, 4=3/8, 5=12/8)")
-    tempo: int = Field(5, ge=0, le=15, description="Tempo bucket index (0=slowest … 15=fastest)")
+    parts: list[int] | None = Field(
+        None,
+        description="0-indexed staves to generate; None generates all",
+    )
+    key: int | None = Field(None, ge=0, le=12, description="Key signature index (0=6 flats … 6=C … 12=6 sharps); None continues the key already in effect")
+    time_sig: int | None = Field(None, ge=0, le=5, description="Time signature index (0=2/4, 1=3/4, 2=4/4, 3=6/8, 4=3/8, 5=12/8); None continues")
+    tempo: int | None = Field(None, ge=0, le=15, description="Tempo bucket index (0=slowest … 15=fastest); None continues")
     num_bars: int = Field(16, ge=1, le=128)
+    overwrite: bool = Field(False, description="Replace the measures at start_measure instead of inserting in front of them")
     max_new: int = Field(2000, ge=100, le=4096)
     temperature: float = Field(0.9, ge=0.1, le=2.0)
     top_k: int = Field(50, ge=1, le=200)

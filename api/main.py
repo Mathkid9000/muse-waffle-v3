@@ -5,9 +5,14 @@ Run with:
 """
 
 from __future__ import annotations
+import logging
 import os
 import sys
 from pathlib import Path
+
+# without this the routers' own progress lines (and anything ml/ logs below WARNING) go nowhere,
+# since uvicorn only configures its own loggers
+logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(name)s: %(message)s")
 
 from api.routers.edit import clef, time_sig, key_sig, tempo, instr, rm_staff, rm_measure
 

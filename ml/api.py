@@ -12,13 +12,13 @@ keeps working across a retokenize or a retrain without knowing either happened.
 """
 
 from __future__ import annotations
-import threading, zipfile
+import logging, threading, zipfile
 import music21
 from generate import generate_score
 from helpers import STORAGE_DIR
 from model_util import load_model_only
-from tokenizer import (MAX_VOICES, QuintupleTokenizer, canonical_instrument, resolve_bars,
-                       tokenize_score_as_text, tokens_to_score)
+from tokenizer import (MAX_BAR_SKIP, MAX_VOICES, QuintupleTokenizer, canonical_instrument,
+                       resolve_bars, tokenize_score_as_text, tokens_to_score)
 
 DEFAULT_MODEL = 'the-waffler'
 TIME_SIGS = ('2/4', '3/4', '4/4', '6/8', '3/8', '12/8')   # the API's time-signature indices
@@ -111,38 +111,48 @@ def _well_formed(row):
 def _to_xml(rows):
     """MusicXML for a snapshot of rows, or None while it holds nothing renderable yet.
 
-    Staves are trimmed to the leading run that actually has notes: tokens_to_score pairs the Nth
-    INSTR row with the notes of voice N, so a staff the model hasn't played yet -- which early in
-    a stream is most of them -- would otherwise take the whole snapshot down. The extra INSTR rows
-    are dropped rather than the extra voices, since the model writes headers of its own as it goes
-    and they need not arrive in voice order. Staves come back as soon as they get a note.
+    Only the staves that actually have notes are rendered: tokens_to_score pairs the Nth INSTR row
+    with the notes of voice N, so a staff the model hasn't played yet -- which early in a stream is
+    most of them -- would otherwise take the whole snapshot down. The played voices are renumbered
+    onto 0..n-1 and the headers of the silent ones dropped, so a snapshot that happens to hold only
+    voice 1 renders as that one staff instead of as nothing at all. Staves come back, in their own
+    order, as soon as they get a note.
     """
     rows = [ row for row in rows if _well_formed(row) ]
-    voiced = { _voice(row) for row in rows if row[3].startswith('PITCH') }
-    staves = 0
-    while staves in voiced:
-        staves += 1
-    if not staves:
+    voiced = sorted({ _voice(row) for row in rows if row[3].startswith('PITCH') } - { None })
+    if not voiced:
         return None
+    seat = { voice: staff for staff, voice in enumerate(voiced) }
 
     trimmed, headers = [], 0
     for row in rows:
         if row[0].startswith('INSTR'):
+            # headers need not arrive in voice order, so they are matched to voices by position
             headers += 1
-            if headers > staves: continue
-        elif _voice(row) is not None and _voice(row) >= staves:
-            continue
+            if headers - 1 not in seat: continue
+        elif _voice(row) is not None:
+            if _voice(row) not in seat: continue
+            row = (*row[:4], f'VOICE_{seat[_voice(row)]}')
         trimmed.append(row)
     rows = trimmed
 
     # tokens_to_score writes the score out itself, so the lock keeps two streams from overwriting
     # each other's file in between the write and the read
     with _render_lock:
-        tokens_to_score(rows)
-        # .mxl is a zip holding the score alongside the container that points at it
-        with zipfile.ZipFile(STORAGE_DIR / 'output.mxl') as archive:
-            score = [ n for n in archive.namelist() if not n.startswith('META-INF') ]
-            return archive.read(score[0]).decode('utf-8')
+        try:
+            tokens_to_score(rows)
+            # .mxl is a zip holding the score alongside the container that points at it
+            with zipfile.ZipFile(STORAGE_DIR / 'output.mxl') as archive:
+                score = [ n for n in archive.namelist() if not n.startswith('META-INF') ]
+                return archive.read(score[0]).decode('utf-8')
+        except Exception:
+            # a snapshot the decoder chokes on costs one frame of the stream rather than the whole
+            # run, but it is never nothing: say what broke and leave the rows behind to look at
+            (STORAGE_DIR / 'failed_rows.txt').write_text('\n'.join(map(str, rows)), encoding='utf-8')
+            logging.getLogger(__name__).error(
+                'Could not render snapshot of %d rows (dumped to storage/failed_rows.txt)',
+                len(rows), exc_info=True)
+            return None
 
 
 # ---------------------------------------------------------------- sampling
@@ -188,44 +198,127 @@ def _instr_token(tokenizer, instr):
     return tok if tok in tokenizer.vocabs[0] else 'INSTR_piano'
 
 
+def _header_rows(key, time_sig, tempo, first='M_SAME'):
+    """The key, time signature and tempo a generated block opens with, `first` being the bar advance
+    that lands them in its first bar. A field left as None emits nothing at all, so it carries on
+    from whatever the prefix already put in effect."""
+    fields = []
+    if key is not None:
+        tonic = (7 * (key - 6)) % 12   # key index 0..12 is 6 flats..6 sharps, ie. a fifth per step
+        fields.append((f'KEY_{tonic}', ''))
+    if time_sig is not None:
+        num, den = TIME_SIGS[time_sig].split('/')
+        fields.append((f'NUM_{num}', f'DEN_{den}'))
+    if tempo is not None:
+        fields.append((f'TEMPO_{tempo}', ''))
+    return [ (first if i == 0 else 'M_SAME', 'POS_0', a, b, '') for i, (a, b) in enumerate(fields) ]
+
+
+def _advance(delta):
+    """The bar token moving `delta` bars on from wherever the prefix left off."""
+    if delta <= 0: return 'M_SAME'
+    if delta == 1: return 'M_NEXT'
+    return f'M_SKIP_{min(delta, MAX_BAR_SKIP)}'
+
+
 def _generate_seed(tokenizer, instruments, key, time_sig, tempo):
     """The rows a score opens with: SOG, one INSTR row per staff, SOS, then the first bar's key,
     time signature and tempo. Seeding the header instead of sampling it keeps the piece on the
     instrumentation that was asked for -- sampled at temperature it wanders through combinations,
     and a run that never emits an INSTR row can't be decoded into a score at all."""
-    num, den = TIME_SIGS[time_sig].split('/')
-    tonic = (7 * (key - 6)) % 12   # key index 0..12 is 6 flats..6 sharps, ie. a fifth per step
-    return [
-        ('SOG', '', '', '', ''),
-        *[ (_instr_token(tokenizer, instr), '', '', '', f'VOICE_{staff}')
-           for staff, instr in enumerate(instruments[:MAX_VOICES]) ],
-        ('SOS', '', '', '', ''),
-        ('M_SAME', 'POS_0', f'KEY_{tonic}', '', ''),
-        ('M_SAME', 'POS_0', f'NUM_{num}', f'DEN_{den}', ''),
-        ('M_SAME', 'POS_0', f'TEMPO_{tempo}', '', ''),
-    ]
+    output = [('SOG', '', '', '', '')]
+    if instruments:
+        output.extend([ (_instr_token(tokenizer, instr), '', '', '', f'VOICE_{staff}')
+           for staff, instr in enumerate(instruments[:MAX_VOICES]) ])
+        output.append(('SOS', '', '', '', ''))
+        output.extend(_header_rows(key, time_sig, tempo))
+
+    return output
 
 
-def generate_stream(instruments, key=6, time_sig=2, tempo=5, num_bars=16, max_new=2000,
-                    temperature=0.9, top_k=50, device='cpu', model_name=DEFAULT_MODEL, log=print):
-    """Stream a new score sampled from scratch.
+def generate_stream(xml_str, start_measure, instruments, parts, key, time_sig, tempo, num_bars,
+                    overwrite=False, max_new=2000, temperature=0.9, top_k=50, device='cpu',
+                    model_name=DEFAULT_MODEL, log=print):
+    """Stream `num_bars` measures generated at `start_measure`, counted from 1 as the frontend
+    renders them.
 
-    Yields (bars finished, MusicXML, bars asked for, staves) once per finished bar.
+    Yields (bars finished, MusicXML, bars asked for, staves) once per finished bar. With no score to
+    work from the whole piece is sampled off a seeded header; otherwise everything before the block
+    is the prefix the model reads, so the generation continues the music instead of starting blind.
+    `overwrite` replaces the measures already sitting in the block; without it those measures are
+    pushed down by `num_bars` and the block is inserted in front of them, keeping their own contents.
+    `parts` narrows the generation to those staves and leaves the rest of the block as it was, the
+    way infill_stream does.
     """
     model, cfg, tokenizer = _load(model_name, device)
-    seed = _generate_seed(tokenizer, instruments, key, time_sig, tempo)
-    staves = sum(1 for row in seed if row[0].startswith('INSTR'))
-    log(f'Generating {num_bars} bars for {staves} staves with {model_name}')
+    rows = _score_rows(xml_str) if xml_str else []
+    start = max(start_measure - 1, 0) if rows else 0
+    end = start + num_bars - 1
+    # a score built from scratch has no staves to leave alone, so the staff list is instrumentation
+    # rather than a filter -- filtering there would only drop the rows that belong to no staff
+    targets = set(parts) if parts and rows else None
 
-    for done, rows in _stream_bars(model, tokenizer, seed, 0, num_bars, max_new,
-                                   temperature, top_k, cfg['max_seq_len']):
-        xml = _to_xml([ *seed, *(row for _, row in rows) ])
+    if not rows:
+        prefix, kept, tail = _generate_seed(tokenizer, instruments, key, time_sig, tempo), [], []
+        if not instruments:
+            # gen instruments
+            max_instr = 20
+            encoded_prefix = _encode(tokenizer, prefix)
+            prefix_ended = False
+            print(prefix)
+            for _ in range(max_instr):
+                encoded_prefix = generate_score(model, tokenizer, encoded_prefix, max_events=len(encoded_prefix) + 1, seq_len=max_instr,
+                    temperature=temperature, top_k=top_k, min_events=len(encoded_prefix) + 1)
+                row = tuple(tokenizer.inv[field][int(tok)] for field, tok in enumerate(encoded_prefix[-1]))
+                prefix.append(row)
+                print(prefix)
+                if row[0] == 'SOS':
+                    prefix_ended = True
+                    break
+            if not prefix_ended:
+                print('Error generating prefix: ', prefix)
+                return
+    else:
+        # the block is cut in resolved-bar space: the relative rows say how far time moves, not
+        # where it is, and the frontend's Nth measure is the Nth bar of the stream either way
+        absolute = resolve_bars(rows)
+        bars = [ int(row[0][2:]) if row[0].startswith('M_') else -1 for row in absolute ]
+
+        # the prefix stays relative (it is what the model reads) and keeps the SOG/INSTR/SOS header,
+        # which carries no bar; everything spliced back in is pinned to its own absolute bar, so it
+        # cannot drift with however many rows the block ends up filling with
+        prefix = [ row for row, bar in zip(rows, bars) if bar < start ]
+        if overwrite:
+            kept = [ row for row, bar in zip(absolute, bars) if start <= bar <= end
+                     and targets is not None and _voice(row) not in targets ]
+            tail = [ row for row, bar in zip(absolute, bars) if bar > end ]
+        else:
+            kept = []
+            tail = [ (f'M_{bar + num_bars}', *row[1:])
+                     for row, bar in zip(absolute, bars) if bar >= start ]
+        prefix = [ *prefix, *_header_rows(key, time_sig, tempo, _advance(start - _last_bar(prefix))) ]
+
+    staves = sum(1 for row in prefix if row[0].startswith('INSTR'))
+    log(f'Generating {num_bars} bars from bar {start} for {staves} staves with {model_name}')
+
+    rendered = 0
+    for done, rows_out in _stream_bars(model, tokenizer, prefix, start, num_bars, max_new,
+                                       temperature, top_k, cfg['max_seq_len']):
+        block = [ (f'M_{bar}', *row[1:]) for bar, row in rows_out
+                  if bar >= start and (targets is None or _voice(row) in targets) ]
+        xml = _to_xml([ *prefix, *block, *kept, *tail ])
         if xml is None: continue
+        rendered += 1
         log(f'Generated bar {done} of {num_bars}')
         yield done, xml, num_bars, staves
 
+    # a run where nothing was renderable used to end like a successful one, leaving the caller with
+    # the score it started with and no reason why
+    if not rendered:
+        raise RuntimeError('Generation produced no renderable bar — try again, or ask for more bars')
 
-def append_stream(xml_str, num_bars=4, max_new=1024, temperature=0.9, top_k=50,
+
+def append_stream(xml_str, staves, num_bars=4, max_new=1024, temperature=0.9, top_k=50,
                   device='cpu', model_name=DEFAULT_MODEL, log=print):
     """Stream `num_bars` new measures onto the end of an existing score.
 

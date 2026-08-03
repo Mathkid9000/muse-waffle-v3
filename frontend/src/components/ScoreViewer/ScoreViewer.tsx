@@ -5,14 +5,21 @@ import { useStore } from '../../store'
 import styles from './ScoreViewer.module.css'
 import AppendBar from './AppendBar'
 import InscorePrompt from './InscorePrompt'
+import { promptAnthropic } from '../../api/claudeTools'
+import { applyClaudeEdit } from '../../api/applyClaudeEdit'
 
 const MEASURE_SEL = 'g.measure'
 const STAFF_SEL = 'g.staff'
 const PAGE_SEL = '[data-page-index]'
+const MARGIN_SEL = 'g.page-margin'
+// Verovio draws the staff lines as the direct <path> children of a g.staff.
+const STAFF_LINE_SEL = ':scope > path'
 
 // Layout constants — must match .pages padding / gap in the CSS module.
-const PAD = 20
+const PAD = 10
 const GAP = 20
+// Padding around a selection band, in unzoomed layout pixels.
+const SEL_PAD_PX = 5
 // Fallback page aspect ratio (width / height) for pages not yet rendered.
 const DEFAULT_ASPECT = 1.4
 
@@ -44,6 +51,67 @@ function svgAspect(doc: Document): number {
     if (p.length === 4 && p[3] > 0) return p[2] / p[3]
   }
   return DEFAULT_ASPECT
+}
+
+/** An axis-aligned box, in whatever space its source coordinates came from. */
+interface Box {
+  x0: number
+  y0: number
+  x1: number
+  y1: number
+}
+
+function unionBox(a: Box | null, b: Box | null): Box | null {
+  if (!a) return b
+  if (!b) return a
+  return {
+    x0: Math.min(a.x0, b.x0),
+    y0: Math.min(a.y0, b.y0),
+    x1: Math.max(a.x1, b.x1),
+    y1: Math.max(a.y1, b.y1),
+  }
+}
+
+/**
+ * The staff rectangle of one measure — bottom staff line to top staff line, spanning exactly
+ * the measure's width — in the page's user space.
+ *
+ * Only the staff lines are measured. Everything that overflows the staff (notes, stems,
+ * ledger lines) is nested deeper inside g.staff, and slurs, ties and hairpins are siblings of
+ * g.staff, so none of them can stretch this box the way g.measure.getBBox() does.
+ * Returns null when nothing is measurable (e.g. the page is not rendered).
+ */
+function staffLinesBox(staffEl: Element): Box | null {
+  let box: Box | null = null
+  for (const line of staffEl.querySelectorAll<SVGGraphicsElement>(STAFF_LINE_SEL)) {
+    try {
+      const b = line.getBBox()
+      box = unionBox(box, { x0: b.x, y0: b.y, x1: b.x + b.width, y1: b.y + b.height })
+    } catch { /* not rendered */ }
+  }
+  return box
+}
+
+/** Same box as staffLinesBox, but in client (screen) pixels. */
+function staffLinesClientBox(staffEl: Element): Box | null {
+  let box: Box | null = null
+  for (const line of staffEl.querySelectorAll<SVGGraphicsElement>(STAFF_LINE_SEL)) {
+    const r = line.getBoundingClientRect()
+    if (r.width === 0 && r.height === 0) continue
+    box = unionBox(box, { x0: r.left, y0: r.top, x1: r.right, y1: r.bottom })
+  }
+  return box
+}
+
+/**
+ * SVG user units per unzoomed layout pixel, so a pixel-sized pad has that size at 100% zoom
+ * and then scales with the camera like the engraving does. getScreenCTM() folds the camera
+ * scale in, so it is divided back out. Returns 0 when the element is not rendered.
+ */
+function userUnitsPerPx(el: SVGGraphicsElement, zoom: number): number {
+  const ctm = el.getScreenCTM()
+  if (!ctm || !ctm.a) return 0
+  return zoom / 100 / ctm.a
 }
 
 /** Page index (0-based) containing 1-based global measure `m`, or -1. */
@@ -97,7 +165,7 @@ export default function ScoreViewer() {
 
   const resetPromptHost = () => {
     const host = document.createElement('div')
-    createRoot(host).render(<InscorePrompt getXml={() => currentXml!} getSelection={() => selection!} setXml={setXml} />)
+    createRoot(host).render(<InscorePrompt getXml={() => useStore.getState().currentXml!} getSelection={() => useStore.getState().selection!} setXml={setXml} />)
     promptHostRef.current = host
     return () => host.remove()
   }
@@ -152,13 +220,14 @@ export default function ScoreViewer() {
     const sTop = panY + z * PAD
     const sBot = panY + z * (PAD + contentH)
     const vOK = sBot >= -viewportH && sTop <= 2 * viewportH
-    const bufX = viewportW
+    const bufX = viewportW * 0.5
     for (let i = 0; i < n; i++) {
       const sL = panX + z * x
       const sR = panX + z * (x + widths[i])
       if (vOK && sR >= -bufX && sL <= viewportW + bufX) set.add(i)
       x += widths[i] + GAP
     }
+    console.log(set)
     return set
   }, [pageMeta, panX, panY, zoom, viewportW, viewportH])
 
@@ -176,7 +245,7 @@ export default function ScoreViewer() {
 
     if (!tk || !streamMode || cachedPagesRef.current.length === 0) {
       // Full render: initial load, not streaming, or cache empty (first streaming event)
-      const allPages = renderXml(currentXml, w * 2.5, 40, scoreData?.numInstruments ?? 1)
+      const allPages = renderXml(currentXml, w * 2.5, 40)
       cachedPagesRef.current = allPages
       setPages(allPages)
       return
@@ -184,7 +253,7 @@ export default function ScoreViewer() {
 
     // Incremental: loadAndGetPageCount applies options + loads data into the shared tk
     const prevCount = cachedPagesRef.current.length
-    const newCount = loadAndGetPageCount(currentXml, w * 2.5, 40, scoreData?.numInstruments ?? 1)
+    const newCount = loadAndGetPageCount(currentXml, w * 2.5, 40)
     if (newCount === 0) return
 
     let startPage: number
@@ -207,10 +276,15 @@ export default function ScoreViewer() {
     }
     cachedPagesRef.current = updated
     setPages([...updated])
+    // the page height comes from the score itself now, so nothing outside these has to be watched
   }, [ready, currentXml, streamMode, redrawNonce])
 
   // Inject selection highlight rects directly into the SVG DOM.
-  // When selection.parts is set, highlight only those staff rows within each measure.
+  // One band per selected staff, drawn from the staff's own staff lines (see staffLinesBox)
+  // and padded by SEL_PAD_PX, so a slur, tie or hairpin leaving the measure never widens it.
+  // Consecutive measures on the same system are merged into a single band, otherwise the
+  // padding of neighbouring measures would overlap and the translucent fill would show a
+  // seam at every barline.
   // Only mounted (visible) pages carry measure elements; measures on off-screen pages
   // are skipped and re-applied by this effect once those pages scroll into view.
   useEffect(() => {
@@ -221,21 +295,47 @@ export default function ScoreViewer() {
     if (!selection) return
 
     const ns = 'http://www.w3.org/2000/svg'
+    // One highlight layer per coordinate-space host (the page margin group), inserted first
+    // so the bands paint behind the engraving. Keeping the rects out of the measure groups
+    // leaves measure/staff geometry untouched for the hit-test and the drag rect cache.
+    const layers = new Map<Element, SVGGraphicsElement>()
 
-    function addRect(parent: SVGGraphicsElement, bb: DOMRect | { x: number; y: number; width: number; height: number }) {
+    function layerFor(host: Element): SVGGraphicsElement {
+      const existing = layers.get(host)
+      if (existing) return existing
+      const layer = document.createElementNS(ns, 'g')
+      layer.setAttribute('class', 'mw-sel')
+      layer.setAttribute('pointer-events', 'none')
+      host.insertBefore(layer, host.firstChild)
+      layers.set(host, layer)
+      return layer
+    }
+
+    function addRect(layer: SVGGraphicsElement, box: Box, pad: number) {
       const rect = document.createElementNS(ns, 'rect')
-      rect.setAttribute('x', String(bb.x))
-      rect.setAttribute('y', String(bb.y))
-      rect.setAttribute('width', String(bb.width))
-      rect.setAttribute('height', String(bb.height))
-      rect.setAttribute('fill', 'rgba(26,115,232,0.18)')
-      rect.setAttribute('stroke', 'rgba(26,115,232,0.7)')
+      rect.setAttribute('x', String(box.x0 - pad))
+      rect.setAttribute('y', String(box.y0 - pad))
+      rect.setAttribute('width', String(box.x1 - box.x0 + 2 * pad))
+      rect.setAttribute('height', String(box.y1 - box.y0 + 2 * pad))
+      rect.setAttribute('fill', 'var(--user-selection)')
       rect.setAttribute('stroke-width', '4')
       rect.setAttribute('class', 'mw-sel')
       rect.setAttribute('pointer-events', 'none')
-      parent.insertBefore(rect, parent.firstChild)
+      layer.appendChild(rect)
     }
 
+    // Resolve each selected measure to its mounted group, dropping the ones whose page is
+    // not currently rendered.
+    interface Cell {
+      measure: number
+      pageEl: HTMLElement
+      measureEl: SVGGraphicsElement
+      /** Coordinate-space host shared by every measure of the page. */
+      host: Element
+      /** Measures of one system are horizontally contiguous; a new system breaks the run. */
+      system: Element | null
+    }
+    const cells: Cell[] = []
     for (let m = selection.start; m <= selection.end; m++) {
       const pageIdx = pageOfMeasure(pageMeta, m)
       if (pageIdx < 0) continue
@@ -243,47 +343,67 @@ export default function ScoreViewer() {
       if (!pageEl) continue
       const measures = pageEl.querySelectorAll<SVGGraphicsElement>(MEASURE_SEL)
       if (measures.length === 0) continue // page not mounted
-      const g = measures[m - pageMeta.offsets[pageIdx] - 1]
-      if (!g) continue
+      const measureEl = measures[m - pageMeta.offsets[pageIdx] - 1]
+      if (!measureEl) continue
+      const host = pageEl.querySelector(MARGIN_SEL) ?? measureEl.parentElement
+      if (!host) continue
+      cells.push({ measure: m, pageEl, measureEl, host, system: measureEl.closest('g.system') })
+    }
 
-      // type something button
-      if (m == selection.start && promptHostRef.current) {
-        const prompt = promptHostRef.current
-
-        const svg = pageEl.querySelector('svg') as SVGSVGElement | null
-        if (svg) {
-          const bb = g.getBBox()
-          const ctm = g.getScreenCTM()
-          if (ctm) {
-            const pt = svg.createSVGPoint()
-            pt.x = bb.x
-            pt.y = bb.y
-            const screenPt = pt.matrixTransform(ctm)
-            const pageRect = pageEl.getBoundingClientRect()
-            const z = zoomRef.current / 100
-            prompt.style.cssText = `position: absolute; top: ${(screenPt.y - pageRect.top) / z - 10}px; left: ${(screenPt.x - pageRect.left) / z}px`
-          }
+    /** Paints one run and returns the top-left of its first band, for the prompt host. */
+    function paintRun(run: Cell[]): { pageEl: HTMLElement; layer: SVGGraphicsElement; x: number; y: number } | null {
+      const layer = layerFor(run[0].host)
+      const pad = SEL_PAD_PX * userUnitsPerPx(layer, zoomRef.current)
+      const staffCount = run[0].measureEl.querySelectorAll(STAFF_SEL).length
+      const parts = selection!.parts ?? Array.from({ length: staffCount }, (_, i) => i)
+      let first: { pageEl: HTMLElement; layer: SVGGraphicsElement; x: number; y: number } | null = null
+      for (const partIdx of parts) {
+        let box: Box | null = null
+        for (const cell of run) {
+          const staffEl = cell.measureEl.querySelectorAll<SVGGraphicsElement>(STAFF_SEL)[partIdx]
+          if (staffEl) box = unionBox(box, staffLinesBox(staffEl))
         }
-
-        pageEl.appendChild(prompt)
+        if (!box) continue
+        addRect(layer, box, pad)
+        first ??= { pageEl: run[0].pageEl, layer, x: box.x0 - pad, y: box.y0 - pad }
       }
+      return first
+    }
 
-      try {
-        if (!selection.parts) {
-          // Highlight entire measure
-          addRect(g, g.getBBox())
-        } else {
-          // Highlight only selected staves within this measure
-          const staffEls = g.querySelectorAll<SVGGraphicsElement>(STAFF_SEL)
-          for (const partIdx of selection.parts) {
-            const staffEl = staffEls[partIdx]
-            if (!staffEl) continue
-            try {
-              addRect(g, staffEl.getBBox())
-            } catch { /* off-screen */ }
-          }
-        }
-      } catch { /* getBBox unavailable off-screen */ }
+    // Split the measures into runs that can share one band: consecutive, same page, same system.
+    const runs: Cell[][] = []
+    for (const cell of cells) {
+      const run = runs[runs.length - 1]
+      const prev = run?.[run.length - 1]
+      if (prev && prev.measure === cell.measure - 1 && prev.host === cell.host && prev.system === cell.system) {
+        run.push(cell)
+      } else {
+        runs.push([cell])
+      }
+    }
+
+    let anchor: { pageEl: HTMLElement; layer: SVGGraphicsElement; x: number; y: number } | null = null
+    for (const r of runs) {
+      const first = paintRun(r)
+      if (!anchor && r.some((c) => c.measure === selection.start)) anchor = first
+    }
+
+    // "type something" prompt, anchored to the top-left corner of the selection.
+    const prompt = promptHostRef.current
+    if (prompt && anchor) {
+      const { pageEl, layer, x, y } = anchor
+      const svg = pageEl.querySelector('svg') as SVGSVGElement | null
+      const ctm = layer.getScreenCTM()
+      if (svg && ctm) {
+        const pt = svg.createSVGPoint()
+        pt.x = x
+        pt.y = y
+        const screenPt = pt.matrixTransform(ctm)
+        const pageRect = pageEl.getBoundingClientRect()
+        const z = zoomRef.current / 100
+        prompt.style.cssText = `position: absolute; top: ${(screenPt.y - pageRect.top) / z - 10}px; left: ${(screenPt.x - pageRect.left) / z}px`
+      }
+      pageEl.appendChild(prompt)
     }
   }, [selection, pages, visiblePages, pageMeta])
 
@@ -363,25 +483,25 @@ export default function ScoreViewer() {
     const x = (e.clientX - svgRect.left) * scaleX + vb.x
     const y = (e.clientY - svgRect.top) * scaleY + vb.y
 
+    // Test against the staff rectangles, padded to match the drawn highlight, so the clickable
+    // area of a measure is exactly the area that lights up — a slur or hairpin overflowing
+    // into the next bar no longer lets a measure claim its neighbour's space.
+    const pad = SEL_PAD_PX * userUnitsPerPx(measures[0], zoomRef.current)
     for (let i = 0; i < measures.length; i++) {
-      try {
-        const mBB = measures[i].getBBox()
-        if (x >= mBB.x && x <= mBB.x + mBB.width && y >= mBB.y && y <= mBB.y + mBB.height) {
-          // Found the measure — try to narrow down to a specific staff
-          const staffEls = measures[i].querySelectorAll<SVGGraphicsElement>(STAFF_SEL)
-          let staffIdx: number | null = null
-          for (let s = 0; s < staffEls.length; s++) {
-            try {
-              const sBB = staffEls[s].getBBox()
-              if (y >= sBB.y && y <= sBB.y + sBB.height) {
-                staffIdx = s
-                break
-              }
-            } catch { /* off-screen */ }
-          }
-          return { measure: offset + i + 1, staffIdx }
+      const staffBoxes = Array.from(measures[i].querySelectorAll<SVGGraphicsElement>(STAFF_SEL), staffLinesBox)
+      const mBox = staffBoxes.reduce<Box | null>((acc, b) => unionBox(acc, b), null)
+      if (!mBox) continue
+      if (x < mBox.x0 - pad || x > mBox.x1 + pad || y < mBox.y0 - pad || y > mBox.y1 + pad) continue
+      // Found the measure — try to narrow down to a specific staff
+      let staffIdx: number | null = null
+      for (let s = 0; s < staffBoxes.length; s++) {
+        const b = staffBoxes[s]
+        if (b && y >= b.y0 - pad && y <= b.y1 + pad) {
+          staffIdx = s
+          break
         }
-      } catch { }
+      }
+      return { measure: offset + i + 1, staffIdx }
     }
 
     return null
@@ -405,7 +525,12 @@ export default function ScoreViewer() {
         const staffEls = m.querySelectorAll<SVGGraphicsElement>(STAFF_SEL)
         if (staffCount === 0 && staffEls.length) staffCount = staffEls.length
         staffEls.forEach((s, sIdx) => {
-          cache.push({ measure: offset + mLocal + 1, staff: sIdx, rect: s.getBoundingClientRect() })
+          // Staff lines only: a high note or a ledger line sticking out of the staff must not
+          // make the drag marquee grab a staff it never touched.
+          const b = staffLinesClientBox(s)
+          if (!b) return
+          const rect = new DOMRect(b.x0, b.y0, b.x1 - b.x0, b.y1 - b.y0)
+          cache.push({ measure: offset + mLocal + 1, staff: sIdx, rect })
         })
       })
     })
@@ -536,6 +661,38 @@ export default function ScoreViewer() {
     window.addEventListener('mouseup', onUp)
   }
 
+ async function handleBlankScoreInput(e: React.KeyboardEvent) {
+    if (e.key !== 'Enter') return
+
+    console.log(e.target.value)
+    const prompt = e.target.value
+    // const response = await promptAnthropic(prompt, '', 
+    //   (thought) => {console.log(thought)}, 
+    //   (title) => {console.log(title)}, null)
+    const response = [
+      [
+          {
+              "tool": "generate_score",
+              "input": {
+                  "measure_start_num": 1,
+                  "generation_length": 8,
+                  "generation_staffs": [
+                  ],
+                  "overwrite_current": false
+              }
+          }
+      ],
+      1982,
+      194
+    ]
+
+    const edits = Array.isArray(response[0]) ? response[0] : []
+    for (const { tool, input } of edits) {
+      applyClaudeEdit(tool, input, currentXml ?? '', setXml)
+    }
+    console.log(response)
+  }
+
   return (
     <div
       ref={outerRef}
@@ -548,7 +705,10 @@ export default function ScoreViewer() {
       {!currentXml ? (
         <div className={styles.emptyState}>
           <div className={styles.paper}>
-            <p className={styles.paperHint}>Open a MusicXML file or generate a score</p>
+            <div style={{ display: 'block' }}>
+              <p className={styles.paperHint}>Open a MusicXML file or generate a score</p>
+              <input className={styles.paperInput} placeholder={'Start a score...'} onKeyDown={handleBlankScoreInput} onMouseDown={(e) => e.stopPropagation()}></input>
+            </div>
           </div>
         </div>
       ) : !ready || pages.length === 0 ? (

@@ -1,9 +1,12 @@
 import sendImage from '../../assets/send.svg'
+import arrowImage from '../../assets/arrow.svg'
+import undoImage from '../../assets/undo.svg'
 import styles from './InscorePrompt.module.css'
 import { useState } from 'react'
 import { promptAnthropic } from '../../api/claudeTools'
 import type { MeasureSelection } from '../../store'
 import { applyClaudeEdit } from '../../api/applyClaudeEdit'
+
 
 /*
 
@@ -165,57 +168,60 @@ promptButton.onclick = (e) => {
 
 */
 
-const TEST_OBJ = 
-[
+const TEST_OBJ = [
     {
-        "title": "Beginning prompt...",
-        "input": "Change key to F#minor",
-        "tokensIn": 0,
-        "tokensOut": 0
+        "task": "Selecting tools"
     },
     {
-        "title": "Selected 1 tools...",
-        "input": " * edit_key_sig",
-        "tokensIn": 839,
-        "tokensOut": 39
+        "title": "Selected 1 tools",
+        "input": [
+            "edit_key_sig"
+        ],
+        "tokensIn": 903,
+        "tokensOut": 61
     },
     {
-        "title": "Queried for key_signature...",
-        "input": "Key signature by measure (1-based; listed at m1 and every change):\nwhole score: m1=2 flats, m4=3 flats",
-        "tokensIn": 541,
-        "tokensOut": 30.5
+        "task": "Querying next steps"
     },
     {
-        "title": "Queried for selection...",
-        "input": "The user has not selected anything on the score.",
-        "tokensIn": 541,
-        "tokensOut": 30.5
+        "title": "Found 1 edits",
+        "input": [
+            {
+                "tool": "edit_key_sig",
+                "measure_num": 1,
+                "tonic": "C",
+                "mode": "minor"
+            },
+			{
+                "tool": "anotehr",
+                "measure_num": 1,
+                "tonic": "C",
+                "mode": "minor"
+            }
+        ],
+        "tokensIn": 1076,
+        "tokensOut": 93
     },
     {
-        "title": "Found 1 edits...",
-        "input": " * edit_key_sig",
-        "tokensIn": 1202,
-        "tokensOut": 118
-    },
-    {
-        "title": "Thinking complete...",
-        "input": "3123 in / 218 out",
-        "tokensIn": 0,
-        "tokensOut": 0
+        "task": "Querying next steps"
     },
     {
         "title": "Edit made: edit_key_sig (1/1)",
-        "input": "measure_num: 1, tonic: F#, mode: minor",
+        "input": '',
         "tokensIn": 0,
         "tokensOut": 0
     }
-] as ThoughtProcessEvent[]
+] as (ThoughtProcessEvent | ThoughtProcessTask)[]
 
-interface ThoughtProcessEvent {
-  title: string
-  input: string
-  tokensIn: number
-  tokensOut: number
+export interface ThoughtProcessEvent {
+	title: string
+	input: any
+	tokensIn: number
+	tokensOut: number
+}
+
+export interface ThoughtProcessTask {
+	task: string
 }
 
 interface InscorePromptProps {
@@ -227,44 +233,68 @@ interface InscorePromptProps {
 export default function InscorePrompt({ getXml, getSelection, setXml }: InscorePromptProps) {
     const [ inscorePrompt, setInscorePrompt ] = useState<string | null>(null)
     const [ promptState, setPromptState ] = useState<('input' | 'eval' | 'done')>('input')
-    const [ promptThoughtProcess, setPromptThoughtProcess ] = useState<ThoughtProcessEvent[]>([]) 
+    const [ promptThoughtProcess, setPromptThoughtProcess ] = useState<(ThoughtProcessEvent | ThoughtProcessTask)[]>([]) 
     const [ promptStatus, setPromptStatus ] = useState<string>('') 
     const [ currentPrompt, setCurrentPrompt ] = useState<string>('') 
+    const [ expandedThoughts, setExpandedThoughts ] = useState<boolean[]>([]) 
+    const [ thoughtUsage, setThoughtUsage ] = useState<number>(0) 
+    const [ originalXml, setOriginalXml ] = useState<string | null>(null) 
 
-    function handleSubmit(prompt: string | null) {
+	function addNewThought(thoughtObj: ThoughtProcessEvent | ThoughtProcessTask) {
+		setPromptThoughtProcess(prev => [...prev, thoughtObj])
+		setExpandedThoughts(prev => [...prev, false])
+	}
+
+    async function handleSubmit(prompt: string | null) {
         if (!prompt) return
 
         console.log(prompt)
 		setCurrentPrompt(prompt)
         setInscorePrompt(null)
         setPromptState('eval')
+		setThoughtUsage(0)
 
         // console.log(getXml(), getSelection())
-        //promptWithThoughProcess(prompt)
-        console.log(TEST_OBJ)
-        setPromptThoughtProcess(TEST_OBJ)
+		setOriginalXml(getXml())
+        promptWithThoughProcess(prompt).catch((e: unknown) => {
+            addNewThought({ title: 'Prompt failed', input: e instanceof Error ? e.message : String(e), tokensIn: 0, tokensOut: 0 })
+            setPromptState('done')
+        })
+        // console.log(TEST_OBJ)
+        // testProcess()
+
+		// setTimeout(() => {
+		// 	console.log('complete')
+		// 	setPromptState('done')
+		// }, 2000 * (TEST_OBJ.length + 1))
     }
+
+	async function testProcess() {
+		const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+		setPromptThoughtProcess([])
+		TEST_OBJ.forEach(async (obj, i) => {
+			await delay(1000 * (i + 1))
+			addNewThought(obj)
+		})
+	}
 
     async function promptWithThoughProcess(prompt: string) {
         const currentXml = getXml()
         const selection = getSelection()
-
-        // init thoughts
-        setPromptThoughtProcess([
-            { title: '-----------------', input: '', tokensIn: 0, tokensOut: 0 },
-            { title: 'Beginning prompt...', input: prompt, tokensIn: 0, tokensOut: 0 }
-        ])
-
-        let mirror = [
-            { title: '-----------------', input: '', tokensIn: 0, tokensOut: 0 },
-            { title: 'Beginning prompt...', input: prompt, tokensIn: 0, tokensOut: 0 }
-        ]
+		let totalUsage = 0
 
         // trigger prompting
-        const response = await promptAnthropic(prompt, currentXml!, (title: string, input: string, tokensIn: number, tokensOut: number) => {
-            setPromptThoughtProcess((prev) => [...prev, { title, input, tokensIn, tokensOut }])
-            mirror.push({ title, input, tokensIn, tokensOut })
-        }, selection)
+        const response = await promptAnthropic(prompt, currentXml!, (thought: ThoughtProcessEvent | ThoughtProcessTask) => {
+            addNewThought(thought)
+			if (Object.keys(thought).includes('title')) {
+				thought = thought as ThoughtProcessEvent
+				totalUsage += thought.tokensIn + thought.tokensOut
+				setThoughtUsage(totalUsage)
+			}
+        }, (title: string) => {
+			setCurrentPrompt(title)
+		}, selection)
         if (response.length === 0) {
             setPromptStatus('Nothing was returned')
             setPromptState('done')
@@ -272,21 +302,35 @@ export default function InscorePrompt({ getXml, getSelection, setXml }: InscoreP
         }
 
         const edits = response[0]
-        const usage = [ response[1], response[2] ]
+		totalUsage = response[1] + response[2]
+		setThoughtUsage(totalUsage)
         
         let xml = currentXml
         let applied = 0
-        for (const { tool, input } of edits) {
-            xml = await applyClaudeEdit(tool, input, xml)
-            setPromptThoughtProcess((prev) => [...prev, { title: `Edit made: ${tool} (${applied + 1}/${edits.length})`, input, tokensIn: 0, tokensOut: 0 }])
-            mirror.push({ title: `Edit made: ${tool} (${applied + 1}/${edits.length})`, input, tokensIn: 0, tokensOut: 0 })
-            applied += 1
-            console.log(promptThoughtProcess)
+        try {
+            for (const { tool, input } of edits) {
+                addNewThought({ task: `Applying edit (${applied + 1}/${edits.length})` })
+                xml = await applyClaudeEdit(tool, input, xml, setXml)
+                addNewThought({ title: `Edit (${applied + 1}/${edits.length}) made: ${tool}`, input: '', tokensIn: 0, tokensOut: 0 })
+                applied += 1
+            }
+            setPromptStatus('Complete')
+        } catch (e: unknown) {
+            // without this the panel just sits on "Applying edit" forever and the reason is lost
+            const message = e instanceof Error ? e.message : String(e)
+            addNewThought({ title: `Edit ${applied + 1} failed`, input: message, tokensIn: 0, tokensOut: 0 })
+            setPromptStatus(message)
         }
         if (applied > 0) setXml(xml)
-        setPromptStatus('Complete')
-        console.log(mirror)
+
+		setPromptState('done')
     }
+
+	function handleExpandThought(idx: number) {
+		const shallowArray = [...expandedThoughts]
+		shallowArray[idx] = !expandedThoughts[idx]
+		setExpandedThoughts(shallowArray)
+	}
 
     return (
         <div className={styles.promptContainer} onMouseDown={(e) => e.stopPropagation()}>
@@ -303,17 +347,82 @@ export default function InscorePrompt({ getXml, getSelection, setXml }: InscoreP
                 </>
             ) : (
                 <div style={{ display: 'block' }}>
-					<div className={styles.thoughtPanelTitle}>{currentPrompt}</div>
+					{ promptState === 'done' && originalXml && (
+						<button className={styles.undoThoughtButton} onClick={() => setXml(originalXml)}>
+							<img src={undoImage} className={styles.undoThoughtButtonImage}/>
+						</button>
+					)}
+					<div className={styles.thoughtPanelTitle}>{currentPrompt} <p className={styles.thoughtPanelTokens}>{thoughtUsage} toks</p></div>
                     <div className={styles.thoughtPanel}>
                         {
                             promptThoughtProcess.map((event, idx) => {
-                                const isLastAndLoading = idx === promptThoughtProcess.length - 1 //&& promptState === 'done'
-                                const classList = isLastAndLoading ? [styles.thoughtTitle, styles.loading] : [styles.thoughtTitle]
+                                const isLastAndNotLoading = idx === promptThoughtProcess.length - 1 && promptState !== 'done'
+								const arrowClassList = expandedThoughts[idx] ? [styles.thoughtContainerArrow, styles.expanded] : [styles.thoughtContainerArrow]
+								const containerClassList = Object.keys(event).includes('input') && (event as ThoughtProcessEvent).input !== '' ? [styles.thoughtContainer, styles.hasContent] : [styles.thoughtContainer]
+
+								if (Object.keys(event).includes('task')) {
+									if (!isLastAndNotLoading) return null
+
+									return (
+										<div className={styles.thoughtContainer}>
+											<span className={[styles.thoughtTitle, styles.loading].join(' ')}>
+												{(event as ThoughtProcessTask).task}
+											</span>
+										</div>
+									)
+								}
+
+								event = event as ThoughtProcessEvent
+
                                 return (
-                                    <div className={styles.thoughtContainer}>
-                                        <span className={classList.join(' ')}>{event.title}</span>
-                                    </div>
-                                )
+									<div className={containerClassList.join(' ')} onClick={() => { if (event.input !== '') handleExpandThought(idx) } }>
+										<span className={styles.thoughtTitle}>
+											{ event.input !== '' && (
+												<img src={arrowImage} className={arrowClassList.join(' ')}/>
+											)}
+											{event.title}
+											{ expandedThoughts[idx] ? (
+												Array.isArray(event.input) ? (
+													<ul className={styles.thoughtText}>
+														{
+															event.input.map((text, subIdx) => 
+																typeof text === 'object' ? (
+																	<>
+																		{
+																			Object.entries(text).map((entry) => (
+																				<li className={[ styles.thoughtTextListItem, styles.codeText ].join(' ')}>{entry[0]} = "{String(entry[1])}"</li>
+																			))
+																		}
+																		{ subIdx < event.input.length - 1 && (
+																			<p style={{ marginTop: "20px" }}></p>	
+																		)} 
+																	</>
+																) :
+																(
+																	<li className={styles.thoughtTextListItem}>{text}</li>
+																)
+															)
+														}
+													</ul>
+												) : ( typeof event.input === 'object' ? (
+													<ul className={styles.thoughtText}>
+														{
+															Object.entries(event.input).map((entry) => (
+																<li className={[ styles.thoughtTextListItem, styles.codeText ].join(' ')}>{entry[0]} = "{String(entry[1])}"</li>
+															))
+														}													
+													</ul>
+												) : (
+													<span className={styles.thoughtText}>
+														{event.input}												
+													</span>
+												)))
+											: (
+												<></>
+											)}
+										</span>
+									</div>
+								)
                             })
                         }
                     </div>

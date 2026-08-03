@@ -1,7 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { getSharedToolkit } from '../hooks/useVerovio';
 import type { ToolUseBlock } from '@anthropic-ai/sdk/resources';
-import type { MeasureSelection } from '../store';
+import type { ThoughtProcessEvent, ThoughtProcessTask } from '../components/ScoreViewer/InscorePrompt'
 
 // Local dev only: the API key is bundled into the client, so never deploy this
 // build publicly — move the call behind the FastAPI backend before sharing.
@@ -27,23 +27,21 @@ export interface ScoreSelection {
 // read can never spin forever (each turn is one API call).
 const MAX_STAGE2_TURNS = 4;
 
-export async function promptAnthropic(prompt: string, xml: string, pushCallback: (title: string, input: string, tokensIn: number, tokensOut: number) => void, selection?: ScoreSelection | null): Promise<any> {
+export async function promptAnthropic(prompt: string, xml: string, pushCallback: (thought: ThoughtProcessEvent | ThoughtProcessTask) => void, pushConversationName: (title: string) => void, selection: ScoreSelection | null): Promise<any> {
     // Stage 1 — decide which edit tool TYPES the request needs. Cheap: only the tiny
     // trigger_tool schema is sent, and the reply is just a list of tool names.
+    pushCallback({ task: 'Selecting tools' })
     const message = await anthropic.messages.create({
         model: 'claude-haiku-4-5-20251001',
         max_tokens: 1024,
         tools: TOOL_INTROS as unknown as Anthropic.Messages.ToolUnion[],
         system: "Your ONLY job is to classify which edit types the request needs, never to act on it or ask questions. "
             + "Do not worry about missing details like which measures/staves/values are meant. "
-            + "References like \"these measures\", \"the selected staff\", or \"here\" always refer to that selection, so still classify them. "
+            + "References like \"these measures\", \"the selected staff\", or even no given location always refer to that selection, so still classify them. "
             + "If nothing matches an edit type, return an empty list.",
         messages: [
             { role: 'user', content: prompt }
         ],
-        // Force trigger_tool so stage 1 always classifies instead of replying with a
-        // clarifying question (which would return no tools and never reach stage 2,
-        // where "these measures" is resolved from the selection).
         tool_choice: { type: "tool", name: "trigger_tool" }
     });
     console.log(message)
@@ -59,7 +57,9 @@ export async function promptAnthropic(prompt: string, xml: string, pushCallback:
     const toolTypes = Array.from(new Set(requested));
     if (toolTypes.length === 0) return [];
 
-    pushCallback(`Selected ${toolTypes.length} tools...`, ' * ' + toolTypes.join('\n * '), message.usage.input_tokens, message.usage.output_tokens)
+    pushConversationName((trigger.input as { promptTitle?: string }).promptTitle ?? 'No name generated')
+    pushCallback({ title: `Selected ${toolTypes.length} tools`, input: toolTypes, tokensIn: message.usage.input_tokens, tokensOut: message.usage.output_tokens })
+    pushCallback({ task: 'Querying next steps' })
 
     // Build the tool schema + context once per selected type — send only what stage 2 needs.
     // read_score is always offered on top so Claude can look up any OTHER aspect on demand
@@ -101,7 +101,8 @@ export async function promptAnthropic(prompt: string, xml: string, pushCallback:
         if (reads.length === 0) {
             edits = toolUses.map(b => ({ tool: b.name, input: b.input }));
 
-            pushCallback(`Found ${edits.length} edits...`, ' * ' + edits.map(e => e.tool).join('\n * '), tokensIn, tokensOut)
+            pushCallback({ title: `Found ${edits.length} edits`, input: edits.map(e => ({ tool: e.tool, ...(e.input as Record<string, any>) })), tokensIn, tokensOut })
+            pushCallback({ task: 'Querying next steps' })
             console.log(context, commandMessage, edits);
             break;
         }
@@ -111,7 +112,8 @@ export async function promptAnthropic(prompt: string, xml: string, pushCallback:
             const queries = (r.input as { queries?: ReadQuery[] }).queries
             queries?.forEach(query => {
                 const result = getReadResults([ query ], xml, selection)
-                pushCallback(`Queried for ${query}...`, result, tokensIn / queries.length, tokensOut / queries.length)
+                pushCallback({ title: `Queried for ${query}`, input: result, tokensIn: tokensIn / queries.length, tokensOut: tokensOut / queries.length })
+                pushCallback({ task: 'Querying next steps' })
             })
         })
 
@@ -126,7 +128,7 @@ export async function promptAnthropic(prompt: string, xml: string, pushCallback:
         });
     }
 
-    pushCallback(`Thinking complete...`, `${totalInputUsage} in / ${totalOutputUsage} out`, 0, 0)
+    // pushCallback(`Thinking complete...`, `${totalInputUsage} in / ${totalOutputUsage} out`, 0, 0)
     return [ edits, totalInputUsage, totalOutputUsage ]
 }
 
@@ -200,7 +202,25 @@ function getPromptContext(promptType: string, xml: string): string | undefined {
             return getContext_staves(xml, "edit_delete_staff");
         case "edit_delete_measures":
             return getContext_measures(xml);
+        case "generate_score":
+            return getContext_generate(xml);
     }
+}
+
+// generate_score needs both halves at once: which staves exist (0-based staff_num) and where the
+// score ends, so Claude can place the block without a read_score round trip.
+function getContext_generate(xml: string): string {
+    const staves = describeStaves(xml);
+    if (staves.length === 0) return "The score is empty — a generation starts a new score from scratch, so name the instruments.";
+
+    const n = countMeasures(xml);
+    return [
+        `The score has ${n} measure${n === 1 ? "" : "s"} (1-based). measure_start_num is the first generated measure `
+            + `and generation_length is how many; ${n + 1} continues past the end.`,
+        "Generate every staff unless the user asked for specific ones; their instruments are already known, so leave `instrument` out.",
+        "",
+        ...staves,
+    ].join("\n");
 }
 
 function getContext_edit_clef(xml: string): string {
@@ -507,8 +527,7 @@ function extractStaffElements(mei: string, type: ScoreElementType): StaffContext
         let staff = staffCtx;
         switch (el.localName) {
             case "measure": {
-                const n = parseInt(el.getAttribute("n") ?? "", 10);
-                currentMeasure = Number.isNaN(n) ? currentMeasure + 1 : n;
+                currentMeasure += 1;
                 break;
             }
             case "staff": {
@@ -597,16 +616,11 @@ function describeStaves(xml: string): string[] {
 // Highest 1-based measure number in the score (0 when there are no measures).
 function countMeasures(xml: string): number {
     const doc = new DOMParser().parseFromString(toMei(xml), "application/xml");
-    let max = 0;
-    for (const m of Array.from(doc.getElementsByTagNameNS("*", "measure"))) {
-        const n = parseInt(m.getAttribute("n") ?? "", 10);
-        if (!Number.isNaN(n)) max = Math.max(max, n);
-    }
-    return max;
+    return doc.getElementsByTagNameNS("*", "measure").length;
 }
 
 // Extra line appended to the stage-2 system prompt telling Claude the read tool exists.
-const READ_SCORE_HINT = (selection: MeasureSelection, xml: string) => [
+const READ_SCORE_HINT = (selection: ScoreSelection | null, xml: string) => [
     "Call read_score FIRST whenever needed information was not given —",
     "Ex: locating the measure where something happens (\"where the key changes to D major\").",
     "If the user's request requires on-screen selection (\"the selected staff\", \"here\"), or if no location if given, use the selection. ",
@@ -648,12 +662,18 @@ const TOOL_INTROS = [
                     type: "array",
                     items: {
                         type: "string",
-                        enum: [ "edit_clef", "edit_time_sig", "edit_key_sig", "edit_tempo", "edit_add_instrument", "edit_delete_staff", "edit_delete_measures" ]
+                        enum: [ "edit_clef", "edit_time_sig", "edit_key_sig", "edit_tempo", "edit_add_instrument", "edit_delete_staff", "edit_delete_measures",
+                            "generate_score"
+                        ]
                     },
                     description: "Each distinct type of edit the user wants to make. List a type once even if it will be applied several times."
+                },
+                promptTitle: {
+                    type: "string",
+                    description: "Describe the topic of the request as a short conversation title in as little words as possible. Ex: \"Change to 3/4\", \"General score changes\", or \"Edit key signature\""
                 }
             },
-            required: [ "tools" ]
+            required: [ "tools", "promptTitle" ]
         }
     },
 ]
@@ -779,6 +799,61 @@ const TOOLS = {
                     description: "The last measure of the range to be deleted"
                 }
             }
+        }
+    },
+    "generate_score": {
+        name: "generate_score",
+        description: "Uses a transformer model to generate a new score if no current score exists. Else, inserts into the given location. Do not include key, time_signature, or tempo when these attributes should remain the same.",
+        input_schema: {
+            type: "object",
+            properties: {
+                measure_start_num: {
+                    type: "integer",
+                    description: "The first measure to insert the generation into"
+                },
+                generation_staffs: {
+                    type: "array",
+                    items: {
+                        type: "object",
+                        properties: {
+                            staff_num: {
+                                type: "integer",
+                                description: "The index of the staff"
+                            },
+                            instrument: {
+                                type: "string",
+                                enum: [ "other", "piano",  "harpsichord", "organ", "accordion", "guitar", "bass_guitar", "violin", "viola", "cello", "double_bass", "harp", "flute", "oboe", "clarinet", "bassoon", "saxophone", "trumpet", "horn", "trombone", "tuba", "percussion", "timpani", "celesta", "voice_soprano", "voice_mezzo", "voice_alto", "voice_tenor", "voice_baritone", "voice_bass", "voice", "choir" ],
+                                description: "The name of the instrument to generate. Only include if the instruments aren't already identified by the staff_num (e.g. no current score exists)"
+                            }
+                        },
+                        required: [ "staff_num" ]
+                    },
+                    description: "List the staffs to be generated. Provide an empty array if no staffs exist and the user hasn't given a list of staffs or instruments"
+                },
+                generation_length: {
+                    type: "integer",
+                    description: "The number of measures to generate (multiple staffs still counts as one measure)"
+                },
+                overwrite_current: {
+                    type: "boolean",
+                    description: "True if the generation should overwrite the current measures located from measure_start_num to measure_start_num + generation_length. False means it will be inserted, creating new measures at the given location."
+                },
+                key: {
+                    type: [ "string", "null" ],
+                    enum: [ "Gb", "Db", "Ab", "Eb", "Bb", "F", "C", "G", "D", "A", "E", "B", "F#", null ],
+                    description: "The tonic the generation is in. Only the key signature is meant, so major and minor share a tonic (A minor is C). Null to carry on in whatever key is in effect before measure_start_num."
+                },
+                time_signature: {
+                    type: [ "string", "null" ],
+                    enum: [ "2/4", "3/4", "4/4", "6/8", "3/8", "12/8", null ],
+                    description: "The time signature the generation is in. Null to carry on in whatever time signature is in effect before measure_start_num."
+                },
+                tempo: {
+                    type: [ "integer", "null" ],
+                    description: "The tempo of the generation in beats per minute. Null to carry on at whatever tempo is in effect before measure_start_num."
+                }
+            },
+            required: [ "measure_start_num", "generation_staffs", "generation_length", "overwrite_current", "key", "time_signature", "tempo" ]
         }
     }
 }

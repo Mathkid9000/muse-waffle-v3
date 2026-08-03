@@ -14,11 +14,20 @@ export interface InfillRequest {
 }
 
 export interface GenerateRequest {
+  xml: string
+  /** First measure of the generated block, 1-based. */
+  start_measure: number
+  /** Instrument indices; only read when `xml` is empty. */
   instruments: number[]
-  key: number
-  time_sig: number
-  tempo: number
-  num_bars: number
+  /** 0-indexed staves to generate; null generates all. */
+  parts?: number[] | null
+  /** Null on any of these three continues what is already in effect. */
+  key?: number | null
+  time_sig?: number | null
+  tempo?: number | null
+  num_bars?: number
+  /** Replace the measures at `start_measure` instead of inserting in front of them. */
+  overwrite?: boolean
   max_new?: number
   temperature?: number
   top_k?: number
@@ -87,8 +96,25 @@ export interface StreamEvent {
   xml?: string
   bar?: number
   total?: number
+  instr_num?: number
   done?: boolean
   error?: string
+}
+
+/**
+ * FastAPI reports a rejected body as `detail: [{loc, msg}, …]`, which stringifies to
+ * "[object Object]" — the reason a bad request used to surface as no message at all.
+ */
+async function errorFrom(res: Response): Promise<Error> {
+  const body = await res.json().catch(() => null)
+  const detail = body?.detail
+  if (typeof detail === 'string') return new Error(detail)
+  if (Array.isArray(detail)) {
+    return new Error(detail
+      .map((e: { loc?: (string | number)[], msg?: string }) => `${(e.loc ?? []).slice(1).join('.')}: ${e.msg}`)
+      .join('; '))
+  }
+  return new Error(res.statusText || `Request to ${res.url} failed`)
 }
 
 async function post<T>(path: string, body: unknown): Promise<T> {
@@ -97,10 +123,7 @@ async function post<T>(path: string, body: unknown): Promise<T> {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }))
-    throw new Error(err.detail ?? res.statusText)
-  }
+  if (!res.ok) throw await errorFrom(res)
   return res.json()
 }
 
@@ -110,10 +133,7 @@ async function* streamPost(path: string, body: unknown): AsyncGenerator<StreamEv
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }))
-    throw new Error(err.detail ?? res.statusText)
-  }
+  if (!res.ok) throw await errorFrom(res)
   const reader = res.body!.getReader()
   const decoder = new TextDecoder()
   let buf = ''

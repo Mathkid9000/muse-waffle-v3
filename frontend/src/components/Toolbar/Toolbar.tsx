@@ -1,4 +1,4 @@
-import { useRef } from 'react'
+import { useRef, useState } from 'react'
 import { useStore } from '../../store'
 import { countInstruments } from '../../hooks/useVerovio'
 import styles from './Toolbar.module.css'
@@ -15,6 +15,9 @@ export default function Toolbar() {
   const redrawScore = useStore((s) => s.redrawScore)
   const viewportW = useStore((s) => s.viewportW)
   const viewportH = useStore((s) => s.viewportH)
+
+  const [ isFileDdOpen, setIsFileDdOpen ] = useState<boolean>(false)
+  const [ isViewDdOpen, setIsViewDdOpen ] = useState<boolean>(false)
 
   // Toolbar zoom anchors at the viewport center (the wheel anchors at the cursor).
   const zoomStep = (delta: number) => zoomTo(zoom + delta, viewportW / 2, viewportH / 2)
@@ -63,15 +66,15 @@ export default function Toolbar() {
 
   return (
     <header className={styles.toolbar}>
-      <span className={styles.brand}>Muse Waffle</span>
-      <div className={styles.actions}>
-        <button className={styles.btn} onClick={() => fileInputRef.current?.click()}>
+      <span className={styles.brand}>Cogwork Dancers: Orchestral Version</span>
+      {/* <div className={styles.actions}>
+        <button className={`${styles.btn} ${styles.primary}`} onClick={() => fileInputRef.current?.click()}>
           Open MusicXML
         </button>
-        <button className={styles.btn} onClick={handleDownload} disabled={!currentXml}>
+        <button className={`${styles.btn} ${styles.secondary}`} onClick={handleDownload} disabled={!currentXml}>
           Download
         </button>
-        <button className={styles.btn} onClick={() => redrawScore()} disabled={!currentXml} title="Re-render the score">
+        <button className={`${styles.btn} ${styles.secondary}`} onClick={() => redrawScore()} disabled={!currentXml} title="Re-render the score">
           Redraw
         </button>
         <div className={styles.zoom}>
@@ -79,7 +82,7 @@ export default function Toolbar() {
           <span className={styles.zoomLabel} title="Double-click to reset" onDoubleClick={() => resetCamera()} style={{ cursor: 'default' }}>{zoom}%</span>
           <button className={styles.zoomBtn} onClick={() => zoomStep(10)} disabled={zoom >= 300} title="Zoom in (Ctrl+Scroll)">+</button>
         </div>
-      </div>
+      </div> */}
       <input
         ref={fileInputRef}
         type="file"
@@ -87,6 +90,28 @@ export default function Toolbar() {
         style={{ display: 'none' }}
         onChange={handleFileChange}
       />
+      <div className={styles.dropdownGrid}>
+        <button className={styles.dropdownBtn} onClick={() => setIsFileDdOpen(true)} onMouseLeave={() => setIsFileDdOpen(false)}>
+          File
+          {isFileDdOpen && (
+            <ul className={styles.dropdownContainer}>
+              <li className={styles.dropdownItem} onClick={() => fileInputRef.current?.click()}>Import File</li>
+              <li className={styles.dropdownItem} onClick={handleDownload}>Export</li>
+            </ul>
+          )}
+        </button>
+        <button className={styles.dropdownBtn} onClick={() => setIsViewDdOpen(true)} onMouseLeave={() => setIsViewDdOpen(false)}>
+          View
+          {isViewDdOpen && (
+            <ul className={styles.dropdownContainer}>
+              <li className={styles.dropdownItem} onClick={() => redrawScore()}>Redraw</li>
+              <li className={zoom >= 300 ? `${styles.dropdownItem} ${styles.disabled}` : `${styles.dropdownItem}`} onClick={() => zoomStep(10)}>Zoom +</li>
+              <li className={zoom <=25 ? `${styles.dropdownItem} ${styles.disabled}` : `${styles.dropdownItem}`} onClick={() => zoomStep(-10)}>Zoom -</li>
+            </ul>
+          )}
+        </button>
+        <button className={styles.dropdownBtn}>Help</button>
+      </div>
     </header>
   )
 }
