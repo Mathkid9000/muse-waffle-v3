@@ -66,7 +66,8 @@ class GenerateRequest(BaseModel):
         None,
         description="0-indexed staves to generate; None generates all",
     )
-    key: int | None = Field(None, ge=0, le=12, description="Key signature index (0=6 flats … 6=C … 12=6 sharps); None continues the key already in effect")
+    key: str | None = Field(None, description="Tonic of the key to generate in, e.g. C, Bb, F#; None continues the key already in effect")
+    mode: str | None = Field(None, description="Mode of that key, e.g. major, minor, dorian; None is read as major. The key signature is derived from the tonic and mode together")
     time_sig: int | None = Field(None, ge=0, le=5, description="Time signature index (0=2/4, 1=3/4, 2=4/4, 3=6/8, 4=3/8, 5=12/8); None continues")
     tempo: int | None = Field(None, ge=0, le=15, description="Tempo bucket index (0=slowest … 15=fastest); None continues")
     num_bars: int = Field(16, ge=1, le=128)

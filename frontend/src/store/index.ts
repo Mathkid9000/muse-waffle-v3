@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { createJSONStorage, persist, type StateStorage } from 'zustand/middleware'
 
 export interface MeasureSelection {
   start: number
@@ -13,6 +14,8 @@ export interface ScoreAppData {
 
 interface AppState {
   currentXml: string | null
+  /** Row id of the saved score being edited; null until the first save. */
+  scoreId: string | null
   scoreData: ScoreAppData | null
   loading: boolean
   error: string | null
@@ -32,6 +35,7 @@ interface AppState {
   redrawNonce: number
 
   setXml: (xml: string) => void
+  setScoreId: (id: string | null) => void
   setScoreData: (data: ScoreAppData | null) => void
   setLoading: (v: boolean) => void
   setError: (msg: string | null) => void
@@ -46,14 +50,74 @@ interface AppState {
   setStreamMode: (mode: 'infill' | 'generate' | 'append' | null) => void
   /** Force a full re-render of the score SVG. */
   redrawScore: () => void
+  /** Drop the open document entirely (starting a new score, leaving a saved one). */
+  resetScore: () => void
 }
 
 const ZOOM_MIN = 25
 const ZOOM_MAX = 300
 const clampZoom = (v: number) => Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, v))
 
-export const useStore = create<AppState>((set) => ({
+const PERSIST_KEY = 'muse-waffle:editor'
+const WRITE_DELAY_MS = 400
+
+/**
+ * sessionStorage with write-behind. A score's MusicXML runs to hundreds of kilobytes and
+ * setXml fires on every streaming update, so serialising on each one would stall generation;
+ * writes are coalesced into at most one every WRITE_DELAY_MS instead. Anything still pending
+ * is flushed when the page is hidden (tab switch, reload, close) — exactly the moments the
+ * value has to already be on disk.
+ */
+function createWriteBehindStorage(): StateStorage {
+  const pending = new Map<string, string>()
+  let timer: ReturnType<typeof setTimeout> | null = null
+
+  const flush = () => {
+    if (timer !== null) {
+      clearTimeout(timer)
+      timer = null
+    }
+    for (const [name, value] of pending) {
+      // Quota overruns (a very large score) just mean no persistence for that write.
+      try {
+        sessionStorage.setItem(name, value)
+      } catch (err) {
+        console.warn('[store] could not persist editor state', err)
+      }
+    }
+    pending.clear()
+  }
+
+  window.addEventListener('pagehide', flush)
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') flush()
+  })
+
+  return {
+    getItem: (name) => {
+      if (pending.has(name)) return pending.get(name)!
+      try {
+        return sessionStorage.getItem(name)
+      } catch {
+        return null
+      }
+    },
+    setItem: (name, value) => {
+      pending.set(name, value)
+      if (timer === null) timer = setTimeout(flush, WRITE_DELAY_MS)
+    },
+    removeItem: (name) => {
+      pending.delete(name)
+      try {
+        sessionStorage.removeItem(name)
+      } catch { /* storage unavailable */ }
+    },
+  }
+}
+
+export const useStore = create<AppState>()(persist((set) => ({
   currentXml: null,
+  scoreId: null,
   scoreData: null,
   loading: false,
   error: null,
@@ -69,6 +133,7 @@ export const useStore = create<AppState>((set) => ({
   redrawNonce: 0,
 
   setXml: (xml) => set({ currentXml: xml, error: null }),
+  setScoreId: (id) => set({ scoreId: id }),
   setScoreData: (data) => set({ scoreData: data }),
   setLoading: (v) => set({ loading: v }),
   setError: (msg) => set({ error: msg, loading: false }),
@@ -91,4 +156,23 @@ export const useStore = create<AppState>((set) => ({
   setStreamProgress: (bar, total) => set({ streamBar: bar, totalBars: total }),
   setStreamMode: (mode) => set({ streamMode: mode }),
   redrawScore: () => set((s) => ({ redrawNonce: s.redrawNonce + 1 })),
+  resetScore: () =>
+    set({
+      currentXml: null,
+      scoreId: null,
+      scoreData: null,
+      selection: null,
+      error: null,
+      streamBar: null,
+      totalBars: null,
+      streamMode: null,
+    }),
+}), {
+  name: PERSIST_KEY,
+  version: 1,
+  storage: createJSONStorage(createWriteBehindStorage),
+  // Only the document survives a reload. The camera, the selection and the streaming
+  // progress are per-view state, and rehydrating a half-finished stream would leave the
+  // UI stuck mid-generation with no request behind it.
+  partialize: (s) => ({ currentXml: s.currentXml, scoreId: s.scoreId, scoreData: s.scoreData }),
 }))

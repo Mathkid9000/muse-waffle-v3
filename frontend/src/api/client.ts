@@ -21,8 +21,11 @@ export interface GenerateRequest {
   instruments: number[]
   /** 0-indexed staves to generate; null generates all. */
   parts?: number[] | null
-  /** Null on any of these three continues what is already in effect. */
-  key?: number | null
+  /** Null on any of these continues what is already in effect. */
+  /** Tonic of the key to generate in, e.g. "C", "Bb", "F#"; `mode` completes it. */
+  key?: string | null
+  /** "major" (the default when omitted), "minor", or a modal name. */
+  mode?: string | null
   time_sig?: number | null
   tempo?: number | null
   num_bars?: number

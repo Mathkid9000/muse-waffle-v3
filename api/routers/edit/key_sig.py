@@ -14,19 +14,17 @@ router = APIRouter()
 def _run_edit(body: EditKeySigRequest) -> str:
     import music21 as m21
     import music21.musicxml as musicxml
+    from api.keys import normalize_tonic
     from api.routers.infill import _ordinal_to_measure_numbers
 
     orig_score = m21.converter.parseData(body.xml, format="musicxml")
     if not orig_score.parts:
         raise RuntimeError("Key signature edit failed: score has no parts")
 
-    # Normalize the tonic to music21 spelling ("Bb" -> "B-", "F#" -> "F#") and let
-    # music21 derive the sharp/flat count for the requested mode (major/minor/modal).
-    tonic = body.new_tonic.strip()
-    tonic = tonic[:1].upper() + tonic[1:].replace("b", "-").replace("♭", "-").replace("♯", "#")
+    # music21 derives the sharp/flat count for the requested mode (major/minor/modal).
     mode = (body.new_mode or "major").strip().lower()
     try:
-        new_key = m21.key.Key(tonic, mode)
+        new_key = m21.key.Key(normalize_tonic(body.new_tonic), mode)
     except Exception as e:
         raise RuntimeError(f"Key signature edit failed: bad key {body.new_tonic!r} {body.new_mode!r} ({e})")
 

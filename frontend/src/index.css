@@ -6,16 +6,17 @@
 
 :root {
   --background: #191d1e;
-  --background-light: #faf6f3;
+  --background-light: rgb(250, 246, 243);
   --background-grey: #c9c0ba;
   --background-green1: #5a6d60;
   --background-green2: #6d7962;
   --text: #f4ebe5;
   --disabled-text: #3f4550;
+  --dark-text: rgb(52, 59, 61);
   --primary: #849674;
   --secondary: #85bd7a;
-  /* --primary-brown: rgb(186, 170, 145);
-  --secondary-brown: #877459; */
+  --primary-brown: rgb(186, 170, 145);
+  --secondary-brown: #877459;
   --accent: rgb(112, 120, 122);
   --transparent-accent: rgba(112, 120, 122, 0.5);
   --user-marquee: rgba(112, 120, 122, 0.1);

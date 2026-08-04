@@ -1,0 +1,141 @@
+.headerBar {
+    height: 60px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='170' height='8'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='1' x2='0' y2='0' gradientTransform='rotate(40 0.5 0.5)'%3E%3Cstop offset='0' stop-color='%23000'/%3E%3Cstop offset='1' stop-color='%23fff'/%3E%3C/linearGradient%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='2' numOctaves='1' result='n'/%3E%3CfeColorMatrix in='n' type='matrix' values='0.33 0.33 0.33 0 0 0.33 0.33 0.33 0 0 0.33 0.33 0.33 0 0 0 0 0 0 1,5' result='m'/%3E%3CfeComponentTransfer in='m' result='m2'%3E%3CfeFuncR type='linear' slope='1,5' intercept='-0.1'/%3E%3CfeFuncG type='linear' slope='1.5' intercept='0'/%3E%3CfeFuncB type='linear' slope='1' intercept='0'/%3E%3C/feComponentTransfer%3E%3CfeComposite in='SourceGraphic' in2='m2' operator='arithmetic' k2='1' k3='-1' k4='0.5'/%3E%3CfeComponentTransfer%3E%3CfeFuncR type='discrete' tableValues='0 1'/%3E%3CfeFuncG type='discrete' tableValues='0 1'/%3E%3CfeFuncB type='discrete' tableValues='0 1'/%3E%3CfeFuncA type='discrete' tableValues='1'/%3E%3C/feComponentTransfer%3E%3C/filter%3E%3Cmask id='msk'%3E%3Crect width='100%25' height='100%25' fill='url(%23g)' filter='url(%23noise)'/%3E%3C/mask%3E%3C/defs%3E%3Crect width='100%25' height='100%25' fill='%235a6d60'/%3E%3Crect width='100%25' height='100%25' fill='%23737d6a' mask='url(%23msk)'/%3E%3C/svg%3E");
+    background-size: cover;
+    border-bottom: var(--text) 1px solid;
+    image-rendering: crisp-edges; 
+    image-rendering: pixelated;
+    z-index: 20;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    display: inline;
+    padding: 20px;
+}
+
+.background {
+    z-index: -999;
+    background-color: var(--background);
+    height: 100%;
+    width: 100%;
+    position: fixed;
+    left: 0;
+    top: 0;
+}
+
+.museWaffleTitle {
+    left: 0;
+    position: relative;
+    top: 0;
+    line-height: 20px;
+    font-family: 'Jersey 15';
+    font-size: 40px;
+    color: var(--background);
+    display: inline-flex;
+    font-weight: 600;
+    letter-spacing: 5px;
+    margin: 0;
+    text-shadow: 0 4px 0 rgba(0, 0, 0, 0.3);
+}
+
+.avatarContainer {
+    position: absolute;
+    right: 10px;
+    top: 10px;
+    width: fit-content;
+    height: fit-content;
+    display: flex;
+}
+
+.scoreGrid {
+    position: relative;
+    top: 60px;
+    left: 0;
+    width: fit-content;
+    margin: 0 auto;
+    height: fit-content;
+    min-height: calc(100% - 60px);
+    display: grid;
+    padding: 50px;
+    grid-template-columns: repeat(4, 300px);
+    grid-auto-rows: 400px;
+    gap: 40px;
+}
+
+.scoreGridItem {
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    background-color: var(--background-light);
+    border: 1px solid var(--background);
+    cursor: pointer;
+    position: relative;
+}
+
+.preview {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+}
+
+.newScore {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: 'Jersey 15';
+    font-size: 80px;
+    color: var(--dark-text);
+}
+
+@media (max-width: 1600px) {
+    .scoreGrid {
+        grid-template-columns: repeat(3, 300px);
+    }
+}
+@media (max-width: 1100px) {
+    .scoreGrid {
+        grid-template-columns: repeat(2, 300px);
+    }
+}
+@media (max-width: 750px) {
+    .scoreGrid {
+        grid-template-columns: repeat(1, 300px);
+        padding: 50px 10px;
+    }
+}
+
+.scoreInfo {
+    position: absolute;
+    width: fit-content;
+    height: fit-content;
+    padding: 10px;
+    max-width: calc(100% - 20px);
+    background-color: rgba(250, 246, 243, 0.5);
+    border: 1px solid var(--accent);
+    backdrop-filter: blur(1px);
+    bottom: 10px;
+    left: 10px;
+}
+
+.scoreName {
+    position: relative;
+    font-family: 'Jersey 15';
+    font-size: 20px;
+    font-weight: 400;
+    width: fit-content;
+    margin: 0;
+    color: var(--background);
+    line-height: 17px;
+    text-shadow: 0 0 2px rgb(250, 246, 243);
+}
+
+.scoreDate {
+    font-family: 'TASA Orbiter';
+    margin: 0;
+    margin-top: 2px;
+    font-size: 12px;
+    font-style: italic;
+    font-weight: 200;
+}

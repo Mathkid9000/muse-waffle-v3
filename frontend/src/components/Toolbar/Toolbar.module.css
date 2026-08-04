@@ -60,9 +60,44 @@
   letter-spacing: 0.05em;
   color: var(--text);
   margin-left: 10px;
-  /* background: linear-gradient(to right, var(--text), var(--disabled-text));
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent; */
+  white-space: nowrap;
+  outline: none;
+  cursor: default;
+}
+
+.brand br {
+  display: none;
+}
+
+.brand.editable {
+  cursor: text;
+}
+
+.brand.editable:hover {
+  background-color: var(--user-selection);
+  padding: 4px 10px;
+  margin-left: 0;
+}
+
+.brand.editable:focus {
+  background-color: var(--user-selection);
+  padding: 4px 10px;
+  margin-left: 0;
+}
+
+.lastSaved {
+  font-size: 12px;
+  font-style: italic;
+  font-family: 'TASA Orbiter';
+  font-weight: 200;
+  text-align: start;
+  color: var(--background-grey);
+  margin: 0 0 0 20px;
+  text-decoration: underline;
+  width: fit-content;
+  height: 100%;
+  line-height: 20px;
+  padding-top: 2px;
 }
 
 .actions {
@@ -138,7 +173,7 @@
 
 .dropdownGrid {
   display: grid;
-  grid-template-columns: repeat(3, 50px);
+  grid-template-columns: 50px 50px 50px 300px;
   margin-left:0;
   margin-top: 5px;
 }
@@ -189,4 +224,13 @@
 
 .dropdownItem.disabled:hover {
   background-color: var(--background-light);
+}
+
+.avatarContainer {
+    position: absolute;
+    right: 25px;
+    top: 25px;
+    width: fit-content;
+    height: fit-content;
+    display: flex;
 }

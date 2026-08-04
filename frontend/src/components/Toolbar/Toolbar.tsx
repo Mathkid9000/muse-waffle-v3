@@ -1,11 +1,19 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useStore } from '../../store'
+import { useAuth } from '../../contexts/AuthContext'
+import { formatDate, getScore, saveScore, setScoreName, type ScoreRow } from '../../lib/scores'
 import { countInstruments } from '../../hooks/useVerovio'
 import styles from './Toolbar.module.css'
+import Avatar from '../Avatar/Avatar'
 
 export default function Toolbar() {
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const navigate = useNavigate()
+  const { user, profile } = useAuth()
   const currentXml = useStore((s) => s.currentXml)
+  const scoreId = useStore((s) => s.scoreId)
+  const setScoreId = useStore((s) => s.setScoreId)
   const zoom = useStore((s) => s.zoom)
   const setXml = useStore((s) => s.setXml)
   const setScoreData = useStore((s) => s.setScoreData)
@@ -18,6 +26,7 @@ export default function Toolbar() {
 
   const [ isFileDdOpen, setIsFileDdOpen ] = useState<boolean>(false)
   const [ isViewDdOpen, setIsViewDdOpen ] = useState<boolean>(false)
+  const [ scoreRow, setScoreRow ] = useState<ScoreRow | null>(null)
 
   // Toolbar zoom anchors at the viewport center (the wheel anchors at the cursor).
   const zoomStep = (delta: number) => zoomTo(zoom + delta, viewportW / 2, viewportH / 2)
@@ -53,6 +62,44 @@ export default function Toolbar() {
     e.target.value = ''
   }
 
+  async function handleSave() {
+    if (!currentXml || !user) return
+    const id = await saveScore(user.id, currentXml, scoreId)
+    // The preview render leaves the shared toolkit on a portrait page — put the editor's back.
+    redrawScore()
+    if (!id) return setError('Failed to save score.')
+    if (id !== scoreId) {
+      setScoreId(id)
+      navigate(`/editor/${id}`, { replace: true })
+    }
+    const newScoreRow = await getScore(id)
+    setScoreRow(newScoreRow)
+  }
+
+  // Rebound every render so the handler always closes over the current xml and score id.
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') {
+        e.preventDefault()
+        handleSave()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  })
+
+  useEffect(() => {
+    const func = async () => {
+      if (scoreId == null) {
+        setScoreRow(null)
+        return
+      }
+      const row = await getScore(scoreId)
+      setScoreRow(row)
+    }
+    func()
+  }, [scoreId])
+
   function handleDownload() {
     if (!currentXml) return
     const blob = new Blob([currentXml], { type: 'application/xml' })
@@ -64,25 +111,31 @@ export default function Toolbar() {
     URL.revokeObjectURL(url)
   }
 
+  function handleNameChange(e: EventTarget, event?: () => void) {
+    if (event) { 
+      try {
+        event()
+      }
+      catch {}
+      e.blur()
+    }
+
+    if (!scoreId) return
+    const newName = (e as HTMLElement).textContent
+    setScoreName(scoreId, newName)
+    console.log('Name changed to ', newName)
+  }
+
   return (
     <header className={styles.toolbar}>
-      <span className={styles.brand}>Cogwork Dancers: Orchestral Version</span>
-      {/* <div className={styles.actions}>
-        <button className={`${styles.btn} ${styles.primary}`} onClick={() => fileInputRef.current?.click()}>
-          Open MusicXML
-        </button>
-        <button className={`${styles.btn} ${styles.secondary}`} onClick={handleDownload} disabled={!currentXml}>
-          Download
-        </button>
-        <button className={`${styles.btn} ${styles.secondary}`} onClick={() => redrawScore()} disabled={!currentXml} title="Re-render the score">
-          Redraw
-        </button>
-        <div className={styles.zoom}>
-          <button className={styles.zoomBtn} onClick={() => zoomStep(-10)} disabled={zoom <= 25} title="Zoom out (Ctrl+Scroll)">−</button>
-          <span className={styles.zoomLabel} title="Double-click to reset" onDoubleClick={() => resetCamera()} style={{ cursor: 'default' }}>{zoom}%</span>
-          <button className={styles.zoomBtn} onClick={() => zoomStep(10)} disabled={zoom >= 300} title="Zoom in (Ctrl+Scroll)">+</button>
-        </div>
-      </div> */}
+      <span className={scoreId ? `${styles.brand} ${styles.editable}` : `${styles.brand}`} contentEditable spellcheck={"false"} 
+        onKeyDown={(e) => e.key === 'Enter' ? handleNameChange(e.target, e.preventDefault) : {}} 
+        onBlur={(e) => handleNameChange(e.target)}>
+          {!scoreRow ? 'Unsaved Score' : scoreRow.name}
+      </span>
+      <div className={styles.avatarContainer}>
+        <Avatar profile={profile} />
+      </div>
       <input
         ref={fileInputRef}
         type="file"
@@ -96,6 +149,7 @@ export default function Toolbar() {
           {isFileDdOpen && (
             <ul className={styles.dropdownContainer}>
               <li className={styles.dropdownItem} onClick={() => fileInputRef.current?.click()}>Import File</li>
+              <li className={styles.dropdownItem} onClick={handleSave}>Save</li>
               <li className={styles.dropdownItem} onClick={handleDownload}>Export</li>
             </ul>
           )}
@@ -111,6 +165,7 @@ export default function Toolbar() {
           )}
         </button>
         <button className={styles.dropdownBtn}>Help</button>
+        {scoreRow && (<p className={styles.lastSaved}>Last Saved {formatDate(scoreRow.updated_at)}</p>)}
       </div>
     </header>
   )

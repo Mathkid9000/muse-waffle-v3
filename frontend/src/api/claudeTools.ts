@@ -38,7 +38,7 @@ export async function promptAnthropic(prompt: string, xml: string, pushCallback:
         system: "Your ONLY job is to classify which edit types the request needs, never to act on it or ask questions. "
             + "Do not worry about missing details like which measures/staves/values are meant. "
             + "References like \"these measures\", \"the selected staff\", or even no given location always refer to that selection, so still classify them. "
-            + "If nothing matches an edit type, return an empty list.",
+            + "If nothing matches an edit type, return an empty list. If the user asks for a generation, the generate_score tool encapsulates most types of score edits and may also add new measures.",
         messages: [
             { role: 'user', content: prompt }
         ],
@@ -144,6 +144,7 @@ function getReadResults(queries: ReadQuery[], xml: string, selection?: ScoreSele
 }
 
 function getReadResult(query: ReadQuery, xml: string, selection?: ScoreSelection | null): string {
+    if (xml === '') return "No score exists currently. You must generate to begin."
     switch (query) {
         case "clef":
             return readHeaded("Clef layout (staff_num is 0-based, measures 1-based; listed at m1 and every change)",
@@ -187,6 +188,7 @@ function describeSelection(sel?: ScoreSelection | null): string {
 }
 
 function getPromptContext(promptType: string, xml: string): string | undefined {
+    if (xml === "") return "No current score exists."
     switch (promptType) {
         case "edit_clef":
             return getContext_edit_clef(xml);
@@ -838,10 +840,15 @@ const TOOLS = {
                     type: "boolean",
                     description: "True if the generation should overwrite the current measures located from measure_start_num to measure_start_num + generation_length. False means it will be inserted, creating new measures at the given location."
                 },
-                key: {
+                tonic: {
                     type: [ "string", "null" ],
-                    enum: [ "Gb", "Db", "Ab", "Eb", "Bb", "F", "C", "G", "D", "A", "E", "B", "F#", null ],
-                    description: "The tonic the generation is in. Only the key signature is meant, so major and minor share a tonic (A minor is C). Null to carry on in whatever key is in effect before measure_start_num."
+                    enum: [ "Cb", "Gb", "Db", "Ab", "Eb", "Bb", "F", "C", "G", "D", "A", "E", "B", "F#", "C#", null ],
+                    description: "The tonic of the key the generation is in, spelled as the mode's own tonic (A minor is 'A', not 'C'). Null to carry on in whatever key is in effect before measure_start_num."
+                },
+                mode: {
+                    type: [ "string", "null" ],
+                    enum: [ "major", "minor", "dorian", "phrygian", "lydian", "mixolydian", "locrian", null ],
+                    description: "The mode of that key. Give it alongside tonic; the backend derives the key signature from the pair. Null is read as major."
                 },
                 time_signature: {
                     type: [ "string", "null" ],
@@ -853,7 +860,7 @@ const TOOLS = {
                     description: "The tempo of the generation in beats per minute. Null to carry on at whatever tempo is in effect before measure_start_num."
                 }
             },
-            required: [ "measure_start_num", "generation_staffs", "generation_length", "overwrite_current", "key", "time_signature", "tempo" ]
+            required: [ "measure_start_num", "generation_staffs", "generation_length", "overwrite_current", "tonic", "mode", "time_signature", "tempo" ]
         }
     }
 }

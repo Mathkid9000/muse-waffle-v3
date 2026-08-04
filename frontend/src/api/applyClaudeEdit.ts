@@ -10,8 +10,6 @@ const INSTR_ENUM = [
   'voice_baritone', 'voice_bass', 'voice', 'choir',
 ]
 const TIME_SIG_LABELS = ['2/4', '3/4', '4/4', '6/8', '3/8', '12/8']
-// Tonics the model can hold, ordered as the backend's key index: 6 flats -> 6 sharps.
-const KEY_ENUM = ['Gb', 'Db', 'Ab', 'Eb', 'Bb', 'F', 'C', 'G', 'D', 'A', 'E', 'B', 'F#']
 // The model stores tempo in ~16 buckets of 16 bpm (see tokenizer.py's TEMPO_ tokens).
 const TEMPO_BUCKET = (bpm: number) => Math.max(0, Math.min(15, Math.round(bpm / 16)))
 // A label's backend index, or null for the nulls the tool allows and for anything off-enum —
@@ -106,7 +104,9 @@ export async function applyClaudeEdit(tool: string, input: Record<string, unknow
                 start_measure: clamp(args.measure_start_num, 1, 1e6, 1),
                 instruments: staffs.map(s => INSTR_ENUM.indexOf(String(s.instrument))).filter(i => i >= 0),
                 parts: staffs.length > 0 ? staffs.map(s => Number(s.staff_num)).filter(n => n >= 0) : null,
-                key: index(KEY_ENUM, args.key),
+                // The tonic/mode pair goes over as spelled: the backend derives the key signature.
+                key: args.tonic == null ? null : String(args.tonic),
+                mode: args.mode == null ? null : String(args.mode),
                 time_sig: index(TIME_SIG_LABELS, args.time_signature),
                 tempo: args.tempo == null ? null : TEMPO_BUCKET(Number(args.tempo)),
                 num_bars: clamp(args.generation_length, 1, 128, 4),

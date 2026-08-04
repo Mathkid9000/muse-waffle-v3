@@ -88,6 +88,26 @@ export async function countInstruments(data: string): Promise<number> {
   return Math.max(loadedStaffCount(tk), 1)
 }
 
+/**
+ * Renders page 1 of `data` onto a page of the given size (Verovio units are 1/10 mm), letting
+ * `breaks: 'auto'` stack as many systems as fit — used for the dashboard preview, whose card is
+ * portrait where the editor's page is wide and short. Leaves the shared toolkit holding these
+ * options, so callers rendering the editor afterwards must redraw it.
+ */
+export function renderPreviewSvg(data: string, width: number, height: number, scale: number): string {
+  if (!shared) return ''
+  shared.setOptions({
+    pageWidth: width,
+    pageHeight: height,
+    breaks: 'auto',
+    scale,
+    footer: 'none',
+    header: 'none',
+    spacingLinear: 0.5,
+  })
+  return loadScore(shared, data) ? shared.renderToSVG(1) : ''
+}
+
 /** Returns base64-encoded MIDI for the currently-loaded score. */
 export function getCurrentMidi(): string {
   return shared?.renderToMIDI() ?? ''

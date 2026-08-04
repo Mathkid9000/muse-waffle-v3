@@ -16,13 +16,18 @@ logger = logging.getLogger(__name__)
 
 def _stream(body: GenerateRequest):
     from ml.api import generate_stream
+    from api.keys import key_index
+
+    key = key_index(body.key, body.mode)
+    if body.key and key is None:
+        logger.warning("Ignoring unparseable key %r %r", body.key, body.mode)
 
     return generate_stream(
         xml_str=body.xml,
         start_measure=body.start_measure,
         instruments=body.instruments,
         parts=body.parts,
-        key=body.key,
+        key=key,
         time_sig=body.time_sig,
         tempo=body.tempo,
         num_bars=body.num_bars,

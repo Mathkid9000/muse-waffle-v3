@@ -666,31 +666,51 @@ export default function ScoreViewer() {
 
     console.log(e.target.value)
     const prompt = e.target.value
-    // const response = await promptAnthropic(prompt, '', 
-    //   (thought) => {console.log(thought)}, 
-    //   (title) => {console.log(title)}, null)
-    const response = [
-      [
-          {
-              "tool": "generate_score",
-              "input": {
-                  "measure_start_num": 1,
-                  "generation_length": 8,
-                  "generation_staffs": [
-                  ],
-                  "overwrite_current": false
-              }
-          }
-      ],
-      1982,
-      194
-    ]
+    const response = await promptAnthropic(prompt, '', 
+      (thought) => {console.log(thought)}, 
+      (title) => {console.log(title)}, null)
+//     const response = [
+//         [
+//     {
+//         "tool": "generate_score",
+//         "input": {
+//             "measure_start_num": 1,
+//             "generation_staffs": [
+//                 {
+//                     "staff_num": 0,
+//                     "instrument": "voice_soprano"
+//                 },
+//                 {
+//                     "staff_num": 1,
+//                     "instrument": "voice_alto"
+//                 },
+//                 {
+//                     "staff_num": 2,
+//                     "instrument": "voice_tenor"
+//                 },
+//                 {
+//                     "staff_num": 3,
+//                     "instrument": "voice_baritone"
+//                 }
+//             ],
+//             "generation_length": 16,
+//             "overwrite_current": true,
+//             "tonic": "Bb",
+//             "mode": "major",
+//             "time_signature": "4/4",
+//             "tempo": 80
+//         }
+//     }
+// ],
+//         2698,
+//         300
+//     ]
 
+    console.log(response)
     const edits = Array.isArray(response[0]) ? response[0] : []
     for (const { tool, input } of edits) {
       applyClaudeEdit(tool, input, currentXml ?? '', setXml)
     }
-    console.log(response)
   }
 
   return (
