@@ -234,3 +234,13 @@
     height: fit-content;
     display: flex;
 }
+
+.unsavedChanges {
+  color: var(--primary-brown);
+  font-size: 32px;
+  font-family: 'Jersey 15';
+  margin-right: 5px;
+  margin-top: 0;
+  line-height: 30px;
+  font-weight: 800;
+}

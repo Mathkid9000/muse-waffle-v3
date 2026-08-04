@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import Avatar from '../components/Avatar/Avatar'
 import { useAuth } from '../contexts/AuthContext'
-import { listScores, previewUrl, type ScoreRow } from '../lib/scores'
+import { formatDate, listScores, previewUrl, type ScoreRow } from '../lib/scores'
 import { useStore } from '../store'
 import styles from './Dashboard.module.css'
 
@@ -40,7 +40,7 @@ export default function Dashboard() {
             <img className={styles.preview} src={previewUrl(score.user_id, score.id, score.updated_at)} />
             <div className={styles.scoreInfo}>
               <h2 className={styles.scoreName}>{score.name}</h2>
-              <p className={styles.scoreDate}>{new Intl.DateTimeFormat('en-US').format(Date.parse(score.updated_at))}</p>
+              <p className={styles.scoreDate}>{formatDate(score.updated_at)}</p>
             </div>
           </div>
         ))}

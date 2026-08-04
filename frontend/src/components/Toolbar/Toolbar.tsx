@@ -26,6 +26,7 @@ export default function Toolbar() {
 
   const [ isFileDdOpen, setIsFileDdOpen ] = useState<boolean>(false)
   const [ isViewDdOpen, setIsViewDdOpen ] = useState<boolean>(false)
+  const [ isExitDdOpen, setIsExitDdOpen ] = useState<boolean>(false)
   const [ scoreRow, setScoreRow ] = useState<ScoreRow | null>(null)
 
   // Toolbar zoom anchors at the viewport center (the wheel anchors at the cursor).
@@ -128,10 +129,13 @@ export default function Toolbar() {
 
   return (
     <header className={styles.toolbar}>
-      <span className={scoreId ? `${styles.brand} ${styles.editable}` : `${styles.brand}`} contentEditable spellcheck={"false"} 
-        onKeyDown={(e) => e.key === 'Enter' ? handleNameChange(e.target, e.preventDefault) : {}} 
-        onBlur={(e) => handleNameChange(e.target)}>
-          {!scoreRow ? 'Unsaved Score' : scoreRow.name}
+      <span className={styles.brand}>
+        {/* {!noChanges && (<span className={styles.unsavedChanges}>*</span>)} */}
+        <span className={scoreId ? `${styles.brand} ${styles.editable}` : `${styles.brand}`} contentEditable spellcheck={"false"} 
+          onKeyDown={(e) => e.key === 'Enter' ? handleNameChange(e.target, e.preventDefault) : {}} 
+          onBlur={(e) => handleNameChange(e.target)}>
+            {!scoreRow ? 'Unsaved Score' : scoreRow.name}
+        </span>
       </span>
       <div className={styles.avatarContainer}>
         <Avatar profile={profile} />
@@ -164,7 +168,15 @@ export default function Toolbar() {
             </ul>
           )}
         </button>
-        <button className={styles.dropdownBtn}>Help</button>
+        <button className={styles.dropdownBtn} onClick={() => setIsExitDdOpen(true)} onMouseLeave={() => setIsExitDdOpen(false)}>
+          Exit
+          {isExitDdOpen && (
+            <ul className={styles.dropdownContainer}>
+              <li className={styles.dropdownItem} onClick={async () => { await handleSave(); navigate('/dashboard') }}>Save and Exit</li>
+              <li className={styles.dropdownItem} onClick={() => navigate('/dashboard')}>Exit without Saving</li>
+            </ul>
+          )}
+        </button>
         {scoreRow && (<p className={styles.lastSaved}>Last Saved {formatDate(scoreRow.updated_at)}</p>)}
       </div>
     </header>

@@ -38,7 +38,7 @@ export async function promptAnthropic(prompt: string, xml: string, pushCallback:
         system: "Your ONLY job is to classify which edit types the request needs, never to act on it or ask questions. "
             + "Do not worry about missing details like which measures/staves/values are meant. "
             + "References like \"these measures\", \"the selected staff\", or even no given location always refer to that selection, so still classify them. "
-            + "If nothing matches an edit type, return an empty list. If the user asks for a generation, the generate_score tool encapsulates most types of score edits and may also add new measures.",
+            + "If nothing matches an edit type, return an empty list. If the user asks for a generation, the generate_score tool encapsulates most types of score edits and may also add new measures. If the user does not ask for any edits besides the generation, nothing needs to be read.",
         messages: [
             { role: 'user', content: prompt }
         ],
