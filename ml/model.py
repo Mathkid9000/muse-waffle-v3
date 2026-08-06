@@ -16,7 +16,7 @@ class GQA(nn.Module):
         self.v_proj = nn.Linear(hidden_dim, self.num_kv_heads * self.head_dim)
         self.out_proj = nn.Linear(self.num_heads * self.head_dim, hidden_dim)
 
-    def forward(self, q, k, v, mask=None, rope=None):
+    def forward(self, q, k, v, mask=None, rope=None, is_causal=True):
         q_batch_size, q_seq_len, hidden_dim = q.shape
         k_batch_size, k_seq_len, hidden_dim = k.shape
         v_batch_size, v_seq_len, hidden_dim = v.shape
@@ -46,7 +46,7 @@ class GQA(nn.Module):
         # memory linear in the sequence length, so pass no mask unless it isn't just causal
         output = F.scaled_dot_product_attention(q, k, v,
                                                 attn_mask=mask,
-                                                is_causal=mask is None,
+                                                is_causal=is_causal,
                                                 dropout_p=self.dropout if self.training else 0.0)
         output = output.transpose(1, 2).reshape(q_batch_size, q_seq_len, hidden_dim).contiguous()
         output = self.out_proj(output)
@@ -126,10 +126,10 @@ class DecoderLayer(nn.Module):
         self.norm2 = nn.RMSNorm(hidden_dim)
         self.drop = nn.Dropout(dropout)
 
-    def forward(self, x, mask=None, rope=None):
+    def forward(self, x, mask=None, rope=None, is_causal=True):
         # self-attention sublayer
         out = self.norm1(x)
-        out = self.self_attn(out, out, out, mask, rope)
+        out = self.self_attn(out, out, out, mask, rope, is_causal)
         x = self.drop(out) + x
         # MLP sublayer
         out = self.norm2(x)
@@ -177,12 +177,12 @@ class MusicTransformer(nn.Module):
             for i, vocab in enumerate(field_sizes)
         ])
 
-    def hidden(self, ids, mask=None):
+    def hidden(self, ids, mask=None, is_causal=True):
         """Trunk only: (B, T, num_fields) ids -> (B, T, hidden_dim)."""
         embeds = [emb(ids[..., i]) for i, emb in enumerate(self.field_embeddings)]
         x = self.embed_drop(self.input_proj(torch.cat(embeds, dim=-1)))
         for decoder in self.decoders:
-            x = decoder(x, mask, self.rope)
+            x = decoder(x, mask, self.rope, is_causal)
         return self.norm(x)
 
     def field_logits(self, i, h, prev_fields):
@@ -192,18 +192,19 @@ class MusicTransformer(nn.Module):
         cond = [h] + [self.field_embeddings[j](prev_fields[j]) for j in range(i)]
         return self.heads[i](torch.cat(cond, dim=-1))
 
-    def forward(self, ids, mask=None, target_fields=None):
+    def forward(self, ids, mask=None, target_fields=None, is_causal=True):
         """Teacher-forced logits: one (B, T, field_size_i) tensor per field.
 
         ``target_fields`` (B, T, num_fields) is the row each position predicts
-        (the usual one-step-shifted targets). Head i conditions on that row's
-        fields < i — the within-row chain rule; no cross-row leak because
-        position t is being scored on exactly that row anyway.
+        (the one-step-shifted targets when causal, the row occupying the slot
+        itself when infilling). Head i conditions on that row's fields < i — the
+        within-row chain rule; no cross-row leak because position t is being
+        scored on exactly that row anyway.
         """
         if target_fields is None:
             raise ValueError(
                 "forward() needs target_fields for the intra-row chain; "
                 "use hidden() + field_logits() for step-wise sampling")
-        h = self.hidden(ids, mask)
+        h = self.hidden(ids, mask, is_causal)
         return [self.field_logits(i, h, [target_fields[..., j] for j in range(i)])
                 for i in range(self.num_fields)]

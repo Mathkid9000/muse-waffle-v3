@@ -886,6 +886,22 @@ def tokens_to_score(tokens):
     score.write("musicxml", STORAGE_DIR / "output.mxl", makeNotation=True)
 
 
+# the infill model's specials, appended after the corpus tokens and never inserted, so every
+# token already in a head keeps its id and a grown vocab still decodes an existing data.npz.
+# MASK is what the caller leaves in a canvas slot for the model to write. NULL is the slack in
+# an over-allocated canvas: it lives in field 2, the field that says what kind of event a row
+# is, because the caller supplies field 0 and so the model can only answer "no event" there.
+# '' is field 0's padding; fields 1-4 already carry it as a real value.
+SPECIALS = [['MASK', 'NULL', ''], ['MASK'], ['MASK', 'NULL'], ['MASK'], ['MASK']]
+NULL_ROW = ('M_SAME', 'POS_0', 'NULL', '', '')   # no event, and no bar advance either
+
+
+def add_special_tokens(vocab):
+    for head, specials in zip(vocab, SPECIALS):
+        head.extend(tok for tok in specials if tok not in head)
+    return vocab
+
+
 def build_vocab_list(counts, plot=False):
     """One head per field, ids in order of first appearance in the corpus. `counts` is count_tokens'
     per-field token -> occurrences, which is already keyed by every token there is."""
@@ -894,7 +910,7 @@ def build_vocab_list(counts, plot=False):
     if plot:
         with open(VOCAB_LIST_PLOT_PATH, 'w') as f:
             json.dump(counts, f)
-    return [ list(head) for head in counts ]
+    return add_special_tokens([ list(head) for head in counts ])
 
 
 def save_vocab_list(vocab):
@@ -913,8 +929,10 @@ class QuintupleTokenizer:
         vocab_dict = [ { tok: idx for idx, tok in enumerate(head) } for head in vocab_list ]
         self.vocabs = vocab_dict
         self.field_sizes = [len(v) for v in self.vocabs]
-        self.pad_ids = [None] + [self.vocabs[i][''] for i in range(1, 5)]
+        self.pad_ids = [self.vocabs[i][''] for i in range(0, 5)]
         self.inv = [{i: s for s, i in v.items()} for v in self.vocabs]
+        self.mask_ids = [self.vocabs[i]['MASK'] for i in range(0, 5)]
+        self.null_row = self.encode([NULL_ROW])[0]
         # structural-consistency sets for constrained sampling (generate.py): rows whose field 0
         # is structural carry '' in fields 1-3 and either '' (SOG/SOS/EOS) or a VOICE (INSTR) in
         # field 4; everything the model samples outside that is a malformed row by construction

@@ -8,12 +8,12 @@ from model import MusicTransformer
 from model_util import load_val_split_only, build_model, load_full_model, save_model, append_epoch_to_config
 from helpers import BATCH_SIZE, VAL_SPLIT, SEQ_LEN
 from tokenizer import QuintupleTokenizer, load_dataset
-from dataset import QuintupleDataset, make_dataloader
+from dataset import make_infill_dataloader
 
 
 def compound_loss(logits, y, pad_ids, weights):
     """Sum of per-field cross-entropies, ignoring padding rows and weighting
-    each target position by ``weights`` (float (B,T).
+    each target position by ``weights`` (float (B,T,5).
     ``logits`` is a list of (B,T,V_i); ``y`` is (B,T,5).
 
     Padding is identified by field 0 == PAD (a whole padding ROW), NOT by a
@@ -25,14 +25,18 @@ def compound_loss(logits, y, pad_ids, weights):
     note/chord-like garbage in those fields. Keying off the field-0 PAD row
     keeps genuine padding excluded while supervising ''.
 
-    ``pad_ids[0]`` is currently None: field 0 has no '' entry in the vocab (it
-    is always M_*/SOG/SOS/EOS/INSTR_*) and build_vocab_list adds no PAD
-    special, so nothing is masked out. That is correct for the present data
-    path -- QuintupleDataset concatenates every sequence into one dense stream
-    and windows it, so no padding rows exist. The None case MUST be handled
-    explicitly rather than left to fall out of the comparison: `tensor == None`
-    evaluates to the Python bool False (not an elementwise mask), and `~False`
-    is the int -1, which silently negates the whole loss.
+    ``weights`` is per FIELD, not per row, and each field is normalized by its
+    own count. The infill corruption hides fields 1-4 far more often than it
+    hides field 0, so one shared denominator would shrink head 0's term toward
+    nothing -- which the trailing average over heads silently assumes is not
+    happening. Weighting per field is also what keeps head 0 from being trained
+    to copy: where the caller supplies the bar advance, field 0 is an input, and
+    scoring it there is free loss that dilutes every other head's gradient.
+
+    A None ``pad_ids[0]`` (a vocab built before the specials existed) MUST be
+    handled explicitly rather than left to fall out of the comparison: `tensor
+    == None` evaluates to the Python bool False (not an elementwise mask), and
+    `~False` is the int -1, which silently negates the whole loss.
     """
     if pad_ids[0] is None:
         row_valid = torch.ones_like(y[..., 0], dtype=torch.float32)
@@ -40,8 +44,8 @@ def compound_loss(logits, y, pad_ids, weights):
         row_valid = (y[..., 0] != pad_ids[0]).float()
 
     total = 0.0
-    valid = weights * row_valid                 # loop-invariant
-    denom = valid.sum().clamp(min=1)
+    valid = weights * row_valid.unsqueeze(-1)                 # loop-invariant
+    denom = valid.sum(dim=(0,1)).clamp(min=1) # (5,)
     for i, logit in enumerate(logits):
         # label smoothing: the model exists to be sampled from, and the pitch/duration heads
         # otherwise converge to overconfident modes that top-k sampling then can't escape
@@ -51,7 +55,7 @@ def compound_loss(logits, y, pad_ids, weights):
             reduction="none",
             label_smoothing=0.05,
         ).view(y.shape[0], y.shape[1])
-        total = total + (ce * valid).sum() / denom
+        total = total + (ce * valid[..., i]).sum() / denom[i]
     return total / len(logits)
 
 
@@ -62,12 +66,11 @@ def evaluate_val(model, val_loader, pad_ids, device, max_batches=100):
     was_training = model.training
     model.eval()
     total, n = 0.0, 0
-    for i, (x, y) in enumerate(val_loader):
+    for i, (x, y, weights) in enumerate(val_loader):
         if i >= max_batches:
             break
-        x, y = x.to(device), y.to(device)
-        logits = model(x, target_fields=y)
-        weights = torch.ones_like(y[..., 0], dtype=torch.float32)
+        x, y, weights = x.to(device), y.to(device), weights.to(device)
+        logits = model(x, target_fields=y, is_causal=False)
         total += compound_loss(logits, y, pad_ids, weights).item()
         n += 1
     if was_training:
@@ -78,7 +81,7 @@ def evaluate_val(model, val_loader, pad_ids, device, max_batches=100):
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    MODEL_NAME = 'TEST123'
+    MODEL_NAME = 'the-waffiller'
     MICRO_BATCH_SIZE = 16
     GRAD_ACCUM_STEPS = max(1, BATCH_SIZE // MICRO_BATCH_SIZE)
     MAX_STEPS_PER_EPOCH = 15000   # stride-1 windows make full epochs enormous
@@ -105,28 +108,13 @@ def main():
     train_events = [ ev for name, ev in zip(score_names, tokenized_events) if name not in val_names ]
     val_events = [ ev for name, ev in zip(score_names, tokenized_events) if name in val_names ]
 
-    # # The vocab is built from the train split only; a few valid chorales are
-    # # longer than any train chorale (unseen BEAT_x) or hold rare durations.
-    # # Drop those sequences rather than crash or corrupt them (~9% of valid).
-    # n_val = len(val_events)
-    # val_events = [e for e in val_events if tokenizer.covers(e)]
-    # if len(val_events) < n_val:
-    #     print(f"Dropped {n_val - len(val_events)}/{n_val} val sequences "
-    #           f"with out-of-vocab tokens")
+    val_loader = make_infill_dataloader(
+        val_events, seq_len=SEQ_LEN, batch_size=MICRO_BATCH_SIZE,
+        shuffle=False, stride=SEQ_LEN, seed=1234)
 
-    val_dataset = QuintupleDataset(val_events, seq_len=SEQ_LEN)
-    val_subset = torch.utils.data.Subset(
-        val_dataset, range(0, len(val_dataset), SEQ_LEN))
-    val_loader = torch.utils.data.DataLoader(
-        val_subset, batch_size=MICRO_BATCH_SIZE, shuffle=False)
-
-    # model_config = get_model_config(tokenizer.field_sizes)
-    # model = MusicGenerationModel(**model_config).to(device)
     model, config = build_model(MODEL_NAME)
     model = model.to(device)
 
-    # Mixed precision: ~halves activation memory and speeds up matmuls. T4/Turing
-    # has no bf16, so use fp16 + GradScaler when on CUDA.
     use_amp = device.type == "cuda"
     amp_dtype = torch.float16
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
@@ -153,7 +141,7 @@ def main():
         [{"params": decay, "weight_decay": 0.1},
          {"params": no_decay, "weight_decay": 0.0}], lr=LR)
 
-    dataloader = make_dataloader(train_events, seq_len=SEQ_LEN, batch_size=MICRO_BATCH_SIZE)
+    dataloader = make_infill_dataloader(train_events, seq_len=SEQ_LEN, batch_size=MICRO_BATCH_SIZE)
 
     # LR schedule is stepped once per *optimizer* step (i.e. per accumulation
     # window), so count total steps in those units.
@@ -206,18 +194,18 @@ def main():
 
         progress = tqdm(dataloader, desc=f"Epoch {epoch+1}/{N_EPOCHS}", total=steps_this_epoch)
         optimizer.zero_grad(set_to_none=True)
-        for step, (x, y) in enumerate(progress, start=1):
+        for step, (x, y, weights) in enumerate(progress, start=1):
             if step > steps_this_epoch:
                 break
             steps_run = step
-            x = x.to(device)          # (B, T, 5)
-            y = y.to(device)          # (B, T, 5)
-            weights = torch.ones_like(y[..., 0], dtype=torch.float32)
+            x = x.to(device)                # (B, T, 5), hidden fields replaced by MASK
+            y = y.to(device)                # (B, T, 5)
+            weights = weights.to(device)    # (B, T, 5), 1 only where x is hidden
 
             with torch.cuda.amp.autocast(dtype=amp_dtype, enabled=use_amp):
                 # Teacher forcing for the intra-row chain: head i conditions on
                 # the target row's fields < i (see MusicGenerationModel).
-                logits = model(x, target_fields=y)
+                logits = model(x, target_fields=y, is_causal=False)
                 loss = compound_loss(logits, y, pad_ids, weights)
 
             # Normalize so accumulated grads match a full-batch average.
