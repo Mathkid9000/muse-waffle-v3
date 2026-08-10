@@ -31,8 +31,9 @@ export default function Editor() {
     if (!userId || id === scoreId) return
     fetchScoreXml(userId, id).then(async (xml) => {
       if (!xml) return
-      setScoreData({ numInstruments: await countInstruments(xml) })
-      setXml(xml)
+      const xmlRecord = JSON.parse(xml) as Record<string, string>
+      setScoreData({ numInstruments: await countInstruments(xmlRecord['Main']) })
+      Object.keys(xmlRecord).forEach(k => setXml(xmlRecord[k], k))
       setScoreId(id)
     })
   }, [id, userId])

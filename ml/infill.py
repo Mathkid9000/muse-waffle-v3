@@ -8,15 +8,16 @@ from tokenizer import QuintupleTokenizer, resolve_bars, tokens_to_score
 MASKED = ('MASK', 'MASK', 'MASK', 'MASK')
 
 
-def masked_bars(bars, slots_per_bar):
+def masked_bars(bars, slots_per_bar, start_next=True):
     """The canvas a caller hands over for a region it wants written: one bar advance per bar,
     the rest of that bar's slots left at the same bar, every other field the model's to choose.
 
     Over-allocate ``slots_per_bar`` — the model empties the slack into NULL rows, but it cannot
     add slots it was never given, so a tight budget caps the region's event density."""
     rows = []
-    for _ in range(bars):
-        rows.append(('M_NEXT', *MASKED))
+    for i in range(bars):
+        if i != 0 or start_next:
+            rows.append(('M_NEXT', *MASKED))
         rows.extend([('M_SAME', *MASKED)] * (slots_per_bar - 1))
     return rows
 
@@ -54,7 +55,11 @@ def infill(model, tokenizer, rows, steps=12, temperature=1.0, gumbel=1.0, verbos
     re-masks the rest, so later passes condition on what earlier ones settled. Sampling every
     hidden slot independently ignores their joint distribution — committing a cosine-shrinking
     fraction per pass is what buys that dependence back. Observed fields are never resampled,
-    so an injected row survives the run byte for byte."""
+    so an injected row survives the run byte for byte.
+
+    Returns (ids, order): the filled canvas, and each row's commit rank — 0 for the first slot
+    the run settled, ascending, and -1 for a row the caller gave, which was never the model's
+    to write. generation_labels turns those ranks into the labels the score carries."""
     model.eval()
     device = next(model.parameters()).device
     ids = torch.tensor(tokenizer.encode(rows), dtype=torch.long, device=device).unsqueeze(0)
@@ -63,6 +68,11 @@ def infill(model, tokenizer, rows, steps=12, temperature=1.0, gumbel=1.0, verbos
     hidden = ids == mask_ids
     todo = hidden.any(-1)
     total = int(todo.sum())
+    # the decode order is not the reading order and that is the whole point of recording it: a
+    # slot's rank says when the model made up its mind, so a score labelled with it shows the
+    # skeleton it committed early and the notes it only filled in once everything else was fixed
+    order = torch.full(ids.shape[:2], -1, dtype=torch.long, device=device)
+    settled = 0
 
     struct = torch.tensor(sorted(tokenizer.struct_f0), device=device)
     instr = torch.tensor(sorted(tokenizer.instr_f0), device=device)
@@ -101,39 +111,67 @@ def infill(model, tokenizer, rows, steps=12, temperature=1.0, gumbel=1.0, verbos
             keep = torch.topk(conf, take, dim=-1).indices
             newly = torch.zeros_like(todo).scatter_(1, keep, True)
             ids = torch.where((newly.unsqueeze(-1) & hidden), torch.stack(prev, -1), ids)
+            # topk hands the slots back in descending confidence, which IS the order this pass
+            # resolved them in, so ranking inside a pass and across passes is one sequence
+            # rather than a per-pass bucket the label would have to average over
+            order[0, keep[0]] = torch.arange(settled, settled + take, device=device)
+            settled += take
             todo &= ~newly
         if verbose:
             print(f'{step + 1}/{steps} | {int(todo.sum())} of {total} slots left')
         if not todo.any():
             break
 
-    return ids[0].tolist()
+    return ids[0].tolist(), order[0].tolist()
 
 
-def repair_seams(model, tokenizer, canvas, filled, radius=2, **kwargs):
+def repair_seams(model, tokenizer, canvas, filled, order, radius=2, **kwargs):
     """Rewrite the rows either side of every given row, now that the region around them exists.
 
     A slot committed on the first pass saw masks on one side of the join and a hard boundary on
     the other; this pass sees real music both ways. The audible artifacts sit at exactly those
-    joins, so it is worth the second run."""
+    joins, so it is worth the second run.
+
+    ``order`` is the first pass's ranks. A row this pass rewrites is renumbered after every
+    rank the first pass handed out — what survives in it is what pass two wrote, so that is
+    when it was decided — and a row left alone keeps the rank it already had."""
     given = { i for i, row in enumerate(canvas) if 'MASK' not in row }
     redo = { j for i in given for j in range(i - radius, i + radius + 1) } - given
     rows = [ (row[0], *MASKED) if i in redo and 0 <= i < len(filled) else row
              for i, row in enumerate(tokenizer.decode(filled)) ]
-    return infill(model, tokenizer, rows, **kwargs)
+    repaired, reorder = infill(model, tokenizer, rows, **kwargs)
+    base = max(order) + 1
+    return repaired, [ base + new if new >= 0 else old for new, old in zip(reorder, order) ]
 
 
-def canvas_to_tokens(tokenizer, ids):
-    """Decoded rows with the slack dropped. resolve_bars runs FIRST: it walks a running bar
-    counter, so a NULL row that landed on an M_NEXT slot still has to advance it — strip the
-    NULLs before resolving and every bar after that point silently shifts down by one."""
+def generation_labels(order):
+    """Commit ranks renumbered densely from 1 over the rows that survive the slack filter.
+
+    A rank counts every slot the run settled, NULL slack included, so on a canvas that is
+    mostly slack the raw numbers come out as a sparse scatter of four-digit labels. Renumbering
+    the survivors preserves the relative order exactly while making the score readable as
+    "1st decided, 2nd decided, ...". A caller-given row stays None: it was never generated, and
+    leaving it unlabelled is the clearest way for the score to say so."""
+    rank = { o: i for i, o in enumerate(sorted(o for o in order if o >= 0), start=1) }
+    return [ rank.get(o) for o in order ]
+
+
+def canvas_to_tokens(tokenizer, ids, order=None):
+    """Decoded rows with the slack dropped, alongside their generation labels. resolve_bars runs
+    FIRST: it walks a running bar counter, so a NULL row that landed on an M_NEXT slot still has
+    to advance it — strip the NULLs before resolving and every bar after that point silently
+    shifts down by one."""
     rows = resolve_bars(tokenizer.decode(ids))
-    return [ row for row in rows if 'NULL' not in row ]
+    kept = [ i for i, row in enumerate(rows) if 'NULL' not in row ]
+    # renumbered after the filter, not before: the slack is most of the canvas and most of the
+    # ranks with it, so labelling first would leave the survivors scattered across that range
+    labels = generation_labels([ order[i] for i in kept ]) if order is not None else None
+    return [ rows[i] for i in kept ], labels
 
 
 if __name__ == "__main__":
     tokenizer = QuintupleTokenizer()
-    model, _ = load_model_only('TEST123')
+    model, _ = load_model_only('the-waffiller')
 
     # a header, eight bars of nothing, and a cadence to land on: the model writes the middle
     canvas = [
@@ -141,12 +179,50 @@ if __name__ == "__main__":
         ('INSTR_piano', '', '', '', 'VOICE_0'),
         ('INSTR_piano', '', '', '', 'VOICE_1'),
         ('SOS', '', '', '', ''),
-        *masked_bars(bars=8, slots_per_bar=12),
-        ('M_NEXT', 'POS_0', 'DUR_96', 'PITCH_60', 'VOICE_0'),
+        ('M_NEXT', 'POS_0', 'KEY_0', '', ''),
+        ('M_SAME', 'POS_0', 'TEMPO_8', '', ''),
+        ('M_SAME', 'POS_0', 'NUM_4', 'DEN_4', ''),
+        ('M_SAME', 'POS_0', 'CLEF_treble', '', 'VOICE_0'),
+        ('M_SAME', 'POS_0', 'CLEF_bass', '', 'VOICE_1'),
+        ('M_SAME', 'POS_0', 'DEG_11', 'ROOT_11', 'QUAL_maj7'),
+        ('M_SAME', 'POS_0', 'DUR_48', 'MASK', 'VOICE_0'),
+        ('M_SAME', 'POS_0', 'DUR_48', 'MASK', 'VOICE_0'),
+        ('M_SAME', 'POS_0', 'DUR_48', 'MASK', 'VOICE_0'),
+        ('M_SAME', 'POS_0', 'DUR_48', 'MASK', 'VOICE_1'),
+        # *masked_bars(bars=1, slots_per_bar=16, start_next=False),
+        ('M_SAME', 'POS_48', 'DEG_2', 'ROOT_2', 'QUAL_7'),
+        ('M_SAME', 'POS_48', 'DUR_48', 'MASK', 'VOICE_0'),
+        ('M_SAME', 'POS_48', 'DUR_48', 'MASK', 'VOICE_0'),
+        ('M_SAME', 'POS_48', 'DUR_48', 'MASK', 'VOICE_0'),
+        ('M_SAME', 'POS_48', 'DUR_48', 'MASK', 'VOICE_1'),
+        # *masked_bars(bars=1, slots_per_bar=16, start_next=False),
+        ('M_NEXT', 'POS_0', 'DEG_7', 'ROOT_7', 'QUAL_maj7'),
+        ('M_SAME', 'POS_0', 'DUR_48', 'MASK', 'VOICE_0'),
+        ('M_SAME', 'POS_0', 'DUR_48', 'MASK', 'VOICE_0'),
+        ('M_SAME', 'POS_0', 'DUR_48', 'MASK', 'VOICE_0'),
+        ('M_SAME', 'POS_0', 'DUR_48', 'MASK', 'VOICE_1'),
+        # *masked_bars(bars=1, slots_per_bar=16, start_next=False),
+        ('M_SAME', 'POS_48', 'DEG_10', 'ROOT_10', 'QUAL_7'),
+        ('M_SAME', 'POS_48', 'DUR_48', 'MASK', 'VOICE_0'),
+        ('M_SAME', 'POS_48', 'DUR_48', 'MASK', 'VOICE_0'),
+        ('M_SAME', 'POS_48', 'DUR_48', 'MASK', 'VOICE_0'),
+        ('M_SAME', 'POS_48', 'DUR_48', 'MASK', 'VOICE_1'),
+        # *masked_bars(bars=1, slots_per_bar=16, start_next=False),
+        ('M_NEXT', 'POS_0', 'DEG_3', 'ROOT_3', 'QUAL_maj7'),
+        ('M_SAME', 'POS_0', 'DUR_96', 'MASK', 'VOICE_0'),
+        ('M_SAME', 'POS_0', 'DUR_96', 'MASK', 'VOICE_0'),
+        ('M_SAME', 'POS_0', 'DUR_96', 'MASK', 'VOICE_0'),
+        ('M_SAME', 'POS_0', 'DUR_96', 'MASK', 'VOICE_1'),
+        # *masked_bars(bars=1, slots_per_bar=16, start_next=False),
         ('EOS', '', '', '', ''),
     ]
-    filled = infill(model, tokenizer, canvas, verbose=True)
-    tokens = canvas_to_tokens(tokenizer, repair_seams(model, tokenizer, canvas, filled))
-    print('\n'.join(str(t) for t in tokens))
-    tokens_to_score(tokens)
+    print(canvas)
+    filled, order = infill(model, tokenizer, canvas, verbose=True, temperature=0.5)
+    repaired, order = repair_seams(model, tokenizer, canvas, filled, order)
+    tokens, labels = canvas_to_tokens(tokenizer, repaired, order)
+    # printed in reading order with the generation order beside it, so the console says the same
+    # thing the score does; '-' is a row the canvas gave rather than one the model wrote
+    print('\n'.join(f'{"-" if label is None else label:>4}  {token}'
+                    for label, token in zip(labels, tokens)))
+    tokens_to_score(tokens, labels)
     print('Exported')

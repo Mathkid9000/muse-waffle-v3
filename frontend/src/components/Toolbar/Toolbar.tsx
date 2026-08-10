@@ -11,6 +11,7 @@ export default function Toolbar() {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const navigate = useNavigate()
   const { user, profile } = useAuth()
+  const getXml = useStore((s) => s.getXml)
   const currentXml = useStore((s) => s.currentXml)
   const scoreId = useStore((s) => s.scoreId)
   const setScoreId = useStore((s) => s.setScoreId)
@@ -23,6 +24,9 @@ export default function Toolbar() {
   const redrawScore = useStore((s) => s.redrawScore)
   const viewportW = useStore((s) => s.viewportW)
   const viewportH = useStore((s) => s.viewportH)
+  const tabs = useStore((s) => s.tabs)
+  const activeTab = useStore((s) => s.activeTab)
+  const setActiveTab = useStore((s) => s.setActiveTab)
 
   const [ isFileDdOpen, setIsFileDdOpen ] = useState<boolean>(false)
   const [ isViewDdOpen, setIsViewDdOpen ] = useState<boolean>(false)
@@ -35,7 +39,7 @@ export default function Toolbar() {
   async function loadScoreXml(xml: string) {
     const numInstruments = await countInstruments(xml)
     setScoreData({ numInstruments })
-    setXml(xml)
+    setXml(xml, 'Main')
   }
 
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
@@ -102,8 +106,8 @@ export default function Toolbar() {
   }, [scoreId])
 
   function handleDownload() {
-    if (!currentXml) return
-    const blob = new Blob([currentXml], { type: 'application/xml' })
+    if (!getXml('Main')) return
+    const blob = new Blob([getXml('Main')!], { type: 'application/xml' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
@@ -178,6 +182,12 @@ export default function Toolbar() {
           )}
         </button>
         {scoreRow && (<p className={styles.lastSaved}>Last Saved {formatDate(scoreRow.updated_at)}</p>)}
+      </div>
+      <div className={styles.tabs}>
+        {tabs.map(t => (
+          <button className={t === activeTab ? styles.activeTab : styles.tab}
+            onClick={() => setActiveTab(t)}>{t}</button>
+        ))}
       </div>
     </header>
   )

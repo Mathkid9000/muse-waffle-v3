@@ -225,7 +225,7 @@ export interface ThoughtProcessTask {
 }
 
 interface InscorePromptProps {
-    getXml: () => string
+    getXml: () => string | null
     getSelection: () => MeasureSelection
     setXml: (xml: string) => void
 }

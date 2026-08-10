@@ -13,7 +13,8 @@ export interface ScoreAppData {
 }
 
 interface AppState {
-  currentXml: string | null
+  currentXml: Record<string, string | null>
+  getXml: (key: string) => string | null
   /** Row id of the saved score being edited; null until the first save. */
   scoreId: string | null
   scoreData: ScoreAppData | null
@@ -34,7 +35,12 @@ interface AppState {
   /** Bumped to force ScoreViewer to re-render the SVG from the current XML. */
   redrawNonce: number
 
-  setXml: (xml: string) => void
+  tabs: string[]
+  activeTab: string,
+  setTabs: (tabs: string[]) => void
+  setActiveTab: (tab: string) => void
+
+  setXml: (xml: string, key?: string) => void
   setScoreId: (id: string | null) => void
   setScoreData: (data: ScoreAppData | null) => void
   setLoading: (v: boolean) => void
@@ -115,8 +121,8 @@ function createWriteBehindStorage(): StateStorage {
   }
 }
 
-export const useStore = create<AppState>()(persist((set) => ({
-  currentXml: null,
+export const useStore = create<AppState>()(persist((set, get) => ({
+  currentXml: { 'Main': null },
   scoreId: null,
   scoreData: null,
   loading: false,
@@ -131,8 +137,14 @@ export const useStore = create<AppState>()(persist((set) => ({
   totalBars: null,
   streamMode: null,
   redrawNonce: 0,
+  tabs: [ 'Main' ],
+  activeTab: 'Main',
 
-  setXml: (xml) => set({ currentXml: xml, error: null }),
+  getXml: (key) => get().currentXml?.[key] ?? null,
+
+  setTabs: (tabs) => set({ tabs: tabs }),
+  setActiveTab: (tab) => set({ activeTab: tab }),
+  setXml: (xml, key) => set((s) => ({ currentXml: { ...s.currentXml, [key ?? s.activeTab]: xml }, error: null })),
   setScoreId: (id) => set({ scoreId: id }),
   setScoreData: (data) => set({ scoreData: data }),
   setLoading: (v) => set({ loading: v }),
@@ -158,7 +170,7 @@ export const useStore = create<AppState>()(persist((set) => ({
   redrawScore: () => set((s) => ({ redrawNonce: s.redrawNonce + 1 })),
   resetScore: () =>
     set({
-      currentXml: null,
+      currentXml: { 'Main': null },
       scoreId: null,
       scoreData: null,
       selection: null,

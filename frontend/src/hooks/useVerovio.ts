@@ -7,6 +7,12 @@ let loadingPromise: Promise<VerovioToolkit> | null = null
 
 const PAGE_HEIGHT_PER_INSTRUMENT = 160
 const PAGE_MARGIN = 140
+/**
+ * Verovio's own default page margin, per side. The editor renders with no page margin at all
+ * (see applyOptions) and subtracts this from the requested page size, so dropping the margin
+ * changes only the size of the page box, never how much music Verovio lays out on it.
+ */
+const VEROVIO_DEFAULT_MARGIN = 50
 
 async function loadVerovio(): Promise<VerovioToolkit> {
   if (shared) return shared
@@ -18,10 +24,23 @@ async function loadVerovio(): Promise<VerovioToolkit> {
   return loadingPromise
 }
 
+/**
+ * Options for the editor's pages. The page is laid out at the requested size, then trimmed down
+ * to the engraving itself: `adjustPageWidth`/`adjustPageHeight` shrink (or grow) the page box to
+ * the music actually on it, and the margins are zeroed so the rendered SVG is exactly the score
+ * with nothing around it. The viewer draws the white paper around that box with its own padding,
+ * which is why the score must not carry any of its own.
+ */
 function applyOptions(tk: VerovioToolkit, pageWidth: number, scale: number, instr_num: number): void {
   tk.setOptions({
-    pageWidth,
-    pageHeight: PAGE_HEIGHT_PER_INSTRUMENT * instr_num + PAGE_MARGIN * 2,
+    pageWidth: pageWidth - 2 * VEROVIO_DEFAULT_MARGIN,
+    pageHeight: PAGE_HEIGHT_PER_INSTRUMENT * instr_num + PAGE_MARGIN * 2 - 2 * VEROVIO_DEFAULT_MARGIN,
+    pageMarginTop: 0,
+    pageMarginBottom: 0,
+    pageMarginLeft: 0,
+    pageMarginRight: 0,
+    adjustPageWidth: true,
+    adjustPageHeight: true,
     breaks: 'auto',
     scale,
     footer: 'none',
@@ -99,6 +118,14 @@ export function renderPreviewSvg(data: string, width: number, height: number, sc
   shared.setOptions({
     pageWidth: width,
     pageHeight: height,
+    // The preview fills a card of a fixed size, so it opts back out of the editor's
+    // trim-to-content page (setOptions merges, it does not reset).
+    pageMarginTop: VEROVIO_DEFAULT_MARGIN,
+    pageMarginBottom: VEROVIO_DEFAULT_MARGIN,
+    pageMarginLeft: VEROVIO_DEFAULT_MARGIN,
+    pageMarginRight: VEROVIO_DEFAULT_MARGIN,
+    adjustPageWidth: false,
+    adjustPageHeight: false,
     breaks: 'auto',
     scale,
     footer: 'none',

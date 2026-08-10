@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useRef } from 'react'
+import { useEffect, useMemo, useState, useRef, Activity } from 'react'
 import { createRoot } from 'react-dom/client'
 import { useVerovio, getSharedToolkit, loadAndGetPageCount } from '../../hooks/useVerovio'
 import { useStore } from '../../store'
@@ -16,41 +16,55 @@ const MARGIN_SEL = 'g.page-margin'
 const STAFF_LINE_SEL = ':scope > path'
 
 // Layout constants — must match .pages padding / gap in the CSS module.
-const PAD = 10
+const PAD = 20
 const GAP = 20
+// White paper around the engraving, on every side — must match .page padding in the CSS module.
+const PAGE_PAD = 100
 // Padding around a selection band, in unzoomed layout pixels.
 const SEL_PAD_PX = 5
-// Fallback page aspect ratio (width / height) for pages not yet rendered.
-const DEFAULT_ASPECT = 1.4
+// Fallback page size (Verovio's own px units) for pages not yet rendered.
+const DEFAULT_SIZE: Size = { w: 1000, h: 700 }
 
 const svgParser = new DOMParser()
 
+/** Size of a rendered page, in the px units Verovio writes on the SVG (shared across pages). */
+interface Size {
+  w: number
+  h: number
+}
+
 interface PageInfo {
   count: number
-  aspect: number
+  size: Size
 }
 
 interface PageMeta {
   measureCounts: number[]
   /** Number of measures in all pages before this one (cumulative offset). */
   offsets: number[]
-  /** width / height of each page's rendered SVG, for placeholder sizing. */
-  aspects: number[]
+  /** Engraved size of each page — its paper is this plus PAGE_PAD on every side. */
+  sizes: Size[]
+  /** Tallest engraving; the page holding it is the one scaled to fill the viewport height. */
+  maxH: number
   total: number
 }
 
-/** width / height of a rendered Verovio page, from its root <svg> attrs or viewBox. */
-function svgAspect(doc: Document): number {
+/**
+ * The engraved size of a rendered Verovio page. Since the editor renders with
+ * adjustPageWidth/Height and no page margin (see useVerovio), this is the score itself —
+ * the box the paper has to match.
+ */
+function svgSize(doc: Document): Size {
   const svg = doc.documentElement
   const w = parseFloat(svg.getAttribute('width') || '')
   const h = parseFloat(svg.getAttribute('height') || '')
-  if (w > 0 && h > 0) return w / h * 0.9
+  if (w > 0 && h > 0) return { w, h }
   const vb = svg.getAttribute('viewBox')
   if (vb) {
     const p = vb.split(/[\s,]+/).map(Number)
-    if (p.length === 4 && p[3] > 0) return p[2] / p[3]
+    if (p.length === 4 && p[2] > 0 && p[3] > 0) return { w: p[2], h: p[3] }
   }
-  return DEFAULT_ASPECT
+  return DEFAULT_SIZE
 }
 
 /** An axis-aligned box, in whatever space its source coordinates came from. */
@@ -124,8 +138,10 @@ function pageOfMeasure(meta: PageMeta, m: number): number {
 
 export default function ScoreViewer() {
   const { ready, renderXml } = useVerovio()
-  const currentXml = useStore((s) => s.currentXml)
+  const getXml = useStore((s) => s.getXml)
   const setXml = useStore((s) => s.setXml)
+  const currentXml = useStore((s) => s.currentXml)
+  const activeTab = useStore((s) => s.activeTab)
   const scoreData = useStore((s) => s.scoreData)
   const zoom = useStore((s) => s.zoom)
   const panX = useStore((s) => s.panX)
@@ -165,39 +181,42 @@ export default function ScoreViewer() {
 
   const resetPromptHost = () => {
     const host = document.createElement('div')
-    createRoot(host).render(<InscorePrompt getXml={() => useStore.getState().currentXml!} getSelection={() => useStore.getState().selection!} setXml={setXml} />)
+    createRoot(host).render(<InscorePrompt getXml={() => getXml(activeTab)} getSelection={() => useStore.getState().selection!} setXml={(xml) => setXml(xml, activeTab)} />)
     promptHostRef.current = host
     return () => host.remove()
   }
 
-  // Per-page measure counts / offsets / aspect ratios. Selection maps a page's local
-  // measure indices to global measure numbers via offsets; placeholders size from aspects.
+  // Per-page measure counts / offsets / engraved sizes. Selection maps a page's local
+  // measure indices to global measure numbers via offsets; placeholders size from sizes.
   const pageMeta = useMemo<PageMeta>(() => {
     const cache = metaCacheRef.current
     const measureCounts: number[] = []
-    const aspects: number[] = []
+    const sizes: Size[] = []
     const offsets: number[] = []
     let acc = 0
-    let lastAspect = DEFAULT_ASPECT
+    let maxH = 0
+    let lastSize = DEFAULT_SIZE
     for (const svg of pages) {
       offsets.push(acc)
       if (!svg) {
         measureCounts.push(0)
-        aspects.push(lastAspect)
+        sizes.push(lastSize)
+        maxH = Math.max(maxH, lastSize.h)
         continue
       }
       let info = cache.get(svg)
       if (!info) {
         const doc = svgParser.parseFromString(svg, 'image/svg+xml')
-        info = { count: doc.querySelectorAll(MEASURE_SEL).length, aspect: svgAspect(doc) }
+        info = { count: doc.querySelectorAll(MEASURE_SEL).length, size: svgSize(doc) }
         cache.set(svg, info)
       }
       measureCounts.push(info.count)
-      aspects.push(info.aspect)
-      lastAspect = info.aspect
+      sizes.push(info.size)
+      maxH = Math.max(maxH, info.size.h)
+      lastSize = info.size
       acc += info.count
     }
-    return { measureCounts, offsets, aspects, total: acc }
+    return { measureCounts, offsets, sizes, maxH: maxH || DEFAULT_SIZE.h, total: acc }
   }, [pages])
 
   // Which pages currently intersect the viewport (plus a one-viewport buffer). Computed
@@ -205,20 +224,23 @@ export default function ScoreViewer() {
   // CSS transforms (an IntersectionObserver wouldn't reliably fire on transform changes).
   const visiblePages = useMemo<Set<number>>(() => {
     const set = new Set<number>()
-    const n = pageMeta.aspects.length
+    const n = pageMeta.sizes.length
     if (n === 0) return set
     if (viewportW === 0 || viewportH === 0) {
       for (let i = 0; i < n; i++) set.add(i)
       return set
     }
     const z = zoom / 100
-    const contentH = Math.max(1, viewportH - 2 * PAD)
-    const widths = pageMeta.aspects.map((a) => contentH * a)
+    // Every page is drawn at the one scale that makes the tallest engraving fill the viewport
+    // height, so pages of different sizes stay in proportion to each other (see the CSS module).
+    const k = Math.max(1, viewportH - 2 * PAD - 2 * PAGE_PAD) / pageMeta.maxH
+    const widths = pageMeta.sizes.map((s) => s.w * k + 2 * PAGE_PAD)
     // Pages lay out left-to-right (flex-start) starting after the container padding.
     let x = PAD
-    // Pages are full-height and vertically centered, so vertical visibility is shared.
+    // The tallest page spans the full content band and the rest are centred inside it, so
+    // vertical visibility is shared.
     const sTop = panY + z * PAD
-    const sBot = panY + z * (PAD + contentH)
+    const sBot = panY + z * (viewportH - PAD)
     const vOK = sBot >= -viewportH && sTop <= 2 * viewportH
     const bufX = viewportW * 0.5
     for (let i = 0; i < n; i++) {
@@ -227,12 +249,11 @@ export default function ScoreViewer() {
       if (vOK && sR >= -bufX && sL <= viewportW + bufX) set.add(i)
       x += widths[i] + GAP
     }
-    console.log(set)
     return set
   }, [pageMeta, panX, panY, zoom, viewportW, viewportH])
 
   useEffect(() => {
-    if (!ready || !currentXml) {
+    if (!ready || !getXml(activeTab)) {
       cachedPagesRef.current = []
       metaCacheRef.current.clear()
       setPages([])
@@ -245,7 +266,7 @@ export default function ScoreViewer() {
 
     if (!tk || !streamMode || cachedPagesRef.current.length === 0) {
       // Full render: initial load, not streaming, or cache empty (first streaming event)
-      const allPages = renderXml(currentXml, w * 2.5, 40)
+      const allPages = renderXml(getXml(activeTab)!, w * 2.5, 40)
       cachedPagesRef.current = allPages
       setPages(allPages)
       return
@@ -253,7 +274,7 @@ export default function ScoreViewer() {
 
     // Incremental: loadAndGetPageCount applies options + loads data into the shared tk
     const prevCount = cachedPagesRef.current.length
-    const newCount = loadAndGetPageCount(currentXml, w * 2.5, 40)
+    const newCount = loadAndGetPageCount(getXml(activeTab)!, w * 2.5, 40)
     if (newCount === 0) return
 
     let startPage: number
@@ -666,50 +687,50 @@ export default function ScoreViewer() {
 
     console.log(e.target.value)
     const prompt = e.target.value
-    const response = await promptAnthropic(prompt, '', 
-      (thought) => {console.log(thought)}, 
-      (title) => {console.log(title)}, null)
-//     const response = [
-//         [
-//     {
-//         "tool": "generate_score",
-//         "input": {
-//             "measure_start_num": 1,
-//             "generation_staffs": [
-//                 {
-//                     "staff_num": 0,
-//                     "instrument": "voice_soprano"
-//                 },
-//                 {
-//                     "staff_num": 1,
-//                     "instrument": "voice_alto"
-//                 },
-//                 {
-//                     "staff_num": 2,
-//                     "instrument": "voice_tenor"
-//                 },
-//                 {
-//                     "staff_num": 3,
-//                     "instrument": "voice_baritone"
-//                 }
-//             ],
-//             "generation_length": 16,
-//             "overwrite_current": true,
-//             "tonic": "Bb",
-//             "mode": "major",
-//             "time_signature": "4/4",
-//             "tempo": 80
-//         }
-//     }
-// ],
-//         2698,
-//         300
-//     ]
+    // const response = await promptAnthropic(prompt, '', 
+    //   (thought) => {console.log(thought)}, 
+    //   (title) => {console.log(title)}, null)
+    const response = [
+    [
+        {
+            "tool": "generate_score",
+            "input": {
+                "measure_start_num": 1,
+                "generation_staffs": [
+                    {
+                        "staff_num": 0,
+                        "instrument": "voice_soprano"
+                    },
+                    {
+                        "staff_num": 1,
+                        "instrument": "voice_alto"
+                    },
+                    {
+                        "staff_num": 2,
+                        "instrument": "voice_tenor"
+                    },
+                    {
+                        "staff_num": 3,
+                        "instrument": "voice_bass"
+                    }
+                ],
+                "generation_length": 8,
+                "overwrite_current": false,
+                "tonic": "D",
+                "mode": "minor",
+                "time_signature": "4/4",
+                "tempo": 72
+            }
+        }
+    ],
+    2674,
+    359
+]
 
     console.log(response)
     const edits = Array.isArray(response[0]) ? response[0] : []
     for (const { tool, input } of edits) {
-      applyClaudeEdit(tool, input, currentXml ?? '', setXml)
+      applyClaudeEdit(tool, input, getXml(activeTab) ?? '', (xml) => setXml(xml, activeTab))
     }
   }
 
@@ -722,7 +743,7 @@ export default function ScoreViewer() {
       onMouseUp={onMouseUp}
       onContextMenu={(e) => { if (e.ctrlKey || e.metaKey) e.preventDefault() }}
     >
-      {!currentXml ? (
+      {!getXml(activeTab) ? (
         <div className={styles.emptyState}>
           <div className={styles.paper}>
             <div style={{ display: 'block' }}>
@@ -739,15 +760,27 @@ export default function ScoreViewer() {
           className={styles.pages}
           style={{ transform: `translate(${panX}px, ${panY}px) scale(${zoom / 100})` }}
         >
-          {pages.map((svg, i) => (
-            <div
-              key={i}
-              className={styles.page}
-              data-page-index={i}
-              style={{ aspectRatio: String(pageMeta.aspects[i] ?? DEFAULT_ASPECT) }}
-              {...(visiblePages.has(i) ? { dangerouslySetInnerHTML: { __html: svg } } : {})}
-            />
-          ))}
+          {pages.map((svg, i) => {
+            // The paper is the engraving plus PAGE_PAD on every side. The tallest page fills the
+            // viewport height; the others take the same share of it that their engraving takes of
+            // the tallest one, so every page is drawn at the same scale.
+            const size = pageMeta.sizes[i] ?? DEFAULT_SIZE
+            const pad = 2 * PAGE_PAD
+            return (
+              <div
+                key={i}
+                className={styles.page}
+                data-page-index={i}
+                style={{ height: `calc((100% - ${pad}px) * ${size.h / pageMeta.maxH} + ${pad}px)` }}
+              >
+                <div
+                  className={styles.sheet}
+                  style={{ aspectRatio: `${size.w} / ${size.h}` }}
+                  {...(visiblePages.has(i) ? { dangerouslySetInnerHTML: { __html: svg } } : {})}
+                />
+              </div>
+            )
+          })}
           <AppendBar />
         </div>
       )}

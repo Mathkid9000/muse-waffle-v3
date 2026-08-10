@@ -27,21 +27,29 @@
   will-change: transform;
 }
 
-/* Each page fills the viewport height (minus padding) and keeps its aspect ratio,
-   so a whole page fits vertically and is vertically centered by align-items. */
+/* The paper: the engraving (.sheet) plus 20px of white on every side, and nothing else.
+   Its height comes from ScoreViewer.tsx (a share of the viewport height, so all pages are
+   drawn at one scale) and its width follows from the sheet, which the flex row shrink-wraps. */
 .page {
   position: relative;
-  height: 100%;
-  padding: 50px 0;
+  display: flex;
+  box-sizing: border-box;
+  padding: 100px;
   background: var(--background-light);
   box-shadow: 0 0 10px var(--accent);
   border-radius: 1px;
   flex-shrink: 0;
 }
 
-/* Flexbox does not lay out SVG children — the engraving is centered by re-framing the
-   inner .definition-scale viewBox around the content (see ScoreViewer.tsx). */
-.page svg {
+/* Verovio trims each page to what it engraved (adjustPageWidth/Height with no page margin,
+   see useVerovio), so this box is given the score's own aspect ratio and the svg fills it
+   exactly — no letterboxing inside the paper, no engraving spilling out of it. */
+.sheet {
+  height: 100%;
+  flex-shrink: 0;
+}
+
+.sheet svg {
   display: block;
   height: 100%;
   width: 100%;

@@ -44,7 +44,7 @@ async function svgToPng(svg: string, width: number, height: number): Promise<Blo
  */
 export async function saveScore(
   userId: string,
-  xml: string,
+  xmlRecord: Record<string, string>,
   scoreId: string | null
 ): Promise<string | null> {
   let id = scoreId;
@@ -71,12 +71,12 @@ export async function saveScore(
     id = data.id;
   }
 
-  const png = await svgToPng(renderPreviewSvg(xml, PAGE_W, PAGE_H, 10), PNG_W, PNG_H);
+  const png = await svgToPng(renderPreviewSvg(xmlRecord['Main'], PAGE_W, PAGE_H, 10), PNG_W, PNG_H);
 
   const [xmlUpload, pngUpload] = await Promise.all([
     supabase.storage
       .from(BUCKET)
-      .upload(xmlPath(userId, id!), new Blob([xml], { type: "application/xml" }), { upsert: true }),
+      .upload(xmlPath(userId, id!), new Blob([JSON.stringify(xmlRecord)], { type: "application/xml" }), { upsert: true }),
     png
       ? supabase.storage
           .from(BUCKET)

@@ -633,7 +633,32 @@ def resolve_bars(tokens):
     return resolved
 
 
-def tokens_to_score(tokens):
+def order_mark(text, offset):
+    """A label pinned above the staff at ``offset``, for the rows that have no note to sing it.
+
+    NOTE: tokenize_score_as_text reads TextExpressions back as candidate tempo markings, so a
+    labelled score round-tripped through the tokenizer would see these. MetronomeMark(text='7')
+    has no number, which the MIN_TEMPO/MAX_TEMPO guard already drops — but the labels are a
+    debugging view, not something to feed back in."""
+    mark = music21.expressions.TextExpression(str(text))
+    mark.placement = 'above'
+    mark.offset = offset
+    return mark
+
+
+def label_text(labels):
+    """The lyric for a note built from several rows. A chord is one music21 object but one
+    decision per pitch, so every rank that went into it is written, lowest first."""
+    return ','.join(str(label) for label in sorted(l for l in labels if l is not None))
+
+
+def tokens_to_score(tokens, labels=None):
+    """Render rows as MusicXML to STORAGE_DIR/output.mxl.
+
+    ``labels`` is an optional per-row text label, index-aligned with ``tokens`` — infill.py's
+    generation order, say. A row that became a note carries its label as a lyric; every other
+    kind of row carries it as a text mark above the staff it belongs to. None entries, and a
+    None ``labels``, write nothing, which is how a caller-given row stays visibly unlabelled."""
     def parse_tok(tok):
         output = []
         for t in tok:
@@ -647,6 +672,7 @@ def tokens_to_score(tokens):
         overlapping_subvoices = []
 
         original_start = note_pos
+        print(note_pos, type(note_pos), note_dur, type(note_dur))
         original_end = note_pos + note_dur
         for subvoice in notes[voice].keys():
             for m, pos, dur in notes[voice][subvoice].keys():
@@ -671,14 +697,19 @@ def tokens_to_score(tokens):
         return pitch
 
     tokens = resolve_bars(tokens)
+    # index-aligned with tokens, so a caller that passes none is simply labelling nothing
+    labels = list(labels) if labels is not None else [None] * len(tokens)
     score = music21.stream.Score()
     parts = []
     general_score_elements: dict[int, list[music21.base.Music21Object]] = {} # measure num -> objects
     voice_score_elements: dict[tuple[int, int], list[music21.base.Music21Object]] = {} # (voice,measure) -> objects
     notes: dict[int, dict[int, dict[tuple[int, int, int], list[int]]]] = {} # notes[voice][sub_voice][(measure,pos,dur)] = pitches
+    # kept beside `notes` rather than folded into it: several rows collapse into one chord there,
+    # and every consumer of notes[...] indexes it as a plain list of pitches
+    note_labels: dict[tuple[int, int, int, int, int], list] = {} # (voice,sub_voice,measure,pos,dur) -> labels
     measure_key_sharps: dict[int, int] = {} # measure num -> sharps in effect at that measure
 
-    for tok in tokens:
+    for tok, label in zip(tokens, labels):
         # add instruments
         if tok[0].startswith('INSTR'):
             part = music21.stream.Part()
@@ -695,6 +726,7 @@ def tokens_to_score(tokens):
             for subvoice in notes[voz].keys():
                 if (m, pos, dur) in notes[voz][subvoice]:
                     notes[voz][subvoice][(m,pos,dur)].append(pitch)
+                    note_labels.setdefault((voz, subvoice, m, pos, dur), []).append(label)
                     found = True
                     break
             if found: continue
@@ -704,11 +736,13 @@ def tokens_to_score(tokens):
                 if overlapping not in notes[voz]:
                     notes[voz][overlapping] = {}
                 notes[voz][overlapping][(m, pos, dur)] = [ pitch ]
+                note_labels.setdefault((voz, overlapping, m, pos, dur), []).append(label)
                 continue
             # case 3: there are no overlapping notes
             if 0 not in notes[voz]:
                 notes[voz][0] = {}
             notes[voz][0][(m, pos, dur)] = [ pitch ]
+            note_labels.setdefault((voz, 0, m, pos, dur), []).append(label)
         # add key
         if tok[2].startswith('KEY'):
             m, pos, tonic, _, _ = parse_tok(tok)
@@ -783,6 +817,16 @@ def tokens_to_score(tokens):
             if (0, m) not in voice_score_elements:
                 voice_score_elements[(0, m)] = []
             voice_score_elements[(0, m)].append(cs)
+        # label everything that isn't a note. Structural rows (SOG/SOS/EOS/INSTR) sit outside
+        # musical time and have nowhere to hang a mark; the rest go on the staff they name, or
+        # on staff 0 for the rows the whole score shares. Marks go in voice_score_elements even
+        # for those score-wide rows, because general_score_elements is inserted into EVERY part
+        # and the label would then be printed once per staff.
+        if label is not None and tok[0].startswith('M_') and not tok[3].startswith('PITCH'):
+            m, pos, *_ = parse_tok(tok)
+            voz = int(tok[4].split('_')[-1]) if tok[4].startswith('VOICE') else 0
+            mark = order_mark(label, pos / SUBDIVISIONS_PER_QUARTER)
+            voice_score_elements.setdefault((voz, m), []).append(mark)
 
     # carry each key signature forward until the next one changes it
     if measure_key_sharps:
@@ -801,6 +845,7 @@ def tokens_to_score(tokens):
     # concatenate all notes into measures
     measures: dict[tuple[int, int], music21.stream.Measure] = {} # (voice, measure) = measure
     for voz_idx, part in enumerate(parts):
+        if voz_idx not in notes: continue
         if len(notes[voz_idx].keys()) == 1:
             for m, pos, dur in notes[voz_idx][0]:
                 pitches = notes[voz_idx][0][(m, pos, dur)]
@@ -811,6 +856,10 @@ def tokens_to_score(tokens):
                     generalNote = music21.chord.Chord([ spell_pitch(i, sharps) for i in pitches ])
                 generalNote.duration = music21.duration.Duration(dur / SUBDIVISIONS_PER_QUARTER)
                 generalNote.offset = pos / SUBDIVISIONS_PER_QUARTER
+                # assigned only when there is something to say: setting .lyric to '' hangs an
+                # empty lyric off the note, which reserves the staff space and prints nothing
+                lyric = label_text(note_labels.get((voz_idx, 0, m, pos, dur), []))
+                if lyric: generalNote.lyric = lyric
 
                 if (voz_idx, m) not in measures:
                     measures[(voz_idx, m)] = music21.stream.Measure(number=m)
@@ -827,6 +876,8 @@ def tokens_to_score(tokens):
                         generalNote = music21.chord.Chord([ spell_pitch(i, sharps) for i in pitches ])
                     generalNote.duration = music21.duration.Duration(dur / SUBDIVISIONS_PER_QUARTER)
                     generalNote.offset = pos / SUBDIVISIONS_PER_QUARTER
+                    lyric = label_text(note_labels.get((voz_idx, subvoice_idx, m, pos, dur), []))
+                    if lyric: generalNote.lyric = lyric
                     if m not in subvoices:
                         subvoices[m] = { }
                     if subvoice_idx not in subvoices[m]:

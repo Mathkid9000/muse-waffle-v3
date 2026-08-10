@@ -107,7 +107,7 @@ if __name__ == "__main__":
     seed_encoded = tokenizer.encode(seed)
 
     # model
-    model, _ = load_model_only('TEST123', device)
+    model, _ = load_model_only('the-waffler', device)
 
     # prediction
     encoded_ids = generate_score(model, tokenizer, seed_encoded, temperature=0.8, top_k=30, top_p=0.9, verbose=True)
