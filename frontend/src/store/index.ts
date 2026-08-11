@@ -39,6 +39,8 @@ interface AppState {
   activeTab: string,
   setTabs: (tabs: string[]) => void
   setActiveTab: (tab: string) => void
+  addNewTab: (tab: string) => string
+  deleteTab: (tab: string) => void
 
   setXml: (xml: string, key?: string) => void
   setScoreId: (id: string | null) => void
@@ -141,6 +143,38 @@ export const useStore = create<AppState>()(persist((set, get) => ({
   activeTab: 'Main',
 
   getXml: (key) => get().currentXml?.[key] ?? null,
+  addNewTab: (tab) => {
+    const tabs = get().tabs
+    let idx = 0
+    try {
+      idx = /\([0-9]+\)$/.test(tab) ? parseInt(tab.split('(').at(-1)!.replace(')', '')) : 0
+    }
+    catch {console.log('none found in', tab)}
+    for (var i = 0; i < 100 && tabs.includes(tab); i++) {
+      console.log('found', tab, tabs)
+      idx ++
+      // check if ends with (x)
+      if (/\([0-9]+\)$/.test(tab)) {
+        tab = tab.split('(').slice(0, -1).join('(').slice(0, -1)
+      }
+      tab += ` (${idx})`
+    }
+    set((s) => ({ tabs: [...s.tabs, tab] }))
+    return tab 
+  },
+  deleteTab: (tab) => {
+    const currentXml = get().currentXml
+    if (tab in currentXml) {
+      delete currentXml[tab]
+      set({ currentXml: currentXml })
+    }
+
+    const tabs = get().tabs
+    if (tabs.includes(tab)) {
+      console.log(tabs.filter(t => t !== tab))
+      set((s) => ({ tabs: s.tabs.filter(t => t !== tab) }))
+    }
+  },
 
   setTabs: (tabs) => set({ tabs: tabs }),
   setActiveTab: (tab) => set({ activeTab: tab }),
@@ -171,6 +205,8 @@ export const useStore = create<AppState>()(persist((set, get) => ({
   resetScore: () =>
     set({
       currentXml: { 'Main': null },
+      tabs: [ 'Main' ],
+      activeTab: 'Main',
       scoreId: null,
       scoreData: null,
       selection: null,
@@ -186,5 +222,5 @@ export const useStore = create<AppState>()(persist((set, get) => ({
   // Only the document survives a reload. The camera, the selection and the streaming
   // progress are per-view state, and rehydrating a half-finished stream would leave the
   // UI stuck mid-generation with no request behind it.
-  partialize: (s) => ({ currentXml: s.currentXml, scoreId: s.scoreId, scoreData: s.scoreData }),
+  partialize: (s) => ({ currentXml: s.currentXml, tabs: s.tabs, activeTab: s.activeTab, scoreId: s.scoreId, scoreData: s.scoreData }),
 }))

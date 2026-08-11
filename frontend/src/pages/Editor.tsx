@@ -21,7 +21,7 @@ export default function Editor() {
   // fetch a score the store isn't already holding. The scoreId check also skips the reload
   // the post-save navigate() to /editor/:id would otherwise trigger.
   useEffect(() => {
-    const { scoreId, setXml, setScoreId, setScoreData, resetScore } = useStore.getState()
+    const { scoreId, setXml, setScoreId, setScoreData, resetScore, setTabs, setActiveTab } = useStore.getState()
     if (!id) {
       // Blank editor: keep a rehydrated unsaved draft, but drop a saved score left over
       // from navigating /editor/:id -> /editor.
@@ -32,8 +32,13 @@ export default function Editor() {
     fetchScoreXml(userId, id).then(async (xml) => {
       if (!xml) return
       const xmlRecord = JSON.parse(xml) as Record<string, string>
+      console.log(xmlRecord)
       setScoreData({ numInstruments: await countInstruments(xmlRecord['Main']) })
+      // Loading a different saved score replaces the whole tab set with this score's own.
+      useStore.setState({ currentXml: {} })
       Object.keys(xmlRecord).forEach(k => setXml(xmlRecord[k], k))
+      setTabs(Object.keys(xmlRecord))
+      setActiveTab('Main')
       setScoreId(id)
     })
   }, [id, userId])

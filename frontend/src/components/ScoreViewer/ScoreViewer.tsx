@@ -581,7 +581,6 @@ export default function ScoreViewer() {
     const hit = measureAndStaffAt(e)
     if (hit === null) {
       setSelection(null)
-      resetPromptHost()
       return
     }
     const staffCount = staffCountRef.current

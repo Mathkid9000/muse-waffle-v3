@@ -25,13 +25,18 @@ export default function Toolbar() {
   const viewportW = useStore((s) => s.viewportW)
   const viewportH = useStore((s) => s.viewportH)
   const tabs = useStore((s) => s.tabs)
+  const setTabs = useStore((s) => s.setTabs)
+  const addNewTab = useStore((s) => s.addNewTab)
+  const deleteTab = useStore((s) => s.deleteTab)
   const activeTab = useStore((s) => s.activeTab)
   const setActiveTab = useStore((s) => s.setActiveTab)
 
   const [ isFileDdOpen, setIsFileDdOpen ] = useState<boolean>(false)
   const [ isViewDdOpen, setIsViewDdOpen ] = useState<boolean>(false)
+  const [ isTemplateDdOpen, setIsTemplateDdOpen ] = useState<boolean>(false)
   const [ isExitDdOpen, setIsExitDdOpen ] = useState<boolean>(false)
   const [ scoreRow, setScoreRow ] = useState<ScoreRow | null>(null)
+  const [ showEditingTabName, setShowEditingTabName ] = useState<boolean>(false)
 
   // Toolbar zoom anchors at the viewport center (the wheel anchors at the cursor).
   const zoomStep = (delta: number) => zoomTo(zoom + delta, viewportW / 2, viewportH / 2)
@@ -39,6 +44,11 @@ export default function Toolbar() {
   async function loadScoreXml(xml: string) {
     const numInstruments = await countInstruments(xml)
     setScoreData({ numInstruments })
+    // A freshly imported file replaces the whole document — drop any tabs left over
+    // from whatever was open before instead of appending to them.
+    useStore.setState({ currentXml: {} })
+    setTabs(['Main'])
+    setActiveTab('Main')
     setXml(xml, 'Main')
   }
 
@@ -131,6 +141,80 @@ export default function Toolbar() {
     console.log('Name changed to ', newName)
   }
 
+  function createNewTemplate(e: React.MouseEvent) {
+    e.stopPropagation()
+    setIsTemplateDdOpen(false)
+    const tabName = addNewTab('New Template')
+    setActiveTab(tabName)
+  }
+
+  function renameCurrentTemplate(e: React.MouseEvent) {
+    if (activeTab === 'Main') return
+    const button = document.getElementsByClassName(styles.activeTab)[0] as HTMLElement
+    if (!button) return
+    e.stopPropagation()
+    setIsTemplateDdOpen(false)
+    button.focus()
+    const name = activeTab
+    button.contentEditable = true
+    setShowEditingTabName(true)
+    
+    let renamed = false
+
+    // Attached fresh on every Rename click — without this, a listener from a previous
+    // (possibly abandoned) rename stays on the DOM node React reuses for this tab, and
+    // both fire on the next Enter: the stale one re-runs the rename against its old,
+    // pre-render tab list and collides with the tab the live one just created.
+    function cleanup() {
+      button.removeEventListener('blur', onBlur)
+      button.removeEventListener('keydown', onKeyDown)
+      setShowEditingTabName(false)
+    }
+
+    function onBlur() {
+      button.contentEditable = false
+      button.style.outline = "none"
+      if (!renamed) button.textContent = name
+      cleanup()
+    }
+
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key !== 'Enter') return
+      e.preventDefault()
+
+      const newName = button.textContent
+      renamed = true
+      button.contentEditable = false
+      button.style.outline = "none"
+      cleanup()
+
+      const { currentXml, tabs, deleteTab, addNewTab, setXml, setActiveTab } = useStore.getState()
+      if (name in currentXml && currentXml[name]) {
+        const xml = currentXml[name]
+        deleteTab(name)
+        const fixedName = addNewTab(newName)
+        setXml(xml, fixedName)
+        setActiveTab(fixedName)
+      }
+      else if (tabs.includes(name)) {
+        deleteTab(name)
+        const fixedName = addNewTab(newName)
+        setActiveTab(fixedName)
+      }
+    }
+
+    button.addEventListener('blur', onBlur)
+    button.addEventListener('keydown', onKeyDown)
+  }
+
+  function deleteCurrentTab(e: Event) {
+    if (activeTab === 'Main') return
+    e.stopPropagation()
+    setIsTemplateDdOpen(false)
+    deleteTab(activeTab)
+    setActiveTab('Main')
+  }
+
   return (
     <header className={styles.toolbar}>
       <span className={styles.brand}>
@@ -162,6 +246,16 @@ export default function Toolbar() {
             </ul>
           )}
         </button>
+        <button className={styles.dropdownBtn} onClick={() => setIsTemplateDdOpen(true)} onMouseLeave={() => setIsTemplateDdOpen(false)}>
+          Templates
+          {isTemplateDdOpen && (
+            <ul className={styles.dropdownContainer}>
+              <li className={styles.dropdownItem} onClick={createNewTemplate}>Create New</li>
+              <li className={activeTab === 'Main' ? `${styles.dropdownItem} ${styles.disabled}` : `${styles.dropdownItem}`} onClick={renameCurrentTemplate}>Rename</li>
+              <li className={activeTab === 'Main' ? `${styles.dropdownItem} ${styles.disabled}` : `${styles.dropdownItem}`} onClick={deleteCurrentTab}>Delete</li>
+            </ul>
+          )}
+        </button>
         <button className={styles.dropdownBtn} onClick={() => setIsViewDdOpen(true)} onMouseLeave={() => setIsViewDdOpen(false)}>
           View
           {isViewDdOpen && (
@@ -185,7 +279,7 @@ export default function Toolbar() {
       </div>
       <div className={styles.tabs}>
         {tabs.map(t => (
-          <button className={t === activeTab ? styles.activeTab : styles.tab}
+          <button className={t === activeTab ? (showEditingTabName ? `${styles.activeTab} ${styles.editing}` : `${styles.activeTab}`) : styles.tab}
             onClick={() => setActiveTab(t)}>{t}</button>
         ))}
       </div>
