@@ -16,11 +16,13 @@ import logging, threading, zipfile
 import music21
 from generate import generate_score
 from helpers import STORAGE_DIR
+from infill import canvas_to_tokens, infill, repair_seams
 from model_util import load_model_only
 from tokenizer import (MAX_BAR_SKIP, MAX_VOICES, QuintupleTokenizer, canonical_instrument,
                        resolve_bars, tokenize_score_as_text, tokens_to_score)
 
 DEFAULT_MODEL = 'the-waffler'
+FILL_MODEL = 'the-waffiller'   # the masked model: it writes a canvas's holes rather than a continuation
 TIME_SIGS = ('2/4', '3/4', '4/4', '6/8', '3/8', '12/8')   # the API's time-signature indices
 
 # Indexed to match the frontend's instrument picker. The names are only a starting point: each one
@@ -375,3 +377,29 @@ def infill_stream(xml_str, start_measure, end_measure, parts=None, max_new=1500,
         if xml is None: continue
         log(f'Filled bar {done} of {end - start + 1}')
         yield done, xml, end - start + 1
+
+
+def fill_template(rows, steps=12, temperature=1.0, device='cpu', model_name=FILL_MODEL, log=print):
+    """MusicXML for a canvas of rows, every MASK in it written by the masked model.
+
+    This is ml/infill.py's own __main__ as an endpoint: fill the canvas, rewrite the rows either
+    side of the ones the caller gave now that there is music around them, and render what is left
+    once the slack has been dropped. A field the vocabulary doesn't hold is handed over as a MASK
+    rather than refused -- a template can name a chord quality or an instrument the corpus never
+    did, and letting the model choose that one field is nearer what was asked for than a failure.
+    """
+    model, cfg, tokenizer = _load(model_name, device)
+    if len(rows) > cfg['max_seq_len']:
+        raise RuntimeError(f'Template fill failed: {len(rows)} rows is past the model\'s '
+                           f'{cfg["max_seq_len"]}-row canvas; ask for fewer bars or slots')
+    rows = [ tuple(tok if not tok or tok in tokenizer.vocabs[i] else 'MASK' for i, tok in enumerate(row))
+             for row in rows ]
+    log(f'Filling {sum(row.count("MASK") for row in rows)} slots of a {len(rows)}-row canvas with {model_name}')
+
+    filled, order = infill(model, tokenizer, rows, steps=steps, temperature=temperature)
+    repaired, order = repair_seams(model, tokenizer, rows, filled, order)
+    tokens, _ = canvas_to_tokens(tokenizer, repaired, order)
+    xml = _to_xml(tokens)
+    if xml is None:
+        raise RuntimeError('Template fill failed: the model wrote no notes into the template')
+    return xml

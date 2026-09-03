@@ -14,7 +14,8 @@ from pathlib import Path
 # since uvicorn only configures its own loggers
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(name)s: %(message)s")
 
-from api.routers.edit import clef, time_sig, key_sig, tempo, instr, rm_staff, rm_measure
+from api.routers.edit import clef, time_sig, key_sig, tempo, instr, rm_staff, rm_measure, write_score
+from api.routers.templates import fill_template, score_to_template
 
 # Ensure the project root is on sys.path so ml/ imports resolve
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -51,6 +52,9 @@ app.include_router(tempo.router, prefix="/api")
 app.include_router(instr.router, prefix="/api")
 app.include_router(rm_staff.router, prefix="/api")
 app.include_router(rm_measure.router, prefix="/api")
+app.include_router(write_score.router, prefix="/api")
+app.include_router(score_to_template.router, prefix="/api")
+app.include_router(fill_template.router, prefix="/api")
 
 # Serve the built React frontend in production (frontend/dist)
 _dist = PROJECT_ROOT / "frontend" / "dist"

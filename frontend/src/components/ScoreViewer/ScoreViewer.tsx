@@ -7,6 +7,7 @@ import AppendBar from './AppendBar'
 import InscorePrompt from './InscorePrompt'
 import { promptAnthropic } from '../../api/claudeTools'
 import { applyClaudeEdit } from '../../api/applyClaudeEdit'
+import { promptTemplateAnthropic } from '../../api/claudeTemplates'
 
 const MEASURE_SEL = 'g.measure'
 const STAFF_SEL = 'g.staff'
@@ -686,51 +687,20 @@ export default function ScoreViewer() {
 
     console.log(e.target.value)
     const prompt = e.target.value
+    const outputXml = await promptTemplateAnthropic(prompt, getXml('Main'))
+    console.log(outputXml)
+    if (outputXml) {
+      setXml(outputXml as string, 'Main')
+    }
     // const response = await promptAnthropic(prompt, '', 
     //   (thought) => {console.log(thought)}, 
     //   (title) => {console.log(title)}, null)
-    const response = [
-    [
-        {
-            "tool": "generate_score",
-            "input": {
-                "measure_start_num": 1,
-                "generation_staffs": [
-                    {
-                        "staff_num": 0,
-                        "instrument": "voice_soprano"
-                    },
-                    {
-                        "staff_num": 1,
-                        "instrument": "voice_alto"
-                    },
-                    {
-                        "staff_num": 2,
-                        "instrument": "voice_tenor"
-                    },
-                    {
-                        "staff_num": 3,
-                        "instrument": "voice_bass"
-                    }
-                ],
-                "generation_length": 8,
-                "overwrite_current": false,
-                "tonic": "D",
-                "mode": "minor",
-                "time_signature": "4/4",
-                "tempo": 72
-            }
-        }
-    ],
-    2674,
-    359
-]
 
-    console.log(response)
-    const edits = Array.isArray(response[0]) ? response[0] : []
-    for (const { tool, input } of edits) {
-      applyClaudeEdit(tool, input, getXml(activeTab) ?? '', (xml) => setXml(xml, activeTab))
-    }
+    // console.log(response)
+    // const edits = Array.isArray(response[0]) ? response[0] : []
+    // for (const { tool, input } of edits) {
+    //   applyClaudeEdit(tool, input, getXml(activeTab) ?? '', (xml) => setXml(xml, activeTab))
+    // }
   }
 
   return (

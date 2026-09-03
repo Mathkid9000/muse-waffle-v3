@@ -5,7 +5,7 @@ import type { ThoughtProcessEvent, ThoughtProcessTask } from '../components/Scor
 
 // Local dev only: the API key is bundled into the client, so never deploy this
 // build publicly — move the call behind the FastAPI backend before sharing.
-const anthropic = new Anthropic({
+export const anthropic = new Anthropic({
     apiKey: import.meta.env.VITE_ANTHROPIC_API_KEY,
     dangerouslyAllowBrowser: true,
 });

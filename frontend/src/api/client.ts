@@ -1,3 +1,5 @@
+import type { AnyTemplateItem } from "../types"
+
 const BASE = '/api'
 
 // Creative
@@ -94,6 +96,28 @@ export interface EditRmMeasureRequest {
   measure_end_num: number
 }
 
+export interface EditWriteScoreRequest {
+  /** The score being written onto; empty writes onto nothing. */
+  xml: string
+  /** The score being copied. */
+  source_xml: string
+  measure_start_num: number
+}
+
+// Templates
+export interface ScoreToTemplateRequest {
+  xml: string
+}
+
+export interface FillTemplateRequest {
+  template: AnyTemplateItem[]
+  /** Decoding passes; more passes commit fewer slots at a time. */
+  steps?: number
+  temperature?: number
+  model_name?: string
+  device?: string
+}
+
 // Other
 export interface StreamEvent {
   xml?: string
@@ -183,4 +207,12 @@ export const api = {
     post<{ xml: string }>('/edit/rm-staff', req),
   editRmMeasure: (req: EditRmMeasureRequest) =>
     post<{ xml: string }>('/edit/rm-measure', req),
+  editWriteScore: (req: EditWriteScoreRequest) =>
+    post<{ xml: string }>('/edit/write-score', req),
+
+  // Templates
+  scoreToTemplate: (req: ScoreToTemplateRequest) =>
+    post<{ template: AnyTemplateItem[] }>('/templates/score-to-template', req),
+  fillTemplate: (req: FillTemplateRequest) =>
+    post<{ xml: string }>('/templates/fill-template', req)
 }

@@ -173,5 +173,21 @@ class EditRmMeasureRequest(BaseModel):
     measure_end_num: int = Field(..., ge=1, description="Last measure to remove (inclusive)")
 
 
+class EditWriteScoreRequest(BaseModel):
+    xml: str = Field("", description="Existing MusicXML content to write onto; empty writes onto nothing")
+
+    @field_validator("xml", mode="before")
+    @classmethod
+    def resolve_xml(cls, v: str) -> str:
+        return _decode_xml(v)
+    source_xml: str = Field(..., description="MusicXML content to copy")
+
+    @field_validator("source_xml", mode="before")
+    @classmethod
+    def resolve_source_xml(cls, v: str) -> str:
+        return _decode_xml(v)
+    measure_start_num: int = Field(1, ge=1, description="1-based measure of `xml` the copy is written at")
+
+
 class XmlResponse(BaseModel):
     xml: str = Field(..., description="Generated MusicXML content")
