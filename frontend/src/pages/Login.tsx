@@ -154,7 +154,7 @@ export default function Login() {
       <div className={styles.background}></div>
       <div className={styles.backgroundMask}></div>
       <div className={styles.centerContainer}>
-        <h1 className={styles.containerHeader}>{mode === "login" ? "Welcome Back" : "Create Account"}</h1>
+        <h1 className={styles.containerHeader}>{mode === "login" ? "muse-waffle" : "Create Account"}</h1>
         <form onSubmit={handleSubmit(onSubmit)} className={styles.inputGrid}>
           {mode === "signup" && (
             <div className="space-y-2">
