@@ -65,6 +65,7 @@ export async function promptTemplateAnthropic(prompt: string, xml: string | null
         const selectedTool = toolTriggerContent.tool
         const intention = toolTriggerContent.intention
         const next_steps = toolTriggerContent.next_steps
+        // if (selectedTool === 'edit_template') { console.log(memory); return; }
         if (selectedTool === 'complete') break;
         const toolMessage = await anthropic.messages.create({
             model: 'claude-haiku-4-5-20251001',
@@ -82,7 +83,7 @@ export async function promptTemplateAnthropic(prompt: string, xml: string | null
 
         const results: Anthropic.Messages.ToolResultBlockParam[] = []
         for (const tool of toolUses) {
-            await processCommand({ tool: tool.name, input: tool.input as Record<string, unknown> }, memory, messages)
+            await processCommand({ tool: tool.name, input: tool.input as Record<string, unknown> }, memory, intention)
             results.push({
                 type: "tool_result",
                 tool_use_id: tool.id,
@@ -113,7 +114,7 @@ function getMemoryContext(memory: Record<string, string | AnyTemplateItem[]>) {
         Object.keys(memory).map(k => `${k} (${typeof memory[k] === "string" ? 'score' : 'template'})`).join(', ')
 }
 
-async function processCommand(command: { tool: string, input: Record<string, unknown> }, memory: Record<string, string | AnyTemplateItem[]>, messages: Anthropic.Messages.MessageParam[]) {
+async function processCommand(command: { tool: string, input: Record<string, unknown> }, memory: Record<string, string | AnyTemplateItem[]>, intention: string) {
     switch (command.tool) {
         case "generate_score": {
             const { in_key, out_key } = getScoreInputOutputNames(command.input)
@@ -155,24 +156,46 @@ async function processCommand(command: { tool: string, input: Record<string, unk
             break
         }
         case "edit_template": {
-            const { in_key, out_key: _ } = getScoreInputOutputNames(command.input)
-            const template = memory[in_key] as AnyTemplateItem[]
+            const { in_key } = getScoreInputOutputNames(command.input)
+            const template = memory[in_key]
+            // Without this the stage 2 model is handed "undefined" as its template and, having
+            // nothing to edit, invents a fresh one-item template instead.
+            if (!Array.isArray(template)) {
+                console.warn(command, "No template stored under", in_key, "— nothing to edit. Memory holds:", Object.keys(memory))
+                break
+            }
 
             const messageStage2 = await anthropic.messages.create({
                 model: 'claude-haiku-4-5-20251001',
-                max_tokens: 1024,
+                // The whole edited template comes back in this response, so the budget has to fit
+                // every item of the input template, not just the ones being changed.
+                max_tokens: 16384,
                 tools: [ EDIT_TEMPLATE_STAGE2_TOOL ] as unknown as Anthropic.Messages.ToolUnion[],
-                system: `${in_key} Template:\n${JSON.stringify(template)}`,
-                messages: messages,
+                system: EDIT_TEMPLATE_STAGE2_INTRO,
+                // A single self-contained request: the roadmap conversation ends on an assistant
+                // turn and never carries this step's intention, so stage 2 gets its own turn.
+                messages: [{
+                    role: 'user',
+                    content: `Template "${in_key}" — ${template.length} items:\n${JSON.stringify(template)}\n\n`
+                        + `Edit this template so that: ${intention}\n\n`
+                        + `Return the complete edited template: all ${template.length} items in their original order, with your edits applied.`
+                }],
                 tool_choice: { type: "tool", name: 'edit_template' }
             });
-            console.log('STAGE 222222222',messageStage2)
+            console.log('EDIT TEMPLATE STAGE 2:', messageStage2)
+            if (messageStage2.stop_reason === 'max_tokens') {
+                console.warn('Stage 2 hit the output limit — the edited template is truncated:', messageStage2)
+            }
             const toolUses = messageStage2.content.filter((b): b is ToolUseBlock => b.type === "tool_use");
             if (toolUses.length == 0) { console.warn('NO EDITS FOUND:', template, messageStage2); return }
             const input = toolUses[0].input as Record<string, unknown>
-            const { in_key: __, out_key } = getScoreInputOutputNames(input)
+            const { out_key } = getScoreInputOutputNames(input)
             const newTemplate = input['template'] as AnyTemplateItem[]
-            saveToMemory(memory, out_key, newTemplate)
+            if (!Array.isArray(newTemplate) || newTemplate.length === 0) {
+                console.warn('Stage 2 returned no template — keeping', in_key, 'as it was:', input)
+                break
+            }
+            saveToMemory(memory, out_key || `${in_key}_edited`, keepInstruments(template, newTemplate))
             break
         }
         case "write_score": {
@@ -201,6 +224,18 @@ async function processCommand(command: { tool: string, input: Record<string, unk
     }
 }
 
+/**
+ * fill_template fails outright ("the template names no instrument to write for") when nothing
+ * says what instrument to write, so an edit is never allowed to drop every instrument item.
+ */
+function keepInstruments(source: AnyTemplateItem[], edited: AnyTemplateItem[]): AnyTemplateItem[] {
+    if (edited.some((i) => i.kind === 'instrument')) return edited
+    const instruments = source.filter((i) => i.kind === 'instrument')
+    if (instruments.length === 0) return edited
+    console.warn('edit_template dropped every instrument item — re-adding', instruments)
+    return [...instruments, ...edited]
+}
+
 function saveToMemory(memory: Record<string, string | AnyTemplateItem[]>, key: string, value: string | AnyTemplateItem[]) {
     memory[key] = value
     const appState = useStore.getState()
@@ -208,6 +243,7 @@ function saveToMemory(memory: Record<string, string | AnyTemplateItem[]>, key: s
     if (!appState.tabs.some(t => t.name === key)) {
         appState.addNewTab(key)
     }
+    else { console.log(key) }
 
     appState.updateTab(key, { content: value })
 }
@@ -221,8 +257,8 @@ function getScoreInputOutputNames(input: Record<string, unknown>) {
 }
 
 const PROMPT_INTRO = "Your job is to classify which edit types are required next to achieve the user's goal and in what order."
-    + "You may use templates to achieve generation and repetitive tasks (e.g. an AABA song from scratch). A template is score abstraction where some elements are intentionally left blank to be filled in by a different model. "
-    + "For example, if you are creating a song in AABA format, you might want to first generate 8 bars (the first A), then create a template by taking this score and stripping it of some of its qualities (e.g. chords, rhythm, some pitches). Then, you may command the template to be filled in and placed into the first 8 bars, then commanding it to fill in the template once more and place this in the second 8 bars (Note: when you fill in a template, you get a new object that is no longer considered a template as it is completely filled). "
+    + "You may use templates to achieve generation and repetitive tasks (e.g. an AABA song from scratch). A template is score abstraction where some elements are intentionally left blank to be filled in by a different model. Actions like creating a template from a score don't change anything about the score, it just modifies the type of the object so that it can be edited using other actions. When a template is filled in, it merely takes the blank/masked elements of the template and fills them in automatically."
+    + "For example, if you are creating a song in AABA format, you might want to first generate 8 bars (the first A), use it to create a template, then edit the template by taking the converted score and stripping it of some of its qualities (e.g. chords, rhythm, some pitches). Then, you may command the template to be filled in and placed into the first 8 bars, then commanding it to fill in the template once more and place this in the second 8 bars (Note: when you fill in a template, you get a new object that is no longer considered a template as it is completely filled). "
     + "If nothing matches an edit type, return no tool. You also have the ability to store/retrieve templates and score segments to/from memory with a name identifier so that they can be reused (Note: operations do not happen in place automatically)."
     + "Finally, the output, final score should be saved to the name 'OUTPUT'. Reserve this only for when you want a score to be returned. It may also be a template if the user requests a template be returned."
 
@@ -317,7 +353,7 @@ const TEMPLATE_ITEM_SCHEMAS = [
         type: "object",
         description: "Assigns a completely masked sequence of measures. This is the catalyst for completely new content. May also be used on a sub measure level by setting measure length to 1.",
         properties: {
-            key: { type: "string", enum: [ "masked" ] },
+            kind: { type: "string", enum: [ "masked" ] },
             measure_start: {
                 type: "number",
                 description: "The beginning of a sequence of completely masked measures (1-based)."
@@ -331,7 +367,7 @@ const TEMPLATE_ITEM_SCHEMAS = [
                 description: "The maximum number of new elements filled in per masked measure. Not all slots will be used"
             }
         },
-        required: [ "measure_start", "mask_measure_length", "slots_per_measure" ]
+        required: [ "kind", "measure_start", "mask_measure_length", "slots_per_measure" ]
     },
     {
         type: "object",
@@ -425,22 +461,30 @@ const TEMPLATE_ITEM_SCHEMAS = [
     }
 ]
 
+const EDIT_TEMPLATE_STAGE2_INTRO = "You are editing one existing template in place. A template is an ordered list of items describing a piece of music; an element is masked by keeping its item and omitting the field being masked (e.g. drop `pitch` from a note item to mask that note's pitch), which is what lets the filler model regenerate it."
+    + "\nRules:"
+    + "\n- Return the COMPLETE edited template: every item of the input template, in its original order, including the items you did not touch. Any item you leave out is deleted from the template."
+    + "\n- You are modifying the template you were given. Never return a brand new template, and never collapse it into a single fully-masked block, unless the request explicitly asks to replace all of its content."
+    + "\n- Keep the setup items (instrument, clef, key, time, tempo) and their values. Filling fails if no item names an instrument."
+    + "\n- To mask a musical element, omit the field(s) you want regenerated from its item. To remove content entirely, drop the item."
+
 const EDIT_TEMPLATE_STAGE2_TOOL=  {
     name: "edit_template",
-    description: "Edit the given template (e.g. mask musical elements like rhythm, pitch, chords, etc...)",
+    description: "Return the given template with the requested edits applied (e.g. mask musical elements like rhythm, pitch, chords, etc...). The template you return replaces the one you were given, so it must contain every item you want to keep.",
     input_schema: {
         type: "object",
         properties: {
             memory_output_name: {
                 type: "string",
-                description: "The new name of the template to be stored in memory."
+                description: "The new name of the edited template to be stored in memory."
             },
             template: {
                 type: "array",
                 items: { anyOf: TEMPLATE_ITEM_SCHEMAS },
-                description: "The ordered list of items making up the template. Each item's `kind` selects which fields apply. Omit a non-required field to leave that item blank, to be filled in later."
+                description: "The COMPLETE edited template: every item of the template you were given, in the same order, with your edits applied — not just the items you changed. Each item's `kind` selects which fields apply. Omit a non-required field to mask it, to be filled in later. It is recommended to not edit elements like tempos, instruments, keys, and time signatures unless specified."
             },
-        }
+        },
+        required: [ "memory_output_name", "template" ]
     }
 }
 

@@ -708,6 +708,8 @@ export default function ScoreViewer() {
     // }
   }
 
+  // console.log(template)
+
   return (
     <div
       ref={outerRef}
@@ -718,7 +720,7 @@ export default function ScoreViewer() {
       onContextMenu={(e) => { if (e.ctrlKey || e.metaKey) e.preventDefault() }}
     >
       {template ? (
-        <div className={styles.emptyState}>
+        <div className={styles.emptyState} ref={innerRef} style={{ transform: `translate(${panX}px, ${panY}px) scale(${zoom / 100})` }}>
           <div className={`${styles.paper} ${styles.templatePaper}`}>
             <h2 className={styles.templateName}>{tab!.name}</h2>
             <p className={styles.paperHint}>{tab!.description || 'Template'}</p>
