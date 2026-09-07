@@ -12,11 +12,9 @@ export default function Toolbar() {
   const navigate = useNavigate()
   const { user, profile } = useAuth()
   const getXml = useStore((s) => s.getXml)
-  const currentXml = useStore((s) => s.currentXml)
   const scoreId = useStore((s) => s.scoreId)
   const setScoreId = useStore((s) => s.setScoreId)
   const zoom = useStore((s) => s.zoom)
-  const setXml = useStore((s) => s.setXml)
   const setScoreData = useStore((s) => s.setScoreData)
   const setError = useStore((s) => s.setError)
   const zoomTo = useStore((s) => s.zoomTo)
@@ -28,6 +26,7 @@ export default function Toolbar() {
   const setTabs = useStore((s) => s.setTabs)
   const addNewTab = useStore((s) => s.addNewTab)
   const deleteTab = useStore((s) => s.deleteTab)
+  const renameTab = useStore((s) => s.renameTab)
   const activeTab = useStore((s) => s.activeTab)
   const setActiveTab = useStore((s) => s.setActiveTab)
 
@@ -46,10 +45,8 @@ export default function Toolbar() {
     setScoreData({ numInstruments })
     // A freshly imported file replaces the whole document — drop any tabs left over
     // from whatever was open before instead of appending to them.
-    useStore.setState({ currentXml: {} })
-    setTabs(['Main'])
+    setTabs([{ name: 'Main', description: '', content: xml }])
     setActiveTab('Main')
-    setXml(xml, 'Main')
   }
 
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
@@ -78,8 +75,8 @@ export default function Toolbar() {
   }
 
   async function handleSave() {
-    if (!currentXml || !user) return
-    const id = await saveScore(user.id, currentXml, scoreId)
+    if (!user) return
+    const id = await saveScore(user.id, tabs, scoreId)
     // The preview render leaves the shared toolkit on a portrait page — put the editor's back.
     redrawScore()
     if (!id) return setError('Failed to save score.')
@@ -144,7 +141,8 @@ export default function Toolbar() {
   function createNewTemplate(e: React.MouseEvent) {
     e.stopPropagation()
     setIsTemplateDdOpen(false)
-    const tabName = addNewTab('New Template')
+    // A template tab starts as an empty item list — that's what marks it as a template.
+    const tabName = addNewTab('New Template', { content: [] })
     setActiveTab(tabName)
   }
 
@@ -188,19 +186,8 @@ export default function Toolbar() {
       button.style.outline = "none"
       cleanup()
 
-      const { currentXml, tabs, deleteTab, addNewTab, setXml, setActiveTab } = useStore.getState()
-      if (name in currentXml && currentXml[name]) {
-        const xml = currentXml[name]
-        deleteTab(name)
-        const fixedName = addNewTab(newName)
-        setXml(xml, fixedName)
-        setActiveTab(fixedName)
-      }
-      else if (tabs.includes(name)) {
-        deleteTab(name)
-        const fixedName = addNewTab(newName)
-        setActiveTab(fixedName)
-      }
+      // The tab carries its own content, so renaming is a field edit — nothing to move.
+      setActiveTab(renameTab(name, newName ?? name))
     }
 
     button.addEventListener('blur', onBlur)
@@ -279,8 +266,9 @@ export default function Toolbar() {
       </div>
       <div className={styles.tabs}>
         {tabs.map(t => (
-          <button className={t === activeTab ? (showEditingTabName ? `${styles.activeTab} ${styles.editing}` : `${styles.activeTab}`) : styles.tab}
-            onClick={() => setActiveTab(t)}>{t}</button>
+          <button key={t.name} title={t.description}
+            className={t.name === activeTab ? (showEditingTabName ? `${styles.activeTab} ${styles.editing}` : `${styles.activeTab}`) : styles.tab}
+            onClick={() => setActiveTab(t.name)}>{t.name}</button>
         ))}
       </div>
     </header>

@@ -1,10 +1,11 @@
 import { useState } from 'react'
 import { useStore } from '../../store'
 import { api } from '../../api/client'
+import { tabXml } from '../../types'
 import styles from './AppendBar.module.css'
 
 export default function AppendBar() {
-  const currentXml = useStore((s) => s.currentXml)
+  const currentXml = useStore((s) => tabXml(s.tabs.find((t) => t.name === s.activeTab)))
   const loading = useStore((s) => s.loading)
   const setXml = useStore((s) => s.setXml)
   const setLoading = useStore((s) => s.setLoading)

@@ -7,6 +7,7 @@ import { useAuth } from '../contexts/AuthContext'
 import { useStore } from '../store'
 import { fetchScoreXml } from '../lib/scores'
 import { countInstruments } from '../hooks/useVerovio'
+import { tabXml, type Tab } from '../types'
 import styles from './Editor.module.css'
 
 export default function Editor() {
@@ -21,7 +22,7 @@ export default function Editor() {
   // fetch a score the store isn't already holding. The scoreId check also skips the reload
   // the post-save navigate() to /editor/:id would otherwise trigger.
   useEffect(() => {
-    const { scoreId, setXml, setScoreId, setScoreData, resetScore, setTabs, setActiveTab } = useStore.getState()
+    const { scoreId, setScoreId, setScoreData, resetScore, setTabs, setActiveTab } = useStore.getState()
     if (!id) {
       // Blank editor: keep a rehydrated unsaved draft, but drop a saved score left over
       // from navigating /editor/:id -> /editor.
@@ -31,13 +32,14 @@ export default function Editor() {
     if (!userId || id === scoreId) return
     fetchScoreXml(userId, id).then(async (xml) => {
       if (!xml) return
-      const xmlRecord = JSON.parse(xml) as Record<string, string>
-      console.log(xmlRecord)
-      setScoreData({ numInstruments: await countInstruments(xmlRecord['Main']) })
+      const saved = JSON.parse(xml) as Tab[] | Record<string, string>
+      // Scores saved before tabs became a datatype are a plain name -> xml record.
+      const tabs: Tab[] = Array.isArray(saved)
+        ? saved
+        : Object.entries(saved).map(([name, content]) => ({ name, description: '', content }))
+      setScoreData({ numInstruments: await countInstruments(tabXml(tabs.find(t => t.name === 'Main')) ?? '') })
       // Loading a different saved score replaces the whole tab set with this score's own.
-      useStore.setState({ currentXml: {} })
-      Object.keys(xmlRecord).forEach(k => setXml(xmlRecord[k], k))
-      setTabs(Object.keys(xmlRecord))
+      setTabs(tabs)
       setActiveTab('Main')
       setScoreId(id)
     })

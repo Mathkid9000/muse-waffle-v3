@@ -3,6 +3,7 @@ import { useStore } from '../../store'
 import { api } from '../../api/client'
 import styles from './AIPanel.module.css'
 import { promptAnthropic } from '../../api/claudeTools'
+import { tabXml } from '../../types'
 import type {
   EditClefRequest,
   EditTimeSigRequest,
@@ -28,7 +29,7 @@ interface ThoughtProcessEvent {
 
 export default function AIPanel() {
   const [tab, setTab] = useState<Tab>('infill')
-  const currentXml = useStore((s) => s.currentXml)
+  const currentXml = useStore((s) => tabXml(s.tabs.find((t) => t.name === s.activeTab)))
   const scoreData = useStore((s) => s.scoreData)
   const loading = useStore((s) => s.loading)
   const error = useStore((s) => s.error)

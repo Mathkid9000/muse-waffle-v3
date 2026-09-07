@@ -8,6 +8,7 @@ import InscorePrompt from './InscorePrompt'
 import { promptAnthropic } from '../../api/claudeTools'
 import { applyClaudeEdit } from '../../api/applyClaudeEdit'
 import { promptTemplateAnthropic } from '../../api/claudeTemplates'
+import { tabTemplate, tabXml } from '../../types'
 
 const MEASURE_SEL = 'g.measure'
 const STAFF_SEL = 'g.staff'
@@ -139,10 +140,12 @@ function pageOfMeasure(meta: PageMeta, m: number): number {
 
 export default function ScoreViewer() {
   const { ready, renderXml } = useVerovio()
-  const getXml = useStore((s) => s.getXml)
   const setXml = useStore((s) => s.setXml)
-  const currentXml = useStore((s) => s.currentXml)
-  const activeTab = useStore((s) => s.activeTab)
+  // The open tab is what this view renders: string content is engraved as a score,
+  // array content is listed as a template, null shows the empty state.
+  const tab = useStore((s) => s.tabs.find((t) => t.name === s.activeTab))
+  const xml = tabXml(tab)
+  const template = tabTemplate(tab)
   const scoreData = useStore((s) => s.scoreData)
   const zoom = useStore((s) => s.zoom)
   const panX = useStore((s) => s.panX)
@@ -182,7 +185,8 @@ export default function ScoreViewer() {
 
   const resetPromptHost = () => {
     const host = document.createElement('div')
-    createRoot(host).render(<InscorePrompt getXml={() => getXml(activeTab)} getSelection={() => useStore.getState().selection!} setXml={(xml) => setXml(xml, activeTab)} />)
+    // Read the active tab at call time — this root is created once and outlives tab switches.
+    createRoot(host).render(<InscorePrompt getXml={() => useStore.getState().getXml(useStore.getState().activeTab)} getSelection={() => useStore.getState().selection!} setXml={(xml) => setXml(xml, useStore.getState().activeTab)} />)
     promptHostRef.current = host
     return () => host.remove()
   }
@@ -254,7 +258,7 @@ export default function ScoreViewer() {
   }, [pageMeta, panX, panY, zoom, viewportW, viewportH])
 
   useEffect(() => {
-    if (!ready || !getXml(activeTab)) {
+    if (!ready || !xml) {
       cachedPagesRef.current = []
       metaCacheRef.current.clear()
       setPages([])
@@ -267,7 +271,7 @@ export default function ScoreViewer() {
 
     if (!tk || !streamMode || cachedPagesRef.current.length === 0) {
       // Full render: initial load, not streaming, or cache empty (first streaming event)
-      const allPages = renderXml(getXml(activeTab)!, w * 2.5, 40)
+      const allPages = renderXml(xml, w * 2.5, 40)
       cachedPagesRef.current = allPages
       setPages(allPages)
       return
@@ -275,7 +279,7 @@ export default function ScoreViewer() {
 
     // Incremental: loadAndGetPageCount applies options + loads data into the shared tk
     const prevCount = cachedPagesRef.current.length
-    const newCount = loadAndGetPageCount(getXml(activeTab)!, w * 2.5, 40)
+    const newCount = loadAndGetPageCount(xml, w * 2.5, 40)
     if (newCount === 0) return
 
     let startPage: number
@@ -299,7 +303,7 @@ export default function ScoreViewer() {
     cachedPagesRef.current = updated
     setPages([...updated])
     // the page height comes from the score itself now, so nothing outside these has to be watched
-  }, [ready, currentXml, streamMode, redrawNonce])
+  }, [ready, xml, streamMode, redrawNonce])
 
   // Inject selection highlight rects directly into the SVG DOM.
   // One band per selected staff, drawn from the staff's own staff lines (see staffLinesBox)
@@ -687,7 +691,7 @@ export default function ScoreViewer() {
 
     console.log(e.target.value)
     const prompt = e.target.value
-    const outputXml = await promptTemplateAnthropic(prompt, getXml('Main'))
+    const outputXml = await promptTemplateAnthropic(prompt, useStore.getState().getXml('Main'))
     console.log(outputXml)
     if (outputXml) {
       setXml(outputXml as string, 'Main')
@@ -713,11 +717,25 @@ export default function ScoreViewer() {
       onMouseUp={onMouseUp}
       onContextMenu={(e) => { if (e.ctrlKey || e.metaKey) e.preventDefault() }}
     >
-      {!getXml(activeTab) ? (
+      {template ? (
+        <div className={styles.emptyState}>
+          <div className={`${styles.paper} ${styles.templatePaper}`}>
+            <h2 className={styles.templateName}>{tab!.name}</h2>
+            <p className={styles.paperHint}>{tab!.description || 'Template'}</p>
+            {template.length === 0 && <p className={styles.paperHint}>No items yet.</p>}
+            <ol className={styles.templateItems}>
+              {template.map((item, i) => {
+                const { kind, ...fields } = item
+                return <li key={i}><b>{kind}</b> {JSON.stringify(fields)}</li>
+              })}
+            </ol>
+          </div>
+        </div>
+      ) : !xml ? (
         <div className={styles.emptyState}>
           <div className={styles.paper}>
             <div style={{ display: 'block' }}>
-              <p className={styles.paperHint}>Open a MusicXML file or generate a score</p>
+              <p className={styles.paperHint}>{tab?.description || 'Open a MusicXML file or generate a score'}</p>
               <input className={styles.paperInput} placeholder={'Start a score...'} onKeyDown={handleBlankScoreInput} onMouseDown={(e) => e.stopPropagation()}></input>
             </div>
           </div>

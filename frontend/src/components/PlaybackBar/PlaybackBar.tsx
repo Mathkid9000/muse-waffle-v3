@@ -6,7 +6,7 @@ import styles from './PlaybackBar.module.css'
 export default function PlaybackBar() {
   const getXml = useStore((s) => s.getXml)
   const activeTab = useStore((s) => s.activeTab)
-  const currentXml = useStore((s) => s.currentXml) // Forces playback bar to load
+  useStore((s) => s.tabs) // Forces playback bar to load
   const selection = useStore((s) => s.selection)
   const { playing, loading, play, stop, volume, setVolume } = usePlayback()
   const [fromMeasure, setFromMeasure] = useState(1)

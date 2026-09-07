@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { createJSONStorage, persist, type StateStorage } from 'zustand/middleware'
+import { tabXml, type Tab } from '../types'
 
 export interface MeasureSelection {
   start: number
@@ -13,7 +14,10 @@ export interface ScoreAppData {
 }
 
 interface AppState {
-  currentXml: Record<string, string | null>
+  /** Every open tab, in bar order. A tab owns its own content — there is no parallel xml map. */
+  tabs: Tab[]
+  activeTab: string
+  getTab: (name?: string) => Tab | undefined
   getXml: (key: string) => string | null
   /** Row id of the saved score being edited; null until the first save. */
   scoreId: string | null
@@ -35,12 +39,15 @@ interface AppState {
   /** Bumped to force ScoreViewer to re-render the SVG from the current XML. */
   redrawNonce: number
 
-  tabs: string[]
-  activeTab: string,
-  setTabs: (tabs: string[]) => void
+  setTabs: (tabs: Tab[]) => void
   setActiveTab: (tab: string) => void
-  addNewTab: (tab: string) => string
+  /** Adds a tab, de-duplicating its name; returns the name it actually got. */
+  addNewTab: (tab: string, init?: Partial<Tab>) => string
   deleteTab: (tab: string) => void
+  /** Patches one tab's fields (description, content) in place. */
+  updateTab: (tab: string, patch: Partial<Tab>) => void
+  /** Renames a tab, de-duplicating; returns the name it actually got. */
+  renameTab: (tab: string, newName: string) => string
 
   setXml: (xml: string, key?: string) => void
   setScoreId: (id: string | null) => void
@@ -68,6 +75,16 @@ const clampZoom = (v: number) => Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, v))
 
 const PERSIST_KEY = 'muse-waffle:editor'
 const WRITE_DELAY_MS = 400
+
+const mainTab = (): Tab[] => [{ name: 'Main', description: '', content: null }]
+
+/** `name`, or `name (n)` with the lowest n that no tab in `taken` already uses. */
+function uniqueName(name: string, taken: string[]): string {
+  const base = name.replace(/ *\([0-9]+\)$/, '')
+  let candidate = name
+  for (let i = 1; i < 100 && taken.includes(candidate); i++) candidate = `${base} (${i})`
+  return candidate
+}
 
 /**
  * sessionStorage with write-behind. A score's MusicXML runs to hundreds of kilobytes and
@@ -124,7 +141,8 @@ function createWriteBehindStorage(): StateStorage {
 }
 
 export const useStore = create<AppState>()(persist((set, get) => ({
-  currentXml: { 'Main': null },
+  tabs: mainTab(),
+  activeTab: 'Main',
   scoreId: null,
   scoreData: null,
   loading: false,
@@ -139,46 +157,35 @@ export const useStore = create<AppState>()(persist((set, get) => ({
   totalBars: null,
   streamMode: null,
   redrawNonce: 0,
-  tabs: [ 'Main' ],
-  activeTab: 'Main',
 
-  getXml: (key) => get().currentXml?.[key] ?? null,
-  addNewTab: (tab) => {
-    const tabs = get().tabs
-    let idx = 0
-    try {
-      idx = /\([0-9]+\)$/.test(tab) ? parseInt(tab.split('(').at(-1)!.replace(')', '')) : 0
-    }
-    catch {console.log('none found in', tab)}
-    for (var i = 0; i < 100 && tabs.includes(tab); i++) {
-      console.log('found', tab, tabs)
-      idx ++
-      // check if ends with (x)
-      if (/\([0-9]+\)$/.test(tab)) {
-        tab = tab.split('(').slice(0, -1).join('(').slice(0, -1)
-      }
-      tab += ` (${idx})`
-    }
-    set((s) => ({ tabs: [...s.tabs, tab] }))
-    return tab 
+  getTab: (name) => get().tabs.find((t) => t.name === (name ?? get().activeTab)),
+  getXml: (key) => tabXml(get().getTab(key)),
+  addNewTab: (tab, init) => {
+    const name = uniqueName(tab, get().tabs.map((t) => t.name))
+    set((s) => ({ tabs: [...s.tabs, { name, description: '', content: null, ...init }] }))
+    return name
   },
-  deleteTab: (tab) => {
-    const currentXml = get().currentXml
-    if (tab in currentXml) {
-      delete currentXml[tab]
-      set({ currentXml: currentXml })
-    }
-
-    const tabs = get().tabs
-    if (tabs.includes(tab)) {
-      console.log(tabs.filter(t => t !== tab))
-      set((s) => ({ tabs: s.tabs.filter(t => t !== tab) }))
-    }
+  deleteTab: (tab) => set((s) => ({ tabs: s.tabs.filter((t) => t.name !== tab) })),
+  updateTab: (tab, patch) =>
+    set((s) => ({ tabs: s.tabs.map((t) => (t.name === tab ? { ...t, ...patch } : t)) })),
+  renameTab: (tab, newName) => {
+    const name = uniqueName(newName, get().tabs.filter((t) => t.name !== tab).map((t) => t.name))
+    get().updateTab(tab, { name })
+    return name
   },
 
   setTabs: (tabs) => set({ tabs: tabs }),
   setActiveTab: (tab) => set({ activeTab: tab }),
-  setXml: (xml, key) => set((s) => ({ currentXml: { ...s.currentXml, [key ?? s.activeTab]: xml }, error: null })),
+  // Writing xml to a tab that isn't open yet creates it, so a generated score can land
+  // straight in its own tab.
+  setXml: (xml, key) =>
+    set((s) => {
+      const name = key ?? s.activeTab
+      const tabs = s.tabs.some((t) => t.name === name)
+        ? s.tabs.map((t) => (t.name === name ? { ...t, content: xml } : t))
+        : [...s.tabs, { name, description: '', content: xml }]
+      return { tabs, error: null }
+    }),
   setScoreId: (id) => set({ scoreId: id }),
   setScoreData: (data) => set({ scoreData: data }),
   setLoading: (v) => set({ loading: v }),
@@ -204,8 +211,7 @@ export const useStore = create<AppState>()(persist((set, get) => ({
   redrawScore: () => { set((s) => ({ redrawNonce: s.redrawNonce + 1 })) },
   resetScore: () =>
     set({
-      currentXml: { 'Main': null },
-      tabs: [ 'Main' ],
+      tabs: mainTab(),
       activeTab: 'Main',
       scoreId: null,
       scoreData: null,
@@ -217,10 +223,23 @@ export const useStore = create<AppState>()(persist((set, get) => ({
     }),
 }), {
   name: PERSIST_KEY,
-  version: 1,
+  version: 2,
   storage: createJSONStorage(createWriteBehindStorage),
   // Only the document survives a reload. The camera, the selection and the streaming
   // progress are per-view state, and rehydrating a half-finished stream would leave the
   // UI stuck mid-generation with no request behind it.
-  partialize: (s) => ({ currentXml: s.currentXml, tabs: s.tabs, activeTab: s.activeTab, scoreId: s.scoreId, scoreData: s.scoreData }),
+  partialize: (s) => ({ tabs: s.tabs, activeTab: s.activeTab, scoreId: s.scoreId, scoreData: s.scoreData }),
+  // v1 kept tab names and their xml in two parallel structures; fold them into Tab[].
+  migrate: (persisted, version) => {
+    if (version >= 2) return persisted as Partial<AppState>
+    const old = persisted as { tabs?: string[]; currentXml?: Record<string, string | null> }
+    return {
+      ...(persisted as object),
+      tabs: (old.tabs ?? ['Main']).map((name) => ({
+        name,
+        description: '',
+        content: old.currentXml?.[name] ?? null,
+      })),
+    } as Partial<AppState>
+  },
 }))

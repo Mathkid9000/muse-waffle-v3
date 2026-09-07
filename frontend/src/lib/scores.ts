@@ -1,5 +1,6 @@
 import { supabase } from "./supabase";
 import { renderPreviewSvg } from "../hooks/useVerovio";
+import { tabXml, type Tab } from "../types";
 
 export interface ScoreRow {
   id: string;
@@ -38,13 +39,13 @@ async function svgToPng(svg: string, width: number, height: number): Promise<Blo
 }
 
 /**
- * Saves `xml` and a freshly rendered preview to the `scores` bucket, creating the row when
+ * Saves every tab and a freshly rendered preview to the `scores` bucket, creating the row when
  * `scoreId` is null. Returns the score id, or null if the save failed.
  * Leaves the shared Verovio toolkit laid out for the preview page — redraw the score afterwards.
  */
 export async function saveScore(
   userId: string,
-  xmlRecord: Record<string, string>,
+  tabs: Tab[],
   scoreId: string | null
 ): Promise<string | null> {
   let id = scoreId;
@@ -71,12 +72,13 @@ export async function saveScore(
     id = data.id;
   }
 
-  const png = await svgToPng(renderPreviewSvg(xmlRecord['Main'], PAGE_W, PAGE_H, 10), PNG_W, PNG_H);
+  const mainXml = tabXml(tabs.find((t) => t.name === "Main"));
+  const png = mainXml ? await svgToPng(renderPreviewSvg(mainXml, PAGE_W, PAGE_H, 10), PNG_W, PNG_H) : null;
 
   const [xmlUpload, pngUpload] = await Promise.all([
     supabase.storage
       .from(BUCKET)
-      .upload(xmlPath(userId, id!), new Blob([JSON.stringify(xmlRecord)], { type: "application/xml" }), { upsert: true }),
+      .upload(xmlPath(userId, id!), new Blob([JSON.stringify(tabs)], { type: "application/xml" }), { upsert: true }),
     png
       ? supabase.storage
           .from(BUCKET)

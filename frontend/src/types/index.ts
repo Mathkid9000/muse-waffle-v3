@@ -74,3 +74,19 @@ export type AnyTemplateItem =
   | TempoTemplateItem
   | NoteTemplateItem
   | ChordTemplateItem;
+
+// tabs
+
+/**
+ * One editor tab. A tab's kind is read off `content`: a string is engraved MusicXML,
+ * an array is a template (empty while the template has no items yet), and null is an
+ * untouched score tab showing the empty state.
+ */
+export interface Tab {
+  name: string;
+  description: string;
+  content: string | AnyTemplateItem[] | null;
+}
+
+export const tabXml = (t?: Tab | null) => (typeof t?.content === "string" ? t.content : null);
+export const tabTemplate = (t?: Tab | null) => (Array.isArray(t?.content) ? t.content : null);
