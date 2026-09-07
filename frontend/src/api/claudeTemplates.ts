@@ -5,42 +5,13 @@ import type { AnyTemplateItem } from '../types';
 import { api } from './client';
 import { applyClaudeEdit } from './applyClaudeEdit';
 import { fillTemplate, scoreToTemplate } from './templates';
+import { useStore } from '../store';
 
 const MAX_TURNS = 10;
 
 export async function promptTemplateAnthropic(prompt: string, xml: string | null) {
     console.log('Prompted:', prompt, xml)
 
-    // const memorys: Record<string, string | AnyTemplateItem[]> = {}
-    // const gen_req = {
-    //     tool: "generate_score",
-    //     input: {
-    //         "measure_start_num": 1,
-    //         "generation_staffs": [
-    //             {
-    //                 "staff_num": 0,
-    //                 "instrument": "voice_soprano"
-    //             }
-    //         ],
-    //         "generation_length": 8,
-    //         "overwrite_current": true,
-    //         "tonic": "C",
-    //         "mode": "major",
-    //         "time_signature": "4/4",
-    //         "tempo": 120,
-    //         "memory_output_name": "simple_song_AABA"
-    //     }
-    // }
-    // await processCommand(gen_req, memorys)
-
-    // const genxml = memorys['simple_song_AABA'] as string
-    // const template = await scoreToTemplate(genxml)
-    // console.log(template)
-    // const score = await fillTemplate(template)
-    // memorys['OUTPUT'] = score
-
-    // console.log('COMPLETE:', memorys)
-    // return memorys['OUTPUT']
     // step 1: roadmap
     const roadmapResponse = await anthropic.messages.create({
         model: 'claude-haiku-4-5-20251001',
@@ -149,11 +120,11 @@ async function processCommand(command: { tool: string, input: Record<string, unk
             if (in_key && in_key in memory) {
                 const xml = memory[in_key] as string
                 const newXml = await applyClaudeEdit(command.tool, command.input, xml)
-                memory[out_key] = newXml
+                saveToMemory(memory, out_key, newXml)
             }
             else {
                 const newXml = await applyClaudeEdit(command.tool, command.input, '')
-                memory[out_key] = newXml
+                saveToMemory(memory, out_key, newXml)
             }
             console.log("FINISHED GENERATE:",memory)
             break
@@ -161,13 +132,14 @@ async function processCommand(command: { tool: string, input: Record<string, unk
         case "create_template_from_scratch": {
             const { in_key: _, out_key } = getScoreInputOutputNames(command.input)
             const template = command.input['template'] as AnyTemplateItem[]
-            memory[out_key] = template
+            saveToMemory(memory, out_key, template)
             break
         }
         case "create_template_from_score": {
             const { in_key, out_key } = getScoreInputOutputNames(command.input)
             const xml = memory[in_key] as string
-            memory[out_key] = await scoreToTemplate(xml)
+            const template = await scoreToTemplate(xml)
+            saveToMemory(memory, out_key, template)
             break
         }
         case "fill_template": {
@@ -177,7 +149,9 @@ async function processCommand(command: { tool: string, input: Record<string, unk
                 console.warn(command, "No template stored under", in_key)
                 break
             }
-            memory[out_key] = await fillTemplate(template)
+            const newXml = await fillTemplate(template)
+            saveToMemory(memory, out_key, newXml)
+
             break
         }
         case "edit_template": {
@@ -198,7 +172,7 @@ async function processCommand(command: { tool: string, input: Record<string, unk
             const input = toolUses[0].input as Record<string, unknown>
             const { in_key: __, out_key } = getScoreInputOutputNames(input)
             const newTemplate = input['template'] as AnyTemplateItem[]
-            memory[out_key] = newTemplate
+            saveToMemory(memory, out_key, newTemplate)
             break
         }
         case "write_score": {
@@ -211,11 +185,13 @@ async function processCommand(command: { tool: string, input: Record<string, unk
                     console.warn(command, "No score stored under", in_key)
                     continue
                 }
-                memory[out_key] = (await api.editWriteScore({
+                const newXml = (await api.editWriteScore({
                     xml: (memory[out_key] as string) ?? '',
                     source_xml: source,
                     measure_start_num: write['write_start_measure'] as number,
                 })).xml
+
+                saveToMemory(memory, out_key, newXml)
             }
             break
         }
@@ -223,6 +199,17 @@ async function processCommand(command: { tool: string, input: Record<string, unk
             console.warn(command, "No implementation yet")
         }
     }
+}
+
+function saveToMemory(memory: Record<string, string | AnyTemplateItem[]>, key: string, value: string | AnyTemplateItem[]) {
+    memory[key] = value
+    const appState = useStore.getState()
+
+    if (!appState.tabs.some(t => t.name === key)) {
+        appState.addNewTab(key)
+    }
+
+    appState.updateTab(key, { content: value })
 }
 
 function getScoreInputOutputNames(input: Record<string, unknown>) {
@@ -354,7 +341,7 @@ const TEMPLATE_ITEM_SCHEMAS = [
             ...TEMPLATE_ITEM_LOCATION,
             instrument: {
                 type: "string",
-                enum: [ "other", "piano",  "harpsichord", "organ", "accordion", "guitar", "bass_guitar", "violin", "viola", "cello", "double_bass", "harp", "flute", "oboe", "clarinet", "bassoon", "saxophone", "trumpet", "horn", "trombone", "tuba", "percussion", "timpani", "celesta", "voice_soprano", "voice_mezzo", "voice_alto", "voice_tenor", "voice_baritone", "voice_bass", "voice", "choir" ],
+                enum: [ "other", "piano", "harpsichord", "organ", "accordion", "guitar", "bass_guitar", "violin", "viola", "cello", "double_bass", "harp", "flute", "oboe", "clarinet", "bassoon", "saxophone", "trumpet", "horn", "trombone", "tuba", "percussion", "timpani", "celesta", "voice_soprano", "voice_mezzo", "voice_alto", "voice_tenor", "voice_baritone", "voice_bass", "voice", "choir" ],
                 description: "The instrument to assign. Omit to leave this item blank."
             },
             voice_idx: { type: "integer", description: "The index of the voice this item belongs to." }
