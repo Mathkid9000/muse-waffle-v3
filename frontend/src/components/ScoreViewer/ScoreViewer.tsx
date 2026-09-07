@@ -695,7 +695,7 @@ export default function ScoreViewer() {
 
     console.log(e.target.value)
     const prompt = e.target.value
-    const outputXml = await promptTemplateAnthropic(prompt, useStore.getState().getXml('Main'))
+    const outputXml = await promptTemplateAnthropic(prompt, useStore.getState().getXml('Main'), useStore.getState().tabs)
     console.log(outputXml)
     if (outputXml) {
       setXml(outputXml as string, 'Main')

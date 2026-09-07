@@ -1,7 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { anthropic } from "./claudeTools";
 import type { ToolUseBlock } from "@anthropic-ai/sdk/resources";
-import type { AnyTemplateItem } from '../types';
+import type { AnyTemplateItem, Tab } from '../types';
 import { api } from './client';
 import { applyClaudeEdit } from './applyClaudeEdit';
 import { fillTemplate, scoreToTemplate } from './templates';
@@ -9,15 +9,22 @@ import { useStore } from '../store';
 
 const MAX_TURNS = 10;
 
-export async function promptTemplateAnthropic(prompt: string, xml: string | null) {
+export async function promptTemplateAnthropic(prompt: string, xml: string | null, tabs: Tab[]) {
     console.log('Prompted:', prompt, xml)
+    // propogate memory with tab data
+    const memory: Record<string, string | AnyTemplateItem[]> = {}
+    tabs.forEach(t => {
+        if (!t.template && !t.content) return
+        memory[t.name] = (t.template ?? t.content)! // TODO: add description  + info likje instruments, bar dur,  etc..
+    })
+    console.log(memory)
 
     // step 1: roadmap
     const roadmapResponse = await anthropic.messages.create({
         model: 'claude-haiku-4-5-20251001',
         max_tokens: 1024,
         tools: [ ROADMAP_TOOL ] as unknown as Anthropic.Messages.ToolUnion[],
-        system: PROMPT_INTRO,
+        system: PROMPT_INTRO + "\n\n" + getMemoryContext(memory),
         messages: [{ role: 'user', content: prompt }],
         tool_choice: { type: "tool", name: "roadmap_tool" }
     });
@@ -36,7 +43,8 @@ export async function promptTemplateAnthropic(prompt: string, xml: string | null
     console.log('GENERATED ROADMAP:\n', roadmap)
 
     const messages: Anthropic.Messages.MessageParam[] = [{ role: 'user', content: prompt }, { role: 'assistant', content: roadmap }];
-    const memory: Record<string, string | AnyTemplateItem[]> = {}
+
+
     let usageIn = roadmapResponse.usage.input_tokens;
     let usageOut = roadmapResponse.usage.output_tokens;
 
@@ -109,8 +117,8 @@ async function getCommandContext(command: string, memory: Record<string, string 
 }
 
 function getMemoryContext(memory: Record<string, string | AnyTemplateItem[]>) {
-    if (Object.keys(memory).length == 0) return "There are no scores or templates saved in memory." 
-    return "Current scores and templates saved in memory:\n" + 
+    if (Object.keys(memory).length == 0) return "There are currently no scores or templates saved in memory." 
+    return "Current scores and templates saved in memory that may be used:\n" + 
         Object.keys(memory).map(k => `${k} (${typeof memory[k] === "string" ? 'score' : 'template'})`).join(', ')
 }
 
@@ -245,7 +253,9 @@ function saveToMemory(memory: Record<string, string | AnyTemplateItem[]>, key: s
     }
     else { console.log(key) }
 
-    appState.updateTab(key, { content: value })
+    if (typeof value == 'string')
+        appState.updateTab(key, { content: value })
+    else appState.updateTab(key, { template: value })
 }
 
 function getScoreInputOutputNames(input: Record<string, unknown>) {
