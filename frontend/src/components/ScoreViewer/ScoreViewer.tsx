@@ -261,7 +261,7 @@ export default function ScoreViewer() {
       return
     }
 
-    const w = outerRef.current?.clientWidth ?? 1000
+    const w = outerRef.current?.clientWidth || 1000
     const { streamMode, selection: sel } = useStore.getState()
     const tk = getSharedToolkit()
 
@@ -691,6 +691,7 @@ export default function ScoreViewer() {
     console.log(outputXml)
     if (outputXml) {
       setXml(outputXml as string, 'Main')
+      useStore.getState().resetCamera()
     }
     // const response = await promptAnthropic(prompt, '', 
     //   (thought) => {console.log(thought)}, 

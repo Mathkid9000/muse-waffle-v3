@@ -201,7 +201,7 @@ export const useStore = create<AppState>()(persist((set, get) => ({
   setSelection: (s) => set({ selection: s }),
   setStreamProgress: (bar, total) => set({ streamBar: bar, totalBars: total }),
   setStreamMode: (mode) => set({ streamMode: mode }),
-  redrawScore: () => set((s) => ({ redrawNonce: s.redrawNonce + 1 })),
+  redrawScore: () => { set((s) => ({ redrawNonce: s.redrawNonce + 1 })) },
   resetScore: () =>
     set({
       currentXml: { 'Main': null },

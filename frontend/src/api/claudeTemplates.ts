@@ -76,41 +76,39 @@ export async function promptTemplateAnthropic(prompt: string, xml: string | null
             model: 'claude-haiku-4-5-20251001',
             max_tokens: 1024,
             tools: TOOL_INTROS as unknown as Anthropic.Messages.ToolUnion[],
-            // system: context ?? '',
+            system: getMemoryContext(memory),
             messages: messages,
             tool_choice: { type: "tool", name: "trigger_tool" }
         });
         usageIn += toolSelectionMessage.usage.input_tokens
         usageOut += toolSelectionMessage.usage.output_tokens
 
-        console.log("TOOL SELECTION:", toolSelectionMessage)
-        const selectedTool = (toolSelectionMessage.content.find(
+        const toolTriggerContent = (toolSelectionMessage.content.find(
             (i): i is ToolUseBlock => i.type === "tool_use" && i.name === "trigger_tool"
-        )?.input as any).tool;
-        if (!selectedTool) {
+        )?.input as any);
+        if (!toolTriggerContent.tool) {
             console.log('Found found tool. Terminating...')
             return []
         }
 
+        const selectedTool = toolTriggerContent.tool
+        const intention = toolTriggerContent.intention
+        const next_steps = toolTriggerContent.next_steps
+        if (selectedTool === 'complete') break;
         const toolMessage = await anthropic.messages.create({
             model: 'claude-haiku-4-5-20251001',
             max_tokens: 1024,
             tools: [ TOOLS[selectedTool as keyof typeof TOOLS] ] as unknown as Anthropic.Messages.ToolUnion[],
-            // system: context ?? '',
-            messages: messages,
+            system: getMemoryContext(memory),
+            messages: [{ role: 'user', content: `${prompt}\n\n${roadmap}\n\nDo this now: ${intention}` }],
             tool_choice: { type: "tool", name: selectedTool }
         });
         usageIn += toolMessage.usage.input_tokens
         usageOut += toolMessage.usage.output_tokens
 
         const toolUses = toolMessage.content.filter((b): b is ToolUseBlock => b.type === "tool_use");
-        console.log('Found Tool Uses:', toolUses, "in message:", toolMessage)
+        // console.log('Found Tool Uses:', toolUses, "in message:", toolMessage, getMemoryContext(memory))
 
-        messages.push({ role: 'assistant', content: toolMessage.content });
-
-        // every tool_use has to be answered by a tool_result in the very next message, or the next
-        // turn's request is rejected before it reaches the model. forEach would not have waited for
-        // the commands either, so the turn after would run against a memory nothing had reached yet
         const results: Anthropic.Messages.ToolResultBlockParam[] = []
         for (const tool of toolUses) {
             await processCommand({ tool: tool.name, input: tool.input as Record<string, unknown> }, memory, messages)
@@ -120,7 +118,9 @@ export async function promptTemplateAnthropic(prompt: string, xml: string | null
                 content: `${tool.name} done. Memory holds: ${Object.keys(memory).join(', ') || 'nothing yet'}`,
             })
         }
+        messages.push({ role: 'assistant', content: toolMessage.content });
         if (results.length) messages.push({ role: 'user', content: results });
+        messages.push({ role: 'assistant', content: next_steps });
     }
 
     console.log('PROMPTING COMPLETE', memory, usageIn, usageOut)
@@ -134,6 +134,12 @@ async function getCommandContext(command: string, memory: Record<string, string 
         }
         default: return null
     }
+}
+
+function getMemoryContext(memory: Record<string, string | AnyTemplateItem[]>) {
+    if (Object.keys(memory).length == 0) return "There are no scores or templates saved in memory." 
+    return "Current scores and templates saved in memory:\n" + 
+        Object.keys(memory).map(k => `${k} (${typeof memory[k] === "string" ? 'score' : 'template'})`).join(', ')
 }
 
 async function processCommand(command: { tool: string, input: Record<string, unknown> }, memory: Record<string, string | AnyTemplateItem[]>, messages: Anthropic.Messages.MessageParam[]) {
@@ -231,7 +237,7 @@ const PROMPT_INTRO = "Your job is to classify which edit types are required next
     + "You may use templates to achieve generation and repetitive tasks (e.g. an AABA song from scratch). A template is score abstraction where some elements are intentionally left blank to be filled in by a different model. "
     + "For example, if you are creating a song in AABA format, you might want to first generate 8 bars (the first A), then create a template by taking this score and stripping it of some of its qualities (e.g. chords, rhythm, some pitches). Then, you may command the template to be filled in and placed into the first 8 bars, then commanding it to fill in the template once more and place this in the second 8 bars (Note: when you fill in a template, you get a new object that is no longer considered a template as it is completely filled). "
     + "If nothing matches an edit type, return no tool. You also have the ability to store/retrieve templates and score segments to/from memory with a name identifier so that they can be reused (Note: operations do not happen in place automatically)."
-    + "Finally, the output, final score should be saved to the name 'OUPUT'. Reserve this only for when you want a score to be returned. It may also be a template if the user requests a template be returned."
+    + "Finally, the output, final score should be saved to the name 'OUTPUT'. Reserve this only for when you want a score to be returned. It may also be a template if the user requests a template be returned."
 
 const ROADMAP_TOOL = {
     name: "roadmap_tool",
@@ -256,9 +262,9 @@ const ROADMAP_TOOL = {
                                 + "\ngenerate_score: \"Uses a transformer model to generate a new score if no current score exists. Else, inserts into the given location. Do not include key, time_signature, or tempo when these attributes should remain the same.\""
                                 + "\ncreate_template_from_scratch: \"Create a template from scratch. Only to be used when the user has very specific intentions.\""
                                 + "\ncreate_template_from_score: \"Create a template from an existing score in memory. To be used in combination with generate_score when the user does not have specific intentions (e.g. melodic ideas, rhythmic ideas, chord progs, etc...)\""
-                                + "\nedit_template: \"Edit a template already stored in memory (e.g. to strip it down/mask some of its musical elements).\""
+                                + "\nedit_template: \"Edit a template already stored in memory (e.g. to strip it down/mask some of its musical elements). Use this to alter a template so that there is more variance when it is filled.\""
                                 + "\nfill_template: \"Fills a template's masked elements, essentially converting it from a template to a score and storing it to a new name on memory.\""
-                                + "\nwrite_score: \"Write a score onto another score. Essentially a copy and paste.\""
+                                + "\nwrite_score: \"Write a score onto another score. Essentially a copy and paste. Accepts multiple writes to perfrom at once to save tokens.\""
                         },
                         intention: {
                             type: "string",
@@ -289,10 +295,19 @@ const TOOL_INTROS = [
                         "generate_score",
                         "create_template_from_scratch", "create_template_from_score", "edit_template",
                         "fill_template",
-                        "write_score"
+                        "write_score",
+                        "complete"
                     ],
-                    description: "The tool to execute, as provided by the current roadmap step."
-                }
+                    description: "The tool to execute, as provided by the current roadmap step. Use complete when the user's prompt has been completed and written to memory as 'OUTPUT'"
+                },
+                intention: {
+                    type: "string",
+                    description: "A brief description of what this step should do on a per step basis with any needed implementation details including the names of what will be read and stored to memory (e.g. generate a score with 16 measures and save to '16_bar_score')"
+                },
+                next_steps: {
+                    type: "string",
+                    description: "A brief outline of what is complete and what you should do after this step using the roadmap at the beginning and the steps that have been completed so far."
+                },
             },
             required: [ "tool" ]
         }
@@ -756,7 +771,7 @@ const TOOLS = {
     },
     "write_score": {
         name: "write_score",
-        description: "Write a score onto another score. Essentially a copy and paste",
+        description: "Write a score onto another score. Essentially a copy and paste. This action can perform multiple writes at once, saving tokens. Recall that you must write to 'OUTPUT' for the score to show.",
         input_schema: {
             type: "object",
             properties: {
