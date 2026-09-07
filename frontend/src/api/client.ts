@@ -118,6 +118,10 @@ export interface FillTemplateRequest {
   device?: string
 }
 
+export interface TemplateToXmlRequest {
+  template: AnyTemplateItem[]
+}
+
 // Other
 export interface StreamEvent {
   xml?: string
@@ -214,5 +218,7 @@ export const api = {
   scoreToTemplate: (req: ScoreToTemplateRequest) =>
     post<{ template: AnyTemplateItem[] }>('/templates/score-to-template', req),
   fillTemplate: (req: FillTemplateRequest) =>
-    post<{ xml: string }>('/templates/fill-template', req)
+    post<{ xml: string }>('/templates/fill-template', req),
+  templateToXml: (req: TemplateToXmlRequest) =>
+    post<{ xml: string }>('/templates/template-to-xml', req)
 }

@@ -85,8 +85,9 @@ export type AnyTemplateItem =
 export interface Tab {
   name: string;
   description: string;
-  content: string | AnyTemplateItem[] | null;
+  content: string | null;
+  template: AnyTemplateItem[] | null;
 }
 
 export const tabXml = (t?: Tab | null) => (typeof t?.content === "string" ? t.content : null);
-export const tabTemplate = (t?: Tab | null) => (Array.isArray(t?.content) ? t.content : null);
+export const tabTemplate = (t?: Tab | null) => (Array.isArray(t?.template) ? t.template : null);

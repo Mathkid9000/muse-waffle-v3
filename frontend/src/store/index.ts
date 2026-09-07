@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { createJSONStorage, persist, type StateStorage } from 'zustand/middleware'
-import { tabXml, type Tab } from '../types'
+import { tabTemplate, tabXml, type AnyTemplateItem, type Tab } from '../types'
 
 export interface MeasureSelection {
   start: number
@@ -19,6 +19,7 @@ interface AppState {
   activeTab: string
   getTab: (name?: string) => Tab | undefined
   getXml: (key: string) => string | null
+  getTemplate: (key: string) => AnyTemplateItem[] | null
   /** Row id of the saved score being edited; null until the first save. */
   scoreId: string | null
   scoreData: ScoreAppData | null
@@ -49,7 +50,8 @@ interface AppState {
   /** Renames a tab, de-duplicating; returns the name it actually got. */
   renameTab: (tab: string, newName: string) => string
 
-  setXml: (xml: string, key?: string) => void
+  setXml: (xml: string | null, key?: string) => void
+  setTemplate: (xml: AnyTemplateItem[], key?: string) => void
   setScoreId: (id: string | null) => void
   setScoreData: (data: ScoreAppData | null) => void
   setLoading: (v: boolean) => void
@@ -76,7 +78,7 @@ const clampZoom = (v: number) => Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, v))
 const PERSIST_KEY = 'muse-waffle:editor'
 const WRITE_DELAY_MS = 400
 
-const mainTab = (): Tab[] => [{ name: 'Main', description: '', content: null }]
+const mainTab = (): Tab[] => [{ name: 'Main', description: '', content: null, template: null }]
 
 /** `name`, or `name (n)` with the lowest n that no tab in `taken` already uses. */
 function uniqueName(name: string, taken: string[]): string {
@@ -160,9 +162,19 @@ export const useStore = create<AppState>()(persist((set, get) => ({
 
   getTab: (name) => get().tabs.find((t) => t.name === (name ?? get().activeTab)),
   getXml: (key) => tabXml(get().getTab(key)),
+  getTemplate: (key) => { 
+    // check to see if template is still on content just in case
+    const state = get()
+    const tab = state.getTab(key)
+    if (tab?.content && Array.isArray(tab?.content)) {
+      state.setTemplate(tab.content, key)
+      state.setXml('', key)
+    }
+    return tabTemplate(tab)
+  },
   addNewTab: (tab, init) => {
     const name = uniqueName(tab, get().tabs.map((t) => t.name))
-    set((s) => ({ tabs: [...s.tabs, { name, description: '', content: null, ...init }] }))
+    set((s) => ({ tabs: [...s.tabs, { name, description: '', content: null, template: null, ...init }] }))
     return name
   },
   deleteTab: (tab) => set((s) => ({ tabs: s.tabs.filter((t) => t.name !== tab) })),
@@ -183,7 +195,15 @@ export const useStore = create<AppState>()(persist((set, get) => ({
       const name = key ?? s.activeTab
       const tabs = s.tabs.some((t) => t.name === name)
         ? s.tabs.map((t) => (t.name === name ? { ...t, content: xml } : t))
-        : [...s.tabs, { name, description: '', content: xml }]
+        : [...s.tabs, { name, description: '', content: xml, template: null }]
+      return { tabs, error: null }
+    }),
+  setTemplate: (template, key) =>
+    set((s) => {
+      const name = key ?? s.activeTab
+      const tabs = s.tabs.some((t) => t.name === name)
+        ? s.tabs.map((t) => (t.name === name ? { ...t, template: template } : t))
+        : [...s.tabs, { name, description: '', template: template, content: null }]
       return { tabs, error: null }
     }),
   setScoreId: (id) => set({ scoreId: id }),
@@ -208,7 +228,13 @@ export const useStore = create<AppState>()(persist((set, get) => ({
   setSelection: (s) => set({ selection: s }),
   setStreamProgress: (bar, total) => set({ streamBar: bar, totalBars: total }),
   setStreamMode: (mode) => set({ streamMode: mode }),
-  redrawScore: () => { get().resetCamera(); set((s) => ({ redrawNonce: s.redrawNonce + 1 })) },
+  redrawScore: () => { 
+    const state = get()
+    if (state.getTemplate(state.activeTab) && state.getXml(state.activeTab))
+      state.setXml(null, state.activeTab)
+    state.resetCamera(); 
+    set((s) => ({ redrawNonce: s.redrawNonce + 1 })) 
+  },
   resetScore: () =>
     set({
       tabs: mainTab(),

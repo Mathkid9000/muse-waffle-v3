@@ -9,6 +9,7 @@ import { promptAnthropic } from '../../api/claudeTools'
 import { applyClaudeEdit } from '../../api/applyClaudeEdit'
 import { promptTemplateAnthropic } from '../../api/claudeTemplates'
 import { tabTemplate, tabXml } from '../../types'
+import { templateToXml } from '../../api/templates'
 
 const MEASURE_SEL = 'g.measure'
 const STAFF_SEL = 'g.staff'
@@ -141,11 +142,10 @@ function pageOfMeasure(meta: PageMeta, m: number): number {
 export default function ScoreViewer() {
   const { ready, renderXml } = useVerovio()
   const setXml = useStore((s) => s.setXml)
-  // The open tab is what this view renders: string content is engraved as a score,
-  // array content is listed as a template, null shows the empty state.
+  const state = useStore.getState()
   const tab = useStore((s) => s.tabs.find((t) => t.name === s.activeTab))
-  const xml = tabXml(tab)
-  const template = tabTemplate(tab)
+  const xml = state.getXml(state.activeTab)
+  const template = state.getTemplate(state.activeTab)
   const scoreData = useStore((s) => s.scoreData)
   const zoom = useStore((s) => s.zoom)
   const panX = useStore((s) => s.panX)
@@ -258,6 +258,10 @@ export default function ScoreViewer() {
   }, [pageMeta, panX, panY, zoom, viewportW, viewportH])
 
   useEffect(() => {
+    if (!xml && template) {
+      buildXmlFromTemplate()
+    }
+
     if (!ready || !xml) {
       cachedPagesRef.current = []
       metaCacheRef.current.clear()
@@ -303,7 +307,7 @@ export default function ScoreViewer() {
     cachedPagesRef.current = updated
     setPages([...updated])
     // the page height comes from the score itself now, so nothing outside these has to be watched
-  }, [ready, xml, streamMode, redrawNonce])
+  }, [ready, xml, template, streamMode, redrawNonce])
 
   // Inject selection highlight rects directly into the SVG DOM.
   // One band per selected staff, drawn from the staff's own staff lines (see staffLinesBox)
@@ -708,7 +712,13 @@ export default function ScoreViewer() {
     // }
   }
 
-  // console.log(template)
+  async function buildXmlFromTemplate() {
+    const tabName = tab?.name
+    if (!template || !tabName) return;
+    const xml = await templateToXml(template)
+    setXml(xml, tabName)
+    console.log(xml)
+  }
 
   return (
     <div
@@ -719,7 +729,7 @@ export default function ScoreViewer() {
       onMouseUp={onMouseUp}
       onContextMenu={(e) => { if (e.ctrlKey || e.metaKey) e.preventDefault() }}
     >
-      {template ? (
+      {template && !xml ? (
         <div className={styles.emptyState} ref={innerRef} style={{ transform: `translate(${panX}px, ${panY}px) scale(${zoom / 100})` }}>
           <div className={`${styles.paper} ${styles.templatePaper}`}>
             <h2 className={styles.templateName}>{tab!.name}</h2>
