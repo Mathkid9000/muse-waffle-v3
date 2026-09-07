@@ -62,7 +62,7 @@ interface AppState {
   resetScore: () => void
 }
 
-const ZOOM_MIN = 25
+const ZOOM_MIN = 5
 const ZOOM_MAX = 300
 const clampZoom = (v: number) => Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, v))
 
