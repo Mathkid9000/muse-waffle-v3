@@ -671,7 +671,7 @@ const TOOLS = {
                         },
                         required: [ "staff_num" ]
                     },
-                    description: "List the staffs to be generated. Provide an empty array if no staffs exist and the user hasn't given a list of staffs or instruments"
+                    description: "List the staffs to be generated. Provide an empty array if no staffs exist and the user hasn't given a list of staffs or instruments. If an instrument uses multiple staffs (like piano or organ which typically have treble and bass staffs), add that instrument multiple times."
                 },
                 generation_length: {
                     type: "integer",
