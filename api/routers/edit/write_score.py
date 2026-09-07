@@ -14,7 +14,6 @@ router = APIRouter()
 
 def _run_edit(body: EditWriteScoreRequest) -> str:
     import music21 as m21
-    import music21.musicxml as musicxml
 
     source = m21.converter.parseData(body.source_xml, format="musicxml")
     if not source.parts:
@@ -55,8 +54,8 @@ def _run_edit(body: EditWriteScoreRequest) -> str:
             part.insert(offset, m21.stream.Measure(number=num))
             offset += part.getElementsByClass(m21.stream.Measure)[-1].barDuration.quarterLength
 
-    exporter = musicxml.m21ToXml.GeneralObjectExporter(target)
-    return exporter.parse().decode("utf-8")
+    from notation import finish_edited
+    return finish_edited(target)
 
 
 @router.post("/edit/write-score", response_model=XmlResponse)

@@ -5,9 +5,11 @@ from dotenv import load_dotenv
 import numpy as np
 from tqdm import tqdm
 from helpers import STORAGE_DIR, DATA_DIR, DATASET_PATH, VOCAB_LIST_PATH, VOCAB_LIST_PLOT_PATH, TOKEN_CACHE_DIR
+import notation
 
 # params
 SUBDIVISIONS_PER_QUARTER = 24
+assert notation.SUBDIVISIONS_PER_QUARTER == SUBDIVISIONS_PER_QUARTER, 'notation.py and the tokenizer disagree on the grid'
 CHORD_QUALITIES = ('', 'm', 'm7', '7', 'o7', 'ø7', 'dim', '7sus', 'sus2', 'sus', '7+', '+', 'maj7')
 CHORD_SLOTS = { 0: 0, 2: 1, 3: 1, 4: 1, 5: 1, 6: 2, 7: 2, 8: 2, 10: 3, 11: 3 } # semitones above root -> root/third/fifth/seventh
 TRANSPOSE_INTERVALS = range(-5, 7)
@@ -653,7 +655,11 @@ def label_text(labels):
 
 
 def tokens_to_score(tokens, labels=None):
-    """Render rows as MusicXML to STORAGE_DIR/output.mxl.
+    """Render rows as MusicXML, returned as a string and also written to STORAGE_DIR/output.musicxml.
+
+    The rows only say what sounds and when; everything conventional about how that is written --
+    voices, rests, ties, spelling, accidentals, beams -- is decided by ml/notation.py, so a score
+    renders the same however its rows arrived.
 
     ``labels`` is an optional per-row text label, index-aligned with ``tokens`` — infill.py's
     generation order, say. A row that became a note carries its label as a lyric; every other
@@ -667,82 +673,29 @@ def tokens_to_score(tokens, labels=None):
             except:
                 output.append(t.split('_')[-1])
         return output[0], output[1], output[2], output[3], output[4]
-    def find_overlapping(voice, note_m, note_pos, note_dur):
-        # returns the next available sub_voice
-        overlapping_subvoices = []
-
-        original_start = note_pos
-        print(note_pos, type(note_pos), note_dur, type(note_dur))
-        original_end = note_pos + note_dur
-        for subvoice in notes[voice].keys():
-            for m, pos, dur in notes[voice][subvoice].keys():
-                if m != note_m: continue
-                start = pos
-                end = pos + dur
-                if max(start, original_start) < min(end, original_end):
-                    overlapping_subvoices.append(subvoice)
-        if len(overlapping_subvoices) == 0: return None
-        if set(sorted(overlapping_subvoices)) == set(range(max(overlapping_subvoices) + 1)): return max(overlapping_subvoices) + 1
-        for i in range(max(overlapping_subvoices) + 1):
-            if i not in overlapping_subvoices:
-                return i
-    def spell_pitch(midi, sharps):
-        pitch = music21.pitch.Pitch(midi=midi)
-        if sharps is None or pitch.accidental is None:
-            return pitch
-        prefers_sharps = sharps >= 0
-        is_sharp = pitch.accidental.alter > 0
-        if prefers_sharps != is_sharp:
-            return pitch.getEnharmonic()
-        return pitch
 
     tokens = resolve_bars(tokens)
     # index-aligned with tokens, so a caller that passes none is simply labelling nothing
     labels = list(labels) if labels is not None else [None] * len(tokens)
-    score = music21.stream.Score()
     parts = []
     general_score_elements: dict[int, list[music21.base.Music21Object]] = {} # measure num -> objects
     voice_score_elements: dict[tuple[int, int], list[music21.base.Music21Object]] = {} # (voice,measure) -> objects
-    notes: dict[int, dict[int, dict[tuple[int, int, int], list[int]]]] = {} # notes[voice][sub_voice][(measure,pos,dur)] = pitches
-    # kept beside `notes` rather than folded into it: several rows collapse into one chord there,
-    # and every consumer of notes[...] indexes it as a plain list of pitches
-    note_labels: dict[tuple[int, int, int, int, int], list] = {} # (voice,sub_voice,measure,pos,dur) -> labels
-    measure_key_sharps: dict[int, int] = {} # measure num -> sharps in effect at that measure
+    events: dict[int, dict[int, list[notation.Event]]] = {} # events[voice][measure] = raw note events
+    measure_key_sharps: dict[int, int] = {} # measure num -> sharps of the key signature placed there
+    measure_meters: dict[int, tuple[int, int]] = {} # measure num -> (num, den) of the time signature placed there
+    chords = notation.ChordContext() # the chord symbol in effect anywhere, for spelling
 
-    for tok, label in zip(tokens, labels):
+    for uid, (tok, label) in enumerate(zip(tokens, labels)):
         # add instruments
         if tok[0].startswith('INSTR'):
             part = music21.stream.Part()
             part.insert(0, music21.instrument.fromString(tok[0].split('_')[-1]))
             parts.append(part)
-        # add notes
+        # add notes: kept as raw events; notation.layout_staff lays each bar out once all are in
         if tok[3].startswith('PITCH'):
             m, pos, dur, pitch, voz = parse_tok(tok)
-            if voz not in notes:
-                notes[voz] = {}
-
-            # case 1: there is already a note in that exact pos with exact dur
-            found = False
-            for subvoice in notes[voz].keys():
-                if (m, pos, dur) in notes[voz][subvoice]:
-                    notes[voz][subvoice][(m,pos,dur)].append(pitch)
-                    note_labels.setdefault((voz, subvoice, m, pos, dur), []).append(label)
-                    found = True
-                    break
-            if found: continue
-            # case 2: theres an overlapping note
-            overlapping = find_overlapping(voz, m, pos, dur)
-            if overlapping != None:
-                if overlapping not in notes[voz]:
-                    notes[voz][overlapping] = {}
-                notes[voz][overlapping][(m, pos, dur)] = [ pitch ]
-                note_labels.setdefault((voz, overlapping, m, pos, dur), []).append(label)
-                continue
-            # case 3: there are no overlapping notes
-            if 0 not in notes[voz]:
-                notes[voz][0] = {}
-            notes[voz][0][(m, pos, dur)] = [ pitch ]
-            note_labels.setdefault((voz, 0, m, pos, dur), []).append(label)
+            events.setdefault(voz, {}).setdefault(m, []).append(
+                notation.Event(pos, dur, [notation.NoteIn(pitch, label)], uid=uid))
         # add key
         if tok[2].startswith('KEY'):
             m, pos, tonic, _, _ = parse_tok(tok)
@@ -755,53 +708,41 @@ def tokens_to_score(tokens, labels=None):
                 if abs(key.sharps) < abs(smallest[1]):
                     smallest = (spelling, key.sharps)
 
-            pitch = music21.analysis.enharmonics.EnharmonicSimplifier([pitch], ruleClass=music21.analysis.enharmonics.ChordEnharmonicScoreRules).bestPitches()[0]
             key_sig = music21.key.KeySignature(smallest[1])
             key_sig.offset = pos / SUBDIVISIONS_PER_QUARTER
-            if m not in general_score_elements:
-                general_score_elements[m] = []
-            general_score_elements[m].append(key_sig)
+            general_score_elements.setdefault(m, []).append(key_sig)
             measure_key_sharps[m] = smallest[1]
         # add time sig
         if tok[2].startswith('NUM'):
             m, pos, num, den, _ = parse_tok(tok)
             ts = music21.meter.TimeSignature(f'{num}/{den}')
             ts.offset = pos / SUBDIVISIONS_PER_QUARTER
-            if m not in general_score_elements:
-                general_score_elements[m] = []
-            general_score_elements[m].append(ts)
+            general_score_elements.setdefault(m, []).append(ts)
+            measure_meters[m] = (int(num), int(den))
         # add tempo
         if tok[2].startswith('TEMPO'):
             m, pos, bucket, _, _ = parse_tok(tok)
             mm = music21.tempo.MetronomeMark(number=bucket * 16)
             mm.offset = pos / SUBDIVISIONS_PER_QUARTER
-            if m not in general_score_elements:
-                general_score_elements[m] = []
-            general_score_elements[m].append(mm)
+            general_score_elements.setdefault(m, []).append(mm)
         # add dynamic
         if tok[2].startswith('DYN'):
             m, pos, dyn, _, voz = parse_tok(tok)
             d = music21.dynamics.Dynamic(dyn)
             d.offset = pos / SUBDIVISIONS_PER_QUARTER
-            if (voz, m) not in voice_score_elements:
-                voice_score_elements[(voz, m)] = []
-            voice_score_elements[(voz, m)].append(d)
+            voice_score_elements.setdefault((voz, m), []).append(d)
         # add clef
         if tok[2].startswith('CLEF'):
             m, pos, clef_name, _, voz = parse_tok(tok)
             clef = music21.clef.clefFromString(clef_name)
             clef.offset = pos / SUBDIVISIONS_PER_QUARTER
-            if (voz, m) not in voice_score_elements:
-                voice_score_elements[(voz, m)] = []
-            voice_score_elements[(voz, m)].append(clef)
+            voice_score_elements.setdefault((voz, m), []).append(clef)
         # add bar line
         if tok[2].startswith('BAR'):
             m, pos, bar_type, _, _ = parse_tok(tok)
             barline = music21.bar.Repeat(direction=bar_type.split('-')[-1]) if bar_type.startswith('repeat-') else music21.bar.Barline(bar_type)
             barline.offset = pos / SUBDIVISIONS_PER_QUARTER
-            if m not in general_score_elements:
-                general_score_elements[m] = []
-            general_score_elements[m].append(barline)
+            general_score_elements.setdefault(m, []).append(barline)
         # add chord
         if tok[2].startswith('DEG'):
             m, pos, _, root, quality = parse_tok(tok)
@@ -814,9 +755,8 @@ def tokens_to_score(tokens, labels=None):
             if quality == '7sus': cs.chordKind = 'other'
             cs.chordKindStr = str(quality)
             cs.offset = pos / SUBDIVISIONS_PER_QUARTER
-            if (0, m) not in voice_score_elements:
-                voice_score_elements[(0, m)] = []
-            voice_score_elements[(0, m)].append(cs)
+            voice_score_elements.setdefault((0, m), []).append(cs)
+            chords.add(m, pos, cs)
         # label everything that isn't a note. Structural rows (SOG/SOS/EOS/INSTR) sit outside
         # musical time and have nowhere to hang a mark; the rest go on the staff they name, or
         # on staff 0 for the rows the whole score shares. Marks go in voice_score_elements even
@@ -828,114 +768,55 @@ def tokens_to_score(tokens, labels=None):
             mark = order_mark(label, pos / SUBDIVISIONS_PER_QUARTER)
             voice_score_elements.setdefault((voz, m), []).append(mark)
 
-    # carry each key signature forward until the next one changes it
-    if measure_key_sharps:
-        note_measure_nums = [
-            m for voz in notes for subvoice in notes[voz] for (m, _, _) in notes[voz][subvoice].keys()
-        ]
-        last_measure = max(note_measure_nums + list(measure_key_sharps.keys()))
-        current_sharps = 0
-        filled_key_sharps = {}
-        for m in range(last_measure + 1):
-            if m in measure_key_sharps:
-                current_sharps = measure_key_sharps[m]
-            filled_key_sharps[m] = current_sharps
-        measure_key_sharps = filled_key_sharps
+    # the bars the score spans, and the key and meter in effect at each of them: a signature holds
+    # until the next one changes it, and a score that never states a meter is written in 4/4 (the
+    # bar length has to come from somewhere, and beaming needs a time signature to read)
+    measure_nums = [ m for voz in events for m in events[voz] ] + list(general_score_elements) + [ m for _, m in voice_score_elements ]
+    first, last = (min(measure_nums), max(measure_nums)) if measure_nums else (0, 0)
+    if not measure_meters:
+        ts = music21.meter.TimeSignature('4/4')
+        general_score_elements.setdefault(first, []).insert(0, ts)
+        measure_meters[first] = (4, 4)
+    sharps_by_measure: dict[int, int | None] = {}
+    meters_by_measure: dict[int, tuple[int, int]] = {}
+    current_sharps, current_meter = None, (4, 4)
+    for m in range(first, last + 2):
+        if m in measure_key_sharps: current_sharps = measure_key_sharps[m]
+        if m in measure_meters: current_meter = measure_meters[m]
+        sharps_by_measure[m] = current_sharps
+        meters_by_measure[m] = current_meter
+    # a note held past the final barline is tied into one more bar rather than cut off short
+    if any(ev.pos + ev.dur > notation.bar_length(*meters_by_measure[last])
+           for voz in events for ev in events[voz].get(last, [])):
+        last += 1
 
-    # concatenate all notes into measures
-    measures: dict[tuple[int, int], music21.stream.Measure] = {} # (voice, measure) = measure
+    # concatenate everything into measures and parts
     for voz_idx, part in enumerate(parts):
-        if voz_idx not in notes: continue
-        if len(notes[voz_idx].keys()) == 1:
-            for m, pos, dur in notes[voz_idx][0]:
-                pitches = notes[voz_idx][0][(m, pos, dur)]
-                sharps = measure_key_sharps.get(m)
-                if len(pitches) == 1:
-                    generalNote = music21.note.Note(spell_pitch(pitches[0], sharps))
+        staff_voices = notation.layout_staff(events.get(voz_idx, {}), meters_by_measure, first, last)
+        for m in range(first, last + 1):
+            measure = music21.stream.Measure(number=m)
+            for element in general_score_elements.get(m, []):
+                if isinstance(element, music21.bar.Barline):
+                    if element.offset == 0:
+                        measure.leftBarline = element
+                    else:
+                        measure.rightBarline = element
                 else:
-                    generalNote = music21.chord.Chord([ spell_pitch(i, sharps) for i in pitches ])
-                generalNote.duration = music21.duration.Duration(dur / SUBDIVISIONS_PER_QUARTER)
-                generalNote.offset = pos / SUBDIVISIONS_PER_QUARTER
-                # assigned only when there is something to say: setting .lyric to '' hangs an
-                # empty lyric off the note, which reserves the staff space and prints nothing
-                lyric = label_text(note_labels.get((voz_idx, 0, m, pos, dur), []))
-                if lyric: generalNote.lyric = lyric
-
-                if (voz_idx, m) not in measures:
-                    measures[(voz_idx, m)] = music21.stream.Measure(number=m)
-                measures[(voz_idx, m)].insert(generalNote.offset, generalNote)
-        else:
-            subvoices: dict[int, dict[int, music21.stream.Voice]] = {}
-            for subvoice_idx in notes[voz_idx].keys():
-                for m, pos, dur in notes[voz_idx][subvoice_idx]:
-                    pitches = notes[voz_idx][subvoice_idx][(m, pos, dur)]
-                    sharps = measure_key_sharps.get(m)
-                    if len(pitches) == 1:
-                        generalNote = music21.note.Note(spell_pitch(pitches[0], sharps))
-                    else:
-                        generalNote = music21.chord.Chord([ spell_pitch(i, sharps) for i in pitches ])
-                    generalNote.duration = music21.duration.Duration(dur / SUBDIVISIONS_PER_QUARTER)
-                    generalNote.offset = pos / SUBDIVISIONS_PER_QUARTER
-                    lyric = label_text(note_labels.get((voz_idx, subvoice_idx, m, pos, dur), []))
-                    if lyric: generalNote.lyric = lyric
-                    if m not in subvoices:
-                        subvoices[m] = { }
-                    if subvoice_idx not in subvoices[m]:
-                        subvoice = music21.stream.Voice()
-                        subvoices[m][subvoice_idx] = subvoice
-                    subvoices[m][subvoice_idx].insert(generalNote.offset, generalNote)
-            for m in subvoices.keys():
-                if (voz_idx, m) not in measures:
-                    measures[(voz_idx, m)] = music21.stream.Measure(number=m)
-                for subvoice_idx in subvoices[m].keys():
-                    measures[(voz_idx, m)].insert(0, subvoices[m][subvoice_idx])
-
-    # concatenate measures into parts
-    min_measure = min([ m for _, m in measures.keys() ])
-    for voz_idx in range(len(parts)):
-        for m in range(min_measure, max([ k[1] for k in list(measures.keys()) ]) + 1):
-            if (voz_idx, m) in measures:
-                measure = measures[(voz_idx, m)]
-            else:
-                measure = music21.stream.Measure(number=m)
-
-            if m in general_score_elements:
-                for element in general_score_elements[m]:
-                    if isinstance(element, music21.bar.Barline):
-                        if element.offset == 0:
-                            measure.leftBarline = element
-                        else:
-                            measure.rightBarline = element
-                    else:
-                        measure.insert(element)
-            if (voz_idx, m) in voice_score_elements:
-                for element in voice_score_elements[(voz_idx, m)]:
                     measure.insert(element)
+            for element in voice_score_elements.get((voz_idx, m), []):
+                measure.insert(element)
+            num, den = meters_by_measure[m]
+            notation.fill_measure(measure, staff_voices.get(m, []), num, den, m,
+                                  sharps_by_measure[m], chords, label_text)
+            part.append(measure)
 
-            # formatting
-            sharps = measure_key_sharps.get(m)
-            key_context = music21.key.KeySignature(sharps) if sharps is not None else True
-            measure.makeAccidentals(inPlace=True, overrideStatus=True, useKeySignature=key_context)
-            if measure.voices:
-                for voice in measure.voices:
-                    voice.makeRests(inPlace=True)
-            elif measure.notesAndRests:
-                measure.makeRests(inPlace=True)
-            else:
-                measure.makeRests(inPlace=True, timeRangeFromBarDuration=True)
-            parts[voz_idx].append(measure)
-
-    # concatenate parts into score
+    score = music21.stream.Score()
     for part in parts:
-        # formatting
-        part.makeBeams(inPlace=True)
-        score.insert(part)
+        score.insert(0, part)
 
-    # makeNotation=False: the default export path re-fills every measure/voice up
-    # to a guessed bar duration (fillGaps+timeRangeFromBarDuration), which pads
-    # incomplete measures back up instead of keeping their real, shorter length.
-    score.write("musicxml", STORAGE_DIR / "output.mxl", makeNotation=True)
-
+    xml = notation.finish(score)
+    (STORAGE_DIR / 'output.musicxml').write_text(xml, encoding='utf-8')
+    return xml
 
 # the infill model's specials, appended after the corpus tokens and never inserted, so every
 # token already in a head keeps its id and a grown vocab still decodes an existing data.npz.

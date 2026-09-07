@@ -13,7 +13,6 @@ router = APIRouter()
 
 def _run_edit(body: EditTimeSigRequest) -> str:
     import music21 as m21
-    import music21.musicxml as musicxml
     from api.routers.infill import _ordinal_to_measure_numbers
     from ml.api import TIME_SIGS
 
@@ -34,8 +33,8 @@ def _run_edit(body: EditTimeSigRequest) -> str:
     if not found:
         raise RuntimeError(f"Time signature edit failed: no measure {body.measure_num}")
 
-    exporter = musicxml.m21ToXml.GeneralObjectExporter(orig_score)
-    return exporter.parse().decode("utf-8")
+    from notation import finish_edited
+    return finish_edited(orig_score)
 
 
 @router.post("/edit/time_sig", response_model=XmlResponse)

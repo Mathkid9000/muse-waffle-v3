@@ -45,7 +45,7 @@ function applyOptions(tk: VerovioToolkit, pageWidth: number, scale: number, inst
     scale,
     footer: 'none',
     header: 'none',
-    spacingLinear: 0.2,
+    spacingLinear: 0.25,
   })
 }
 

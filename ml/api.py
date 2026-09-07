@@ -12,7 +12,7 @@ keeps working across a retokenize or a retrain without knowing either happened.
 """
 
 from __future__ import annotations
-import logging, threading, zipfile
+import logging, threading
 import music21
 from generate import generate_score
 from helpers import STORAGE_DIR
@@ -81,6 +81,9 @@ def _last_bar(rows):
 def _score_rows(xml_str):
     """An existing score as quintuple rows, EOS dropped so the model reads it as unfinished."""
     score = music21.converter.parseData(xml_str, format='musicxml')
+    # the engraver writes a note that crosses a beat or a barline as tied pieces; read back as one
+    # event, so the next render sees the note that was played, not the pieces it was written as
+    score.stripTies(inPlace=True)
     return [ row for row in tokenize_score_as_text(score) if row[0] != 'EOS' ]
 
 
@@ -138,15 +141,11 @@ def _to_xml(rows):
         trimmed.append(row)
     rows = trimmed
 
-    # tokens_to_score writes the score out itself, so the lock keeps two streams from overwriting
-    # each other's file in between the write and the read
+    # tokens_to_score also writes the score out as a debugging aid, so the lock keeps two streams
+    # from interleaving their writes to that file
     with _render_lock:
         try:
-            tokens_to_score(rows)
-            # .mxl is a zip holding the score alongside the container that points at it
-            with zipfile.ZipFile(STORAGE_DIR / 'output.mxl') as archive:
-                score = [ n for n in archive.namelist() if not n.startswith('META-INF') ]
-                return archive.read(score[0]).decode('utf-8')
+            return tokens_to_score(rows)
         except Exception:
             # a snapshot the decoder chokes on costs one frame of the stream rather than the whole
             # run, but it is never nothing: say what broke and leave the rows behind to look at

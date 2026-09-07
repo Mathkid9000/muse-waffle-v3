@@ -37,7 +37,6 @@ def _make_clef(idx: int):
 
 def _run_edit(body: EditInstrRequest) -> str:
     import music21 as m21
-    import music21.musicxml as musicxml
 
     orig_score = m21.converter.parseData(body.xml, format="musicxml")
     if not orig_score.parts:
@@ -68,8 +67,8 @@ def _run_edit(body: EditInstrRequest) -> str:
 
     orig_score.append(new_part)
 
-    exporter = musicxml.m21ToXml.GeneralObjectExporter(orig_score)
-    return exporter.parse().decode("utf-8")
+    from notation import finish_edited
+    return finish_edited(orig_score)
 
 
 @router.post("/edit/instr", response_model=XmlResponse)

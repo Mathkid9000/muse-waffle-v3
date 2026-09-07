@@ -15,7 +15,6 @@ router = APIRouter()
 def _run_edit(body: EditClefRequest) -> str:
     import music21 as m21
     import music21.clef as clef
-    import music21.musicxml as musicxml
     from api.routers.infill import _ordinal_to_measure_numbers
 
     logs: list[str] = []
@@ -44,10 +43,8 @@ def _run_edit(body: EditClefRequest) -> str:
         case 6: 
             measure.clef = clef.Bass8vbClef()
 
-    exporter = musicxml.m21ToXml.GeneralObjectExporter(orig_score)
-    raw_bytes = exporter.parse()
-    raw_string = raw_bytes.decode('utf-8')
-    return raw_string
+    from notation import finish_edited
+    return finish_edited(orig_score)
 
 
 @router.post("/edit/clef", response_model=XmlResponse)

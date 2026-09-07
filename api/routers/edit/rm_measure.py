@@ -13,7 +13,6 @@ router = APIRouter()
 
 def _run_edit(body: EditRmMeasureRequest) -> str:
     import music21 as m21
-    import music21.musicxml as musicxml
     from api.routers.infill import _ordinal_to_measure_numbers
 
     orig_score = m21.converter.parseData(body.xml, format="musicxml")
@@ -47,8 +46,8 @@ def _run_edit(body: EditRmMeasureRequest) -> str:
             f"Remove measures failed: no measures in range {body.measure_start_num}-{body.measure_end_num}"
         )
 
-    exporter = musicxml.m21ToXml.GeneralObjectExporter(orig_score)
-    return exporter.parse().decode("utf-8")
+    from notation import finish_edited
+    return finish_edited(orig_score)
 
 
 @router.post("/edit/rm-measure", response_model=XmlResponse)

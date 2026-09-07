@@ -13,7 +13,6 @@ router = APIRouter()
 
 def _run_edit(body: EditKeySigRequest) -> str:
     import music21 as m21
-    import music21.musicxml as musicxml
     from api.keys import normalize_tonic
     from api.routers.infill import _ordinal_to_measure_numbers
 
@@ -40,8 +39,8 @@ def _run_edit(body: EditKeySigRequest) -> str:
     if not found:
         raise RuntimeError(f"Key signature edit failed: no measure {body.measure_num}")
 
-    exporter = musicxml.m21ToXml.GeneralObjectExporter(orig_score)
-    return exporter.parse().decode("utf-8")
+    from notation import finish_edited
+    return finish_edited(orig_score, respell_from=measure_num)
 
 
 @router.post("/edit/key_sig", response_model=XmlResponse)
