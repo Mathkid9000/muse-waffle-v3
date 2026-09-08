@@ -123,9 +123,7 @@ export async function promptTemplateAnthropic(prompt: string, tabs: Tab[], pushC
             tokensIn: toolSelectionMessage.usage.input_tokens,
             tokensOut: toolSelectionMessage.usage.output_tokens })
     }
-
     console.log('PROMPTING COMPLETE', memory, usageIn, usageOut)
-    return memory['OUTPUT']
 }
 
 function describeSelection(sel?: ScoreSelection | null): string {
@@ -352,7 +350,7 @@ const PROMPT_INTRO = "Your job is to classify which edit types are required next
     + "If nothing matches an edit type, return no tool. You also have the ability to store/retrieve templates and score segments to/from memory with a name identifier so that they can be reused (Note: operations do not happen in place automatically)."
     + "Do not worry about missing details like which measures/staves/values are meant. "
     + "If the user gives no location on where something should happen, assume the user means their current selection and tab."
-    + "Finally, the output, final score should be saved to the name 'OUTPUT'. Reserve this only for when you want a score to be returned. It may also be a template if the user requests a template be returned."
+    + "Finally, unless specified, the operation should typically be done in place."
 
 const ROADMAP_TOOL = {
     name: "roadmap_tool",
@@ -416,7 +414,7 @@ const TOOL_INTROS = [
                         "read_tab",
                         "complete"
                     ],
-                    description: "The tool to execute, as provided by the current roadmap step. Use complete when the user's prompt has been completed and written to memory as 'OUTPUT'"
+                    description: "The tool to execute, as provided by the current roadmap step. Use complete when the user's prompt has been completed."
                 },
                 intention: {
                     type: "string",
@@ -897,7 +895,7 @@ const TOOLS = {
     },
     "write_score": {
         name: "write_score",
-        description: "Write a score onto another score. Essentially a copy and paste. This action can perform multiple writes at once, saving tokens. Recall that you must write to 'OUTPUT' for the score to show.",
+        description: "Write a score onto another score. Essentially a copy and paste. This action can perform multiple writes at once, saving tokens.",
         input_schema: {
             type: "object",
             properties: {
