@@ -1,16 +1,18 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { anthropic } from "./claudeTools";
+import { anthropic, type ScoreSelection } from "./claudeTools";
 import type { ToolUseBlock } from "@anthropic-ai/sdk/resources";
 import type { AnyTemplateItem, Tab } from '../types';
 import { api } from './client';
 import { applyClaudeEdit } from './applyClaudeEdit';
 import { fillTemplate, scoreToTemplate } from './templates';
 import { useStore } from '../store';
+import type { ThoughtProcessEvent, ThoughtProcessTask } from '../components/Chat/Chat';
 
 const MAX_TURNS = 10;
 
-export async function promptTemplateAnthropic(prompt: string, xml: string | null, tabs: Tab[]) {
+export async function promptTemplateAnthropic(prompt: string, xml: string | null, tabs: Tab[], pushCallback: (thought: ThoughtProcessEvent | ThoughtProcessTask) => void, pushConversationName: (title: string) => void, selection: ScoreSelection | null) {
     console.log('Prompted:', prompt, xml)
+
     // propogate memory with tab data
     const memory: Record<string, string | AnyTemplateItem[]> = {}
     tabs.forEach(t => {
@@ -107,14 +109,7 @@ export async function promptTemplateAnthropic(prompt: string, xml: string | null
     return memory['OUTPUT']
 }
 
-async function getCommandContext(command: string, memory: Record<string, string | AnyTemplateItem[]>) {
-    switch (command) {
-        case "edit_template": {
-            return `The existing templates:\n${Object.keys(memory).filter(k => typeof memory[k] !== "string").map(k => k + ":\n" + JSON.stringify(memory[k])).join('\n\n')}`
-        }
-        default: return null
-    }
-}
+// READ STUFFS
 
 function getMemoryContext(memory: Record<string, string | AnyTemplateItem[]>) {
     if (Object.keys(memory).length == 0) return "There are currently no scores or templates saved in memory." 
@@ -270,6 +265,8 @@ const PROMPT_INTRO = "Your job is to classify which edit types are required next
     + "You may use templates to achieve generation and repetitive tasks (e.g. an AABA song from scratch). A template is score abstraction where some elements are intentionally left blank to be filled in by a different model. Actions like creating a template from a score don't change anything about the score, it just modifies the type of the object so that it can be edited using other actions. When a template is filled in, it merely takes the blank/masked elements of the template and fills them in automatically."
     + "For example, if you are creating a song in AABA format, you might want to first generate 8 bars (the first A), use it to create a template, then edit the template by taking the converted score and stripping it of some of its qualities (e.g. chords, rhythm, some pitches). Then, you may command the template to be filled in and placed into the first 8 bars, then commanding it to fill in the template once more and place this in the second 8 bars (Note: when you fill in a template, you get a new object that is no longer considered a template as it is completely filled). "
     + "If nothing matches an edit type, return no tool. You also have the ability to store/retrieve templates and score segments to/from memory with a name identifier so that they can be reused (Note: operations do not happen in place automatically)."
+    + "Do not worry about missing details like which measures/staves/values are meant. "
+    + "References like \"these measures\", \"the selected staff\", or even no given location always refer to that selection, so still classify them. "
     + "Finally, the output, final score should be saved to the name 'OUTPUT'. Reserve this only for when you want a score to be returned. It may also be a template if the user requests a template be returned."
 
 const ROADMAP_TOOL = {

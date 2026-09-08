@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { useParams } from 'react-router-dom'
 import Toolbar from '../components/Toolbar/Toolbar'
+import Chat from '../components/Chat/Chat'
 import ScoreViewer from '../components/ScoreViewer/ScoreViewer'
 import PlaybackBar from '../components/PlaybackBar/PlaybackBar'
 import { useAuth } from '../contexts/AuthContext'
@@ -55,6 +56,7 @@ export default function Editor() {
           </main>
           <PlaybackBar />
         </div>
+        <Chat />
       </div>
     </div>
   )

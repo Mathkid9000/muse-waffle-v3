@@ -397,7 +397,7 @@ def fill_template(rows, steps=12, temperature=1.0, device='cpu', model_name=FILL
 
     filled, order = infill(model, tokenizer, rows, steps=steps, temperature=temperature)
     repaired, order = repair_seams(model, tokenizer, rows, filled, order)
-    tokens, _ = canvas_to_tokens(tokenizer, repaired, order)
+    tokens, _ = canvas_to_tokens(tokenizer, filled, order)
     xml = _to_xml(tokens)
     if xml is None:
         raise RuntimeError('Template fill failed: the model wrote no notes into the template')
