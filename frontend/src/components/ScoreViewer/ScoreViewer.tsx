@@ -748,7 +748,7 @@ export default function ScoreViewer() {
           <div className={styles.paper}>
             <div style={{ display: 'block' }}>
               <p className={styles.paperHint}>{tab?.description || 'Open a MusicXML file or generate a score'}</p>
-              <input className={styles.paperInput} placeholder={'Start a score...'} onKeyDown={handleBlankScoreInput} onMouseDown={(e) => e.stopPropagation()}></input>
+              {/* <input className={styles.paperInput} placeholder={'Start a score...'} onKeyDown={handleBlankScoreInput} onMouseDown={(e) => e.stopPropagation()}></input> */}
             </div>
           </div>
         </div>
