@@ -151,7 +151,6 @@
   border: 1px solid rgba(255, 255, 255, 0.4);
   border-right: 10px solid rgba(0, 0, 0, 0.4);
   margin-bottom: 10px;
-  user-select: none;
   background-color: var(--user-selection);
   box-shadow: 0 4px 0 var(--green-selection);
   text-align: end;

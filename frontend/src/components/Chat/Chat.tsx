@@ -8,6 +8,7 @@ import { api } from '../../api/client'
 import styles from './Chat.module.css'
 import { promptAnthropic } from '../../api/claudeTools'
 import { tabXml } from '../../types'
+import { promptTemplateAnthropic } from '../../api/claudeTemplates'
 
 // Claude tool string enums → backend indices. Order must match the enums in
 // claudeTools.ts (and the backend index conventions). TIME_SIG_LABELS above already
@@ -134,19 +135,23 @@ export default function Chat() {
 
     function addNewThought(thoughtObj: ThoughtProcessEvent | ThoughtProcessTask) {
         setPromptThoughtProcess(prev => [thoughtObj, ...prev])
+        if (expandedThoughts !== -1) setExpandedThoughts(expandedThoughts + 1)
         // setExpandedThoughts(prev => [...prev, false])
     }
 
     async function promptWithThoughtProcess(prompt: string) {
-		const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+        let usage = 0;
 
-		// setPromptThoughtProcess([])
-		TEST_OBJ.forEach(async (obj, i) => {
-			await delay(1000 * (i + 1))
-			addNewThought(obj)
-		})
-
-        await delay(1000 * (TEST_OBJ.length + 1))
+        addNewThought({ task: prompt, isPrompt: true })
+		await promptTemplateAnthropic(prompt, useStore.getState().tabs, (thought) => {
+            addNewThought(thought)
+            if (Object.keys(thought).includes('title')) {
+                thought = thought as ThoughtProcessEvent
+                usage += thought.tokensIn + thought.tokensOut
+                setThoughtUsage(usage)
+            }
+        })
+        console.log(promptThoughtProcess)
         setLoading(false);
     }
 

@@ -7,26 +7,26 @@ import { applyClaudeEdit } from './applyClaudeEdit';
 import { fillTemplate, scoreToTemplate } from './templates';
 import { useStore } from '../store';
 import type { ThoughtProcessEvent, ThoughtProcessTask } from '../components/Chat/Chat';
+import { getPromptContext, getReadResults, type ReadQuery } from './readContext';
 
 const MAX_TURNS = 10;
 
-export async function promptTemplateAnthropic(prompt: string, xml: string | null, tabs: Tab[], pushCallback: (thought: ThoughtProcessEvent | ThoughtProcessTask) => void, pushConversationName: (title: string) => void, selection: ScoreSelection | null) {
-    console.log('Prompted:', prompt, xml)
-
+export async function promptTemplateAnthropic(prompt: string, tabs: Tab[], pushCallback: (thought: ThoughtProcessEvent | ThoughtProcessTask) => void) {
     // propogate memory with tab data
     const memory: Record<string, string | AnyTemplateItem[]> = {}
     tabs.forEach(t => {
         if (!t.template && !t.content) return
         memory[t.name] = (t.template ?? t.content)! // TODO: add description  + info likje instruments, bar dur,  etc..
     })
-    console.log(memory)
+    
+    pushCallback({ task: "Generating a procedure" })
 
     // step 1: roadmap
     const roadmapResponse = await anthropic.messages.create({
         model: 'claude-haiku-4-5-20251001',
         max_tokens: 1024,
         tools: [ ROADMAP_TOOL ] as unknown as Anthropic.Messages.ToolUnion[],
-        system: PROMPT_INTRO + "\n\n" + getMemoryContext(memory),
+        system: PROMPT_INTRO + "\n\n" + getMemoryContext(memory) + "\n\nThe user's current selection:\nTab: " + useStore.getState().activeTab + "\nSelection: " + describeSelection(useStore.getState().selection),
         messages: [{ role: 'user', content: prompt }],
         tool_choice: { type: "tool", name: "roadmap_tool" }
     });
@@ -42,17 +42,16 @@ export async function promptTemplateAnthropic(prompt: string, xml: string | null
         `# Step ${idx + 1} (tool=${s.tool}):\n${s.intention}`
     ).join('\n\n')
 
-    console.log('GENERATED ROADMAP:\n', roadmap)
+    pushCallback({ title: "Generated a procedure", input: roadmap, tokensIn: roadmapResponse.usage.input_tokens, tokensOut: roadmapResponse.usage.output_tokens })
 
     const messages: Anthropic.Messages.MessageParam[] = [{ role: 'user', content: prompt }, { role: 'assistant', content: roadmap }];
-
-
     let usageIn = roadmapResponse.usage.input_tokens;
     let usageOut = roadmapResponse.usage.output_tokens;
 
     // Step 2: carry out roadmap
     for (let turn = 0; turn < MAX_TURNS; turn++) {
         console.log('TURN:', turn, 'MESSAGES:', messages, 'USAGE IN:', usageIn, 'USAGE OUT:', usageOut)
+        pushCallback({ task: "Querying next steps" })
         const toolSelectionMessage = await anthropic.messages.create({
             model: 'claude-haiku-4-5-20251001',
             max_tokens: 1024,
@@ -75,13 +74,19 @@ export async function promptTemplateAnthropic(prompt: string, xml: string | null
         const selectedTool = toolTriggerContent.tool
         const intention = toolTriggerContent.intention
         const next_steps = toolTriggerContent.next_steps
-        // if (selectedTool === 'edit_template') { console.log(memory); return; }
+        const descriptorIndex = Math.floor(Math.random() * DESCRIPTORS.length)
+        const context = getPromptContext(selectedTool, tabs)
+
         if (selectedTool === 'complete') break;
+        pushCallback({ title: "Tool selected: " + selectedTool, input: (context ? (context + '\n\n') : '') + intention, tokensIn: toolSelectionMessage.usage.input_tokens, tokensOut: toolSelectionMessage.usage.output_tokens })
+        pushCallback({ task: (TOOL_DESCRIPTORS[selectedTool] ?? selectedTool).replace('<>',  DESCRIPTORS[descriptorIndex]) })
+
+        // if (selectedTool === 'edit_template') { console.log(memory); return; }
         const toolMessage = await anthropic.messages.create({
             model: 'claude-haiku-4-5-20251001',
             max_tokens: 1024,
             tools: [ TOOLS[selectedTool as keyof typeof TOOLS] ] as unknown as Anthropic.Messages.ToolUnion[],
-            system: getMemoryContext(memory),
+            system: (context ? (context + '\n\n') : '') + getMemoryContext(memory),
             messages: [{ role: 'user', content: `${prompt}\n\n${roadmap}\n\nDo this now: ${intention}` }],
             tool_choice: { type: "tool", name: selectedTool }
         });
@@ -93,23 +98,47 @@ export async function promptTemplateAnthropic(prompt: string, xml: string | null
 
         const results: Anthropic.Messages.ToolResultBlockParam[] = []
         for (const tool of toolUses) {
-            await processCommand({ tool: tool.name, input: tool.input as Record<string, unknown> }, memory, intention)
-            results.push({
-                type: "tool_result",
-                tool_use_id: tool.id,
-                content: `${tool.name} done. Memory holds: ${Object.keys(memory).join(', ') || 'nothing yet'}`,
-            })
+            const readResult = await processCommand({ tool: tool.name, input: tool.input as Record<string, unknown> }, memory, intention)
+            if (readResult) {
+                results.push({
+                    type: "tool_result",
+                    tool_use_id: tool.id,
+                    content: `${tool.name} done:\n${readResult}\nMemory holds: ${Object.keys(memory).join(', ') || 'nothing yet'}`,
+                })
+            }
+            else {
+                results.push({
+                    type: "tool_result",
+                    tool_use_id: tool.id,
+                    content: `${tool.name} done. Memory holds: ${Object.keys(memory).join(', ') || 'nothing yet'}`,
+                })
+            }
         }
         messages.push({ role: 'assistant', content: toolMessage.content });
         if (results.length) messages.push({ role: 'user', content: results });
         messages.push({ role: 'assistant', content: next_steps });
+
+        pushCallback({ title: (TOOL_DESCRIPTORS[selectedTool] ?? selectedTool).replace('ing', 'ed').replace('<>',  DESCRIPTORS_PAST[descriptorIndex]), 
+            input: toolUses.length === 1 ? toolUses[0].input as Record<string, any> : toolUses.map(u => u.input as Record<string, any>), 
+            tokensIn: toolSelectionMessage.usage.input_tokens,
+            tokensOut: toolSelectionMessage.usage.output_tokens })
     }
 
     console.log('PROMPTING COMPLETE', memory, usageIn, usageOut)
     return memory['OUTPUT']
 }
 
-// READ STUFFS
+function describeSelection(sel?: ScoreSelection | null): string {
+    if (!sel) return "The user has not selected anything on the tab.";
+    const parts: string[] = [];
+    if (sel.start != null && sel.end != null) {
+        parts.push(sel.start === sel.end ? `measure ${sel.start}` : `measures ${sel.start} to ${sel.end} (1-based, inclusive)`);
+    }
+    parts.push(sel.parts && sel.parts.length > 0
+        ? `staff_num ${sel.parts.join(", ")} (0-based)`
+        : "all staves");
+    return `The user's current selection on the tab: ${parts.join(", ")}.`;
+}
 
 function getMemoryContext(memory: Record<string, string | AnyTemplateItem[]>) {
     if (Object.keys(memory).length == 0) return "There are currently no scores or templates saved in memory." 
@@ -119,6 +148,23 @@ function getMemoryContext(memory: Record<string, string | AnyTemplateItem[]>) {
 
 async function processCommand(command: { tool: string, input: Record<string, unknown> }, memory: Record<string, string | AnyTemplateItem[]>, intention: string) {
     switch (command.tool) {
+        case "edit_clef":
+        case "edit_time_sig":
+        case "edit_key_sig":
+        case "edit_tempo":
+        case "edit_add_instrument":
+        case "edit_delete_staff":
+        case "edit_delete_measures": {
+            const { in_key, out_key } = getScoreInputOutputNames(command.input)
+            const xml = memory[in_key] as string
+            if (!xml) {
+                console.warn(command, "No score stored under", in_key)
+                break
+            }
+            const newXml = await applyClaudeEdit(command.tool, command.input, xml)
+            saveToMemory(memory, out_key, newXml)
+            break
+        }
         case "generate_score": {
             const { in_key, out_key } = getScoreInputOutputNames(command.input)
             if (in_key && in_key in memory) {
@@ -221,6 +267,25 @@ async function processCommand(command: { tool: string, input: Record<string, unk
             }
             break
         }
+        case "read_score": {
+            const reads = (command.input['queries'] ?? [ ]) as Record<string, any>[]
+            const readOutput = []
+            for (const read of reads) {
+                const { in_key, out_key: _ } = getScoreInputOutputNames(read)
+                let source = memory[in_key] as string | null
+                const state = useStore.getState()
+                if (source) {
+                    const result = getReadResults([ read['element'] as ReadQuery ], source!, in_key, state.selection)
+                    readOutput.push("# Read for tab: " + in_key + "\n" + result)
+                }
+                else {
+                    source = memory[state.activeTab] as string | null
+                    const result = getReadResults([ read['element'] as ReadQuery ], source!, state.activeTab, state.selection)
+                    readOutput.push("# Read for tab: " + state.activeTab + "\n" + result)
+                }
+            }
+            return readOutput.join('\n\n')
+        }
         default: {
             console.warn(command, "No implementation yet")
         }
@@ -261,12 +326,32 @@ function getScoreInputOutputNames(input: Record<string, unknown>) {
     return { in_key: input_name, out_key: output_name }
 }
 
+const TOOL_DESCRIPTORS: Record<string, string> = {
+    "edit_clef": "<> clefs",
+    "edit_time_sig": "<> time signatures",
+    "edit_key_sig": "<> key signatures",
+    "edit_tempo": "<> tempos",
+    "edit_add_instrument": "<> instruments",
+    "edit_delete_staff": "<> instruments",
+    "edit_delete_measures": "<> measures",
+    "generate_score": "Generating music",
+    "create_template_from_scratch": "Creating a blank template",
+    "create_template_from_score": "Converting a new template",
+    "edit_template": "<> a template",
+    "fill_template": "Filling a template",
+    "write_score": "<> the score",
+    "read_tab": "Reading the score"
+}
+
+const DESCRIPTORS = [ 'Modifying', 'Editing', 'Shifting', 'Revising', 'Adjusting', 'Shaping', 'Composing', 'Arranging', 'Writing' ]
+const DESCRIPTORS_PAST = [ 'Modified', 'Edited', 'Shifted', 'Revised', 'Adjusted', 'Shaped', 'Composed', 'Arranged', 'Wrote' ]
+
 const PROMPT_INTRO = "Your job is to classify which edit types are required next to achieve the user's goal and in what order."
     + "You may use templates to achieve generation and repetitive tasks (e.g. an AABA song from scratch). A template is score abstraction where some elements are intentionally left blank to be filled in by a different model. Actions like creating a template from a score don't change anything about the score, it just modifies the type of the object so that it can be edited using other actions. When a template is filled in, it merely takes the blank/masked elements of the template and fills them in automatically."
     + "For example, if you are creating a song in AABA format, you might want to first generate 8 bars (the first A), use it to create a template, then edit the template by taking the converted score and stripping it of some of its qualities (e.g. chords, rhythm, some pitches). Then, you may command the template to be filled in and placed into the first 8 bars, then commanding it to fill in the template once more and place this in the second 8 bars (Note: when you fill in a template, you get a new object that is no longer considered a template as it is completely filled). "
     + "If nothing matches an edit type, return no tool. You also have the ability to store/retrieve templates and score segments to/from memory with a name identifier so that they can be reused (Note: operations do not happen in place automatically)."
     + "Do not worry about missing details like which measures/staves/values are meant. "
-    + "References like \"these measures\", \"the selected staff\", or even no given location always refer to that selection, so still classify them. "
+    + "If the user gives no location on where something should happen, assume the user means their current selection and tab."
     + "Finally, the output, final score should be saved to the name 'OUTPUT'. Reserve this only for when you want a score to be returned. It may also be a template if the user requests a template be returned."
 
 const ROADMAP_TOOL = {
@@ -287,6 +372,7 @@ const ROADMAP_TOOL = {
                                 "create_template_from_scratch", "create_template_from_score", "edit_template",
                                 "fill_template",
                                 "write_score",
+                                "read_tab"
                             ],
                             description: "Each distinct type of edit that can be made. Tool descriptions:"
                                 + "\ngenerate_score: \"Uses a transformer model to generate a new score if no current score exists. Else, inserts into the given location. Do not include key, time_signature, or tempo when these attributes should remain the same.\""
@@ -295,6 +381,7 @@ const ROADMAP_TOOL = {
                                 + "\nedit_template: \"Edit a template already stored in memory (e.g. to strip it down/mask some of its musical elements). Use this to alter a template so that there is more variance when it is filled.\""
                                 + "\nfill_template: \"Fills a template's masked elements, essentially converting it from a template to a score and storing it to a new name on memory.\""
                                 + "\nwrite_score: \"Write a score onto another score. Essentially a copy and paste. Accepts multiple writes to perfrom at once to save tokens.\""
+                                + "\nread_tab: \"Use to read specific elements of a score/template, typically to locate places defined by the user (e.g. 'where the key changes to D major'). May also be used to read the user's current selection (e.g. 'where I am currently highlighting' or 'my current tab').\""
                         },
                         intention: {
                             type: "string",
@@ -326,6 +413,7 @@ const TOOL_INTROS = [
                         "create_template_from_scratch", "create_template_from_score", "edit_template",
                         "fill_template",
                         "write_score",
+                        "read_tab",
                         "complete"
                     ],
                     description: "The tool to execute, as provided by the current roadmap step. Use complete when the user's prompt has been completed and written to memory as 'OUTPUT'"
@@ -690,7 +778,7 @@ const TOOLS = {
                 },
                 measure_start_num: {
                     type: "integer",
-                    description: "The first measure to insert the generation into"
+                    description: "The first measure where the newly generated material will be inserted."
                 },
                 generation_staffs: {
                     type: "array",
@@ -838,6 +926,33 @@ const TOOLS = {
                 }
             },
             required: [ "writes" ]
+        }
+    },
+    "read_tab": {
+        name: "read_tab",
+        description: "Reads specified elements of the given score/template",
+        input_schema: {
+            type: "object",
+            properties: {
+                queries: {
+                    type: "array",
+                    items: {
+                        type: "object",
+                        properties: {
+                            element: {
+                                type: "string",
+                                enum: [ "clef", "key_signature", "time_signature", "tempo", "staves", "measure_count", "selection", "tab" ]
+                            },
+                            memory_name: {
+                                type: "string",
+                                description: "The name of the score/template in memory to read from. Leave blank for the user's active tab."
+                            }
+                        }
+                    },
+                    description: "Aspects to read. clef=per-staff clef changes; key_signature/time_signature/tempo=value at measure 1 and every measure it changes; staves=instrument roster with 0-based staff_num; measure_count=number of measures; selection=the measure(s) and staff/staves the user has selected on the score."
+                }
+            },
+            required: [ "queries" ]
         }
     }
 }
