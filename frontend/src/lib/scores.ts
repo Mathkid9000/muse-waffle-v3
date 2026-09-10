@@ -48,12 +48,16 @@ export interface ScoreDoc {
  * Saves every tab, every chat and a freshly rendered preview to the `scores` bucket, creating
  * the row when `scoreId` is null. Returns the score id, or null if the save failed.
  * Leaves the shared Verovio toolkit laid out for the preview page — redraw the score afterwards.
+ *
+ * The preview is rendered from `activeTabName` — the tab the user was on when they saved —
+ * falling back to Main when that tab isn't a score (a template tab, or one not found).
  */
 export async function saveScore(
   userId: string,
   tabs: Tab[],
   scoreId: string | null,
-  chats: ChatSession[] = []
+  chats: ChatSession[] = [],
+  activeTabName: string = "Main"
 ): Promise<string | null> {
   let id = scoreId;
 
@@ -79,8 +83,9 @@ export async function saveScore(
     id = data.id;
   }
 
-  const mainXml = tabXml(tabs.find((t) => t.name === "Main"));
-  const png = mainXml ? await svgToPng(renderPreviewSvg(mainXml, PAGE_W, PAGE_H, 10), PNG_W, PNG_H) : null;
+  const previewXml =
+    tabXml(tabs.find((t) => t.name === activeTabName)) ?? tabXml(tabs.find((t) => t.name === "Main"));
+  const png = previewXml ? await svgToPng(renderPreviewSvg(previewXml, PAGE_W, PAGE_H, 10), PNG_W, PNG_H) : null;
 
   const [xmlUpload, pngUpload] = await Promise.all([
     supabase.storage

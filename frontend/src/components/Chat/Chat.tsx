@@ -329,7 +329,8 @@ export default function Chat() {
                             // rows={1}
                             disabled={loading}
                             value={inputPrompt}
-                            onChange={(e) => setInputPrompt(e.target!.value)} />
+                            onChange={(e) => setInputPrompt(e.target!.value)} 
+                            onKeyDown={(e) => e.key === 'Enter' ? handleSubmit() : ''}/>
                         <button className={styles.promptButton} disabled={loading || inputPrompt.length === 0} onClick={(_) => handleSubmit()}>
                             <img src={sendImage} className={styles.promptButtonImg} />
                         </button>

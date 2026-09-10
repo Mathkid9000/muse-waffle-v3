@@ -43,6 +43,8 @@ interface AppState {
   streamMode: 'infill' | 'generate' | 'append' | null
   /** Bumped to force ScoreViewer to re-render the SVG from the current XML. */
   redrawNonce: number
+  /** Show the open template as its raw JSON instead of the readable item list. */
+  textView: boolean
 
   setTabs: (tabs: Tab[]) => void
   setActiveTab: (tab: string) => void
@@ -81,6 +83,7 @@ interface AppState {
   setStreamMode: (mode: 'infill' | 'generate' | 'append' | null) => void
   /** Force a full re-render of the score SVG. */
   redrawScore: () => void
+  toggleTextView: () => void
   /** Drop the open document entirely (starting a new score, leaving a saved one). */
   resetScore: () => void
 }
@@ -176,6 +179,7 @@ export const useStore = create<AppState>()(persist((set, get) => ({
   totalBars: null,
   streamMode: null,
   redrawNonce: 0,
+  textView: false,
 
   getTab: (name) => get().tabs.find((t) => t.name === (name ?? get().activeTab)),
   getChat: (name) => get().chats.find((c) => c.name === (name ?? get().activeChat)),
@@ -270,9 +274,10 @@ export const useStore = create<AppState>()(persist((set, get) => ({
     const state = get()
     if (state.getTemplate(state.activeTab) && state.getXml(state.activeTab))
       state.setXml(null, state.activeTab)
-    state.resetCamera(); 
-    set((s) => ({ redrawNonce: s.redrawNonce + 1 })) 
+    state.resetCamera();
+    set((s) => ({ redrawNonce: s.redrawNonce + 1 }))
   },
+  toggleTextView: () => set((s) => ({ textView: !s.textView })),
   resetScore: () =>
     set({
       tabs: mainTab(),

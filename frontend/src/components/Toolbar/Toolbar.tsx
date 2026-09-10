@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { act, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useStore } from '../../store'
 import { useAuth } from '../../contexts/AuthContext'
@@ -6,6 +6,7 @@ import { formatDate, getScore, saveScore, setScoreName, type ScoreRow } from '..
 import { countInstruments } from '../../hooks/useVerovio'
 import styles from './Toolbar.module.css'
 import Avatar from '../Avatar/Avatar'
+import { tabTemplate } from '../../types'
 
 export default function Toolbar() {
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -29,6 +30,8 @@ export default function Toolbar() {
   const renameTab = useStore((s) => s.renameTab)
   const activeTab = useStore((s) => s.activeTab)
   const setActiveTab = useStore((s) => s.setActiveTab)
+  const textView = useStore((s) => s.textView)
+  const toggleTextView = useStore((s) => s.toggleTextView)
 
   const [ isFileDdOpen, setIsFileDdOpen ] = useState<boolean>(false)
   const [ isViewDdOpen, setIsViewDdOpen ] = useState<boolean>(false)
@@ -45,8 +48,8 @@ export default function Toolbar() {
     setScoreData({ numInstruments })
     // A freshly imported file replaces the whole document — drop any tabs left over
     // from whatever was open before instead of appending to them.
-    setTabs([{ name: 'Main', description: '', content: xml }])
-    setActiveTab('Main')
+    const tab = addNewTab('Imported Score', { name: "Imported Score", content: xml })
+    setActiveTab(tab)
   }
 
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
@@ -76,7 +79,7 @@ export default function Toolbar() {
 
   async function handleSave() {
     if (!user) return
-    const id = await saveScore(user.id, tabs, scoreId, useStore.getState().chats)
+    const id = await saveScore(user.id, tabs, scoreId, useStore.getState().chats, activeTab)
     // The preview render leaves the shared toolkit on a portrait page — put the editor's back.
     redrawScore()
     if (!id) return setError('Failed to save score.')
@@ -113,8 +116,8 @@ export default function Toolbar() {
   }, [scoreId])
 
   function handleDownload() {
-    if (!getXml('Main')) return
-    const blob = new Blob([getXml('Main')!], { type: 'application/xml' })
+    if (!getXml(activeTab)) return
+    const blob = new Blob([getXml(activeTab)!], { type: 'application/xml' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
@@ -194,6 +197,13 @@ export default function Toolbar() {
     button.addEventListener('keydown', onKeyDown)
   }
 
+  // A template is data, so its text form is just its JSON — ScoreViewer prints it in place
+  // of the item list while this is on.
+  function viewAsText() {
+    setIsViewDdOpen(false)
+    toggleTextView()
+  }
+
   function deleteCurrentTab(e: Event) {
     if (activeTab === 'Main') return
     e.stopPropagation()
@@ -234,7 +244,7 @@ export default function Toolbar() {
           )}
         </button>
         <button className={styles.dropdownBtn} onClick={() => setIsTemplateDdOpen(true)} onMouseLeave={() => setIsTemplateDdOpen(false)}>
-          Templates
+          Tabs
           {isTemplateDdOpen && (
             <ul className={styles.dropdownContainer}>
               <li className={styles.dropdownItem} onClick={createNewTemplate}>Create New</li>
@@ -247,6 +257,7 @@ export default function Toolbar() {
           View
           {isViewDdOpen && (
             <ul className={styles.dropdownContainer}>
+              {tabTemplate(tabs.find(t => t.name === activeTab)) && (<li className={styles.dropdownItem} onClick={viewAsText}>{textView ? 'View as List' : 'View as Text'}</li>)}
               <li className={styles.dropdownItem} onClick={() => redrawScore()}>Redraw</li>
               <li className={zoom >= 300 ? `${styles.dropdownItem} ${styles.disabled}` : `${styles.dropdownItem}`} onClick={() => zoomStep(10)}>Zoom +</li>
               <li className={zoom <=25 ? `${styles.dropdownItem} ${styles.disabled}` : `${styles.dropdownItem}`} onClick={() => zoomStep(-10)}>Zoom -</li>

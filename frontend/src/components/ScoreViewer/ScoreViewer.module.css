@@ -122,6 +122,16 @@
   overflow-wrap: anywhere;
 }
 
+.templateText {
+  margin: 16px 0 0;
+  font-family: 'Geist Pixel';
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
 .loading {
   display: flex;
   align-items: center;

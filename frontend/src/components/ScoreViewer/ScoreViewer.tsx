@@ -156,6 +156,7 @@ export default function ScoreViewer() {
   const setSelection = useStore((s) => s.setSelection)
   const streamMode = useStore((s) => s.streamMode)
   const redrawNonce = useStore((s) => s.redrawNonce)
+  const textView = useStore((s) => s.textView)
 
   const [pages, setPages] = useState<string[]>([])
   const outerRef = useRef<HTMLDivElement>(null)
@@ -729,18 +730,25 @@ export default function ScoreViewer() {
       onMouseUp={onMouseUp}
       onContextMenu={(e) => { if (e.ctrlKey || e.metaKey) e.preventDefault() }}
     >
-      {template && !xml ? (
+      {/* Text view wins over the engraving: a template tab is normally engraved the moment
+          it has items (see buildXmlFromTemplate above), so gating on !xml alone would keep
+          the paper — and the toggle — invisible. */}
+      {template && (!xml || textView) ? (
         <div className={styles.emptyState} ref={innerRef} style={{ transform: `translate(${panX}px, ${panY}px) scale(${zoom / 100})` }}>
           <div className={`${styles.paper} ${styles.templatePaper}`}>
             <h2 className={styles.templateName}>{tab!.name}</h2>
             <p className={styles.paperHint}>{tab!.description || 'Template'}</p>
             {template.length === 0 && <p className={styles.paperHint}>No items yet.</p>}
-            <ol className={styles.templateItems}>
-              {template.map((item, i) => {
-                const { kind, ...fields } = item
-                return <li key={i}><b>{kind}</b> {JSON.stringify(fields)}</li>
-              })}
-            </ol>
+            {textView ? (
+              <pre className={styles.templateText}>{JSON.stringify(template, null, 2)}</pre>
+            ) : (
+              <ol className={styles.templateItems}>
+                {template.map((item, i) => {
+                  const { kind, ...fields } = item
+                  return <li key={i}><b>{kind}</b> {JSON.stringify(fields)}</li>
+                })}
+              </ol>
+            )}
           </div>
         </div>
       ) : !xml ? (

@@ -449,11 +449,11 @@ const TOOL_INTROS = [
 const TEMPLATE_ITEM_LOCATION = {
     measure: {
         type: "integer",
-        description: "The 1-based measure this item belongs to. Omit if not yet placed."
+        description: "The 1-based measure this item belongs to. Omit to be masked and regenerated."
     },
     pos: {
         type: "number",
-        description: "The beat position within the measure this item belongs to. Omit if not yet placed."
+        description: "The beat position (or rhythm) within the measure this item belongs to where 1 is a quarter note, 0.5 is an eighth note, etc... Omit to mask this note's rhythmic placement, to leave this item blank."
     }
 }
 
@@ -546,7 +546,7 @@ const TEMPLATE_ITEM_SCHEMAS = [
         properties: {
             kind: { type: "string", enum: [ "note" ] },
             ...TEMPLATE_ITEM_LOCATION,
-            duration: { type: "number", description: "The note's duration. Omit to leave this item blank." },
+            duration: { type: "number", description: "The note's duration where 1 is a quarter note, 0.5 is an eighth note, etc... Omit to leave this item blank." },
             pitch: { type: "integer", description: "The note's pitch. Omit to leave this item blank." },
             voice_idx: { type: "integer", description: "The index of the voice this note belongs to. Omit to leave this item blank." }
         },
