@@ -255,6 +255,7 @@ export default function Chat() {
                             }
 
                             event = event as ThoughtProcessEvent
+                            if (event.loading) return
 
                             return (
                                 <div className={containerClassList.join(' ')} onClick={() => { if (event.input !== '') handleExpandThought(idx) } }>

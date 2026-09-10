@@ -338,7 +338,7 @@
   background-color: transparent;
   margin-bottom: 15px;
   margin-right: 5px;
-  font-size: 14px;
+  font-size: 11px;
   font-family: "Geist Pixel";
   font-weight: 400;
   font-style: italic;
@@ -353,15 +353,14 @@
   width: calc(100% - 5px);
   flex-shrink: 0;
   transition: all 0.1s;
-  cursor: pointer;
 }
 
-.recap:active {
+/* .recap:active {
   color: var(--text);
-  max-height: 200px;
-  -webkit-line-clamp: 1000;           /* Limits the text to exactly 3 lines */
+  max-height: 400px;
+  -webkit-line-clamp: 1000;       
   line-clamp: 1000;
-}
+} */
 
 .loading {
   font-style: italic;
