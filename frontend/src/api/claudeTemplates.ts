@@ -1,12 +1,11 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { anthropic, type ScoreSelection } from "./claudeTools";
 import type { ToolUseBlock } from "@anthropic-ai/sdk/resources";
-import type { AnyTemplateItem, Tab } from '../types';
+import type { AnyTemplateItem, ChatItem, Tab, ThoughtProcessEvent, ThoughtProcessTask } from '../types';
 import { api } from './client';
 import { applyClaudeEdit } from './applyClaudeEdit';
 import { fillTemplate, scoreToTemplate } from './templates';
 import { useStore } from '../store';
-import type { ChatItem, ThoughtProcessEvent, ThoughtProcessTask } from '../components/Chat/Chat';
 import { getPromptContext, getReadResults, type ReadQuery } from './readContext';
 
 const MAX_TURNS = 10;

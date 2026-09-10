@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { createJSONStorage, persist, type StateStorage } from 'zustand/middleware'
-import { tabTemplate, tabXml, type AnyTemplateItem, type Tab } from '../types'
+import { tabTemplate, tabXml, type AnyTemplateItem, type ChatSession, type Tab } from '../types'
 
 export interface MeasureSelection {
   start: number
@@ -17,7 +17,11 @@ interface AppState {
   /** Every open tab, in bar order. A tab owns its own content — there is no parallel xml map. */
   tabs: Tab[]
   activeTab: string
+  /** Every chat in the panel. Like tabs, a chat owns its own thoughts and history. */
+  chats: ChatSession[]
+  activeChat: string
   getTab: (name?: string) => Tab | undefined
+  getChat: (name?: string) => ChatSession | undefined
   getXml: (key: string) => string | null
   getTemplate: (key: string) => AnyTemplateItem[] | null
   /** Row id of the saved score being edited; null until the first save. */
@@ -50,6 +54,16 @@ interface AppState {
   /** Renames a tab, de-duplicating; returns the name it actually got. */
   renameTab: (tab: string, newName: string) => string
 
+  /** Replaces the whole chat set (loading a score) and activates its first chat. */
+  setChats: (chats: ChatSession[]) => void
+  setActiveChat: (chat: string) => void
+  /** Adds an empty chat, de-duplicating its name; returns the name it actually got. */
+  addNewChat: (chat?: string) => string
+  /** Deletes a chat, never leaving the panel empty. */
+  deleteChat: (chat: string) => void
+  /** Patches one chat's fields (thoughts, history) in place. */
+  updateChat: (chat: string, patch: Partial<ChatSession>) => void
+
   setXml: (xml: string | null, key?: string) => void
   setTemplate: (xml: AnyTemplateItem[], key?: string) => void
   setScoreId: (id: string | null) => void
@@ -79,6 +93,7 @@ const PERSIST_KEY = 'muse-waffle:editor'
 const WRITE_DELAY_MS = 400
 
 const mainTab = (): Tab[] => [{ name: 'Main', description: '', content: null, template: null }]
+const mainChat = (): ChatSession[] => [{ name: 'Chat', thoughts: [], history: [] }]
 
 /** `name`, or `name (n)` with the lowest n that no tab in `taken` already uses. */
 function uniqueName(name: string, taken: string[]): string {
@@ -145,6 +160,8 @@ function createWriteBehindStorage(): StateStorage {
 export const useStore = create<AppState>()(persist((set, get) => ({
   tabs: mainTab(),
   activeTab: 'Main',
+  chats: mainChat(),
+  activeChat: mainChat()[0].name,
   scoreId: null,
   scoreData: null,
   loading: false,
@@ -161,6 +178,7 @@ export const useStore = create<AppState>()(persist((set, get) => ({
   redrawNonce: 0,
 
   getTab: (name) => get().tabs.find((t) => t.name === (name ?? get().activeTab)),
+  getChat: (name) => get().chats.find((c) => c.name === (name ?? get().activeChat)),
   getXml: (key) => tabXml(get().getTab(key)),
   getTemplate: (key) => { 
     // check to see if template is still on content just in case
@@ -186,8 +204,28 @@ export const useStore = create<AppState>()(persist((set, get) => ({
     return name
   },
 
+  addNewChat: (chat) => {
+    const name = uniqueName(chat ?? 'Chat', get().chats.map((c) => c.name))
+    set((s) => ({ chats: [...s.chats, { name, thoughts: [], history: [] }], activeChat: name }))
+    return name
+  },
+  deleteChat: (chat) =>
+    set((s) => {
+      const chats = s.chats.filter((c) => c.name !== chat)
+      // The panel always has somewhere to type, so removing the last chat opens a fresh one.
+      const next = chats.length ? chats : mainChat()
+      return { chats: next, activeChat: s.activeChat === chat ? next[0].name : s.activeChat }
+    }),
+  updateChat: (chat, patch) =>
+    set((s) => ({ chats: s.chats.map((c) => (c.name === chat ? { ...c, ...patch } : c)) })),
+
   setTabs: (tabs) => set({ tabs: tabs }),
   setActiveTab: (tab) => set({ activeTab: tab }),
+  setChats: (chats) => {
+    const next = chats.length ? chats : mainChat()
+    set({ chats: next, activeChat: next[0].name })
+  },
+  setActiveChat: (chat) => set({ activeChat: chat }),
   // Writing xml to a tab that isn't open yet creates it, so a generated score can land
   // straight in its own tab.
   setXml: (xml, key) =>
@@ -239,6 +277,8 @@ export const useStore = create<AppState>()(persist((set, get) => ({
     set({
       tabs: mainTab(),
       activeTab: 'Main',
+      chats: mainChat(),
+      activeChat: mainChat()[0].name,
       scoreId: null,
       scoreData: null,
       selection: null,
@@ -254,7 +294,14 @@ export const useStore = create<AppState>()(persist((set, get) => ({
   // Only the document survives a reload. The camera, the selection and the streaming
   // progress are per-view state, and rehydrating a half-finished stream would leave the
   // UI stuck mid-generation with no request behind it.
-  partialize: (s) => ({ tabs: s.tabs, activeTab: s.activeTab, scoreId: s.scoreId, scoreData: s.scoreData }),
+  partialize: (s) => ({
+    tabs: s.tabs,
+    activeTab: s.activeTab,
+    chats: s.chats,
+    activeChat: s.activeChat,
+    scoreId: s.scoreId,
+    scoreData: s.scoreData,
+  }),
   // v1 kept tab names and their xml in two parallel structures; fold them into Tab[].
   migrate: (persisted, version) => {
     if (version >= 2) return persisted as Partial<AppState>

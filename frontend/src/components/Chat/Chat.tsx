@@ -7,31 +7,12 @@ import { useStore } from '../../store'
 import { api } from '../../api/client'
 import styles from './Chat.module.css'
 import { promptAnthropic } from '../../api/claudeTools'
-import { tabXml } from '../../types'
+import { tabXml, type ThoughtProcessEvent, type ThoughtProcessTask } from '../../types'
 import { promptTemplateAnthropic } from '../../api/claudeTemplates'
 
 // Claude tool string enums → backend indices. Order must match the enums in
 // claudeTools.ts (and the backend index conventions). TIME_SIG_LABELS above already
 // mirrors the time-signature enum, so it doubles as the lookup for new_time.
-
-export interface ThoughtProcessEvent {
-	title: string
-	input: any
-	tokensIn: number
-	tokensOut: number,
-    loading?: boolean,
-    isRecap?: boolean
-}
-
-export interface ThoughtProcessTask {
-	task: string
-    isPrompt?: boolean
-}
-
-export interface ChatItem {
-    prompt: string,
-    output: string
-}
 
 const TEST_OBJ = [
     {
@@ -101,9 +82,14 @@ export default function Chat() {
     const [ loading, setLoading ] = useState(false)
     const [ expandedThoughts, setExpandedThoughts ] = useState<number>(-1) 
     const [ thoughtUsage, setThoughtUsage ] = useState<number>(0) 
-    const [ promptThoughtProcess, setPromptThoughtProcess ] = useState<(ThoughtProcessEvent | ThoughtProcessTask)[]>([])
     const [ panelWidth, setPanelWidth ] = useState(400)
-    const [ chatHistory, setChatHistory ] = useState<ChatItem[]>([])
+    // Chats live in the store so they persist with the project (see store/index and lib/scores).
+    const chats = useStore((s) => s.chats)
+    const activeChat = useStore((s) => s.activeChat)
+    const setActiveChat = useStore((s) => s.setActiveChat)
+    const addNewChat = useStore((s) => s.addNewChat)
+    const deleteChat = useStore((s) => s.deleteChat)
+    const promptThoughtProcess = chats.find((c) => c.name === activeChat)?.thoughts ?? []
     const isResizing = useRef(false)
     const resizeStartX = useRef(0)
     const resizeStartWidth = useRef(400)
@@ -138,37 +124,48 @@ export default function Chat() {
 
     function handleSubmit() {
         const prompt = inputPrompt
+        // The chat the prompt was sent from: everything it produces lands there even if the
+        // user switches chats while it runs.
+        const chatName = activeChat
         setInputPrompt("")
         setLoading(true)
         setThoughtUsage(0)
 
-        promptWithThoughtProcess(prompt).catch((e: unknown) => {
-            addNewThought({ title: 'Prompt failed', input: e instanceof Error ? e.message : String(e), tokensIn: 0, tokensOut: 0 })
+        promptWithThoughtProcess(prompt, chatName).catch((e: unknown) => {
+            addNewThought({ title: 'Prompt failed', input: e instanceof Error ? e.message : String(e), tokensIn: 0, tokensOut: 0 }, chatName)
             setLoading(false)
         })
     }
 
-    function addNewThought(thoughtObj: ThoughtProcessEvent | ThoughtProcessTask) {
-        setPromptThoughtProcess(prev => [thoughtObj, ...prev])
-        setExpandedThoughts(prev => prev === -1 ? -1 : prev + 1)
+    function addNewThought(thoughtObj: ThoughtProcessEvent | ThoughtProcessTask, chatName: string) {
+        const { getChat, updateChat } = useStore.getState()
+        updateChat(chatName, { thoughts: [thoughtObj, ...(getChat(chatName)?.thoughts ?? [])] })
+        if (chatName === useStore.getState().activeChat) setExpandedThoughts(prev => prev === -1 ? -1 : prev + 1)
     }
 
-    async function promptWithThoughtProcess(prompt: string) {
+    function handleSwitchChat(name: string) {
+        // The expanded index points into the chat being left, so it can't carry over.
+        setExpandedThoughts(-1)
+        setActiveChat(name)
+    }
+
+    async function promptWithThoughtProcess(prompt: string, chatName: string) {
         let usage = 0;
         // const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 		// // setPromptThoughtProcess([])
 		// TEST_OBJ.forEach(async (obj, i) => {
 		// 	await delay(1000 * (i + 1))
-		// 	addNewThought(obj)
+		// 	addNewThought(obj,'Chat')
 		// })
 
         // await delay(1000 * (TEST_OBJ.length + 1))
         
 
-        addNewThought({ task: prompt, isPrompt: true })
-		const recap = await promptTemplateAnthropic(chatHistory, prompt, useStore.getState().tabs, (thought) => {
-            addNewThought(thought)
+        addNewThought({ task: prompt, isPrompt: true }, chatName)
+        const history = useStore.getState().getChat(chatName)?.history ?? []
+		const recap = await promptTemplateAnthropic(history, prompt, useStore.getState().tabs, (thought) => {
+            addNewThought(thought, chatName)
             if (Object.keys(thought).includes('title')) {
                 thought = thought as ThoughtProcessEvent
                 usage += thought.tokensIn + thought.tokensOut
@@ -176,11 +173,13 @@ export default function Chat() {
             }
         })
 
-        chatHistory.push({ prompt: prompt, output: recap as string })
-        setChatHistory(chatHistory)
-        console.log("HISTORY: ", chatHistory)
-        
-        console.log(promptThoughtProcess)
+        // A run that ends without a recap (no roadmap, no tool) has nothing to reduce, and
+        // pushing its empty result would feed the next prompt a blank turn.
+        if (typeof recap === 'string') {
+            const { getChat, updateChat } = useStore.getState()
+            updateChat(chatName, { history: [...(getChat(chatName)?.history ?? []), { prompt, output: recap }] })
+        }
+
         setLoading(false);
     }
 
@@ -195,6 +194,20 @@ export default function Chat() {
             <div className={styles.panel} style={ { borderTop: "1px solid grey", width: panelWidth } }>
                 <div className={styles.resizeHandle} onMouseDown={handleResizeStart} />
                 <div className={styles.section}>
+                    <div className={styles.chatTabs}>
+                        {chats.map(c => (
+                            <button key={c.name}
+                                className={c.name === activeChat ? `${styles.chatTab} ${styles.activeChatTab}` : styles.chatTab}
+                                onClick={() => handleSwitchChat(c.name)}>
+                                {c.name}
+                                {c.name === activeChat && chats.length > 1 && (
+                                    <span className={styles.chatTabClose}
+                                        onClick={(e) => { e.stopPropagation(); setExpandedThoughts(-1); deleteChat(c.name) }}>×</span>
+                                )}
+                            </button>
+                        ))}
+                        <button className={styles.chatTab} disabled={loading} onClick={() => handleSwitchChat(addNewChat())}>+</button>
+                    </div>
                     <div className={styles.thoughtPanel}>
                     {
                         promptThoughtProcess.map((event: ThoughtProcessEvent | ThoughtProcessTask, idx) => {

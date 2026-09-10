@@ -76,7 +76,7 @@ export default function Toolbar() {
 
   async function handleSave() {
     if (!user) return
-    const id = await saveScore(user.id, tabs, scoreId)
+    const id = await saveScore(user.id, tabs, scoreId, useStore.getState().chats)
     // The preview render leaves the shared toolkit on a portrait page — put the editor's back.
     redrawScore()
     if (!id) return setError('Failed to save score.')

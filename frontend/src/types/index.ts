@@ -91,3 +91,35 @@ export interface Tab {
 
 export const tabXml = (t?: Tab | null) => (typeof t?.content === "string" ? t.content : null);
 export const tabTemplate = (t?: Tab | null) => (Array.isArray(t?.template) ? t.template : null);
+
+// chats
+
+export interface ThoughtProcessEvent {
+  title: string;
+  input: any;
+  tokensIn: number;
+  tokensOut: number;
+  loading?: boolean;
+  isRecap?: boolean;
+}
+
+export interface ThoughtProcessTask {
+  task: string;
+  isPrompt?: boolean;
+}
+
+/** One prompt and the recap the model closed it with — the reduction fed back as history. */
+export interface ChatItem {
+  prompt: string;
+  output: string;
+}
+
+/**
+ * One conversation in the chat panel: `thoughts` is what the panel renders (newest first),
+ * `history` the reduced prompt/recap pairs that go back to the model as context.
+ */
+export interface ChatSession {
+  name: string;
+  thoughts: (ThoughtProcessEvent | ThoughtProcessTask)[];
+  history: ChatItem[];
+}

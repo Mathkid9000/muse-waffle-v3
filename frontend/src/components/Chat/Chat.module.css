@@ -113,11 +113,61 @@
   font-size: 12px;
 }
 
+.chatTabs {
+  display: flex;
+  gap: 5px;
+  width: calc(100% - 12px);
+  height: 26px;
+  margin-bottom: 8px;
+  margin-right: 12px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  flex-shrink: 0;
+}
+
+.chatTab {
+  font-family: 'TASA Orbiter';
+  font-size: 12px;
+  font-weight: 400;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  background: var(--background);
+  padding: 4px 10px;
+  min-width: 60px;
+  width: fit-content;
+  color: var(--text);
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.chatTab:hover {
+  background: var(--green-selection);
+}
+
+.chatTab:disabled {
+  color: var(--disabled-text);
+  cursor: default;
+}
+
+.activeChatTab {
+  border: 1px solid var(--text);
+  background: var(--user-selection);
+}
+
+.chatTabClose {
+  margin-left: 8px;
+  opacity: 0.5;
+}
+
+.chatTabClose:hover {
+  opacity: 1;
+}
+
 .thoughtPanel {
   padding: 0;
   display: flex;
   width: 100%;
-  height: calc(100% - 70px);
+  height: calc(100% - 104px);
   position: relative;
   overflow-y: auto;
   scrollbar-width: thin;
@@ -263,7 +313,7 @@
   font-family: "Geist Pixel";
   font-weight: 400;
   font-style: italic;
-  max-height: 300px;
+  max-height: 80px;
   height: fit-content;
   display: -webkit-box;
   -webkit-line-clamp: 3;           /* Limits the text to exactly 3 lines */
@@ -273,6 +323,15 @@
   text-overflow: ellipsis;
   width: calc(100% - 5px);
   flex-shrink: 0;
+  transition: all 0.1s;
+  cursor: pointer;
+}
+
+.recap:active {
+  color: var(--text);
+  max-height: 200px;
+  -webkit-line-clamp: 1000;           /* Limits the text to exactly 3 lines */
+  line-clamp: 1000;
 }
 
 .loading {

@@ -1,6 +1,6 @@
 import { supabase } from "./supabase";
 import { renderPreviewSvg } from "../hooks/useVerovio";
-import { tabXml, type Tab } from "../types";
+import { tabXml, type ChatSession, type Tab } from "../types";
 
 export interface ScoreRow {
   id: string;
@@ -38,15 +38,22 @@ async function svgToPng(svg: string, width: number, height: number): Promise<Blo
   }
 }
 
+/** What a save writes to the bucket. Older saves hold a bare `Tab[]` (see `parseScoreDoc`). */
+export interface ScoreDoc {
+  tabs: Tab[];
+  chats?: ChatSession[];
+}
+
 /**
- * Saves every tab and a freshly rendered preview to the `scores` bucket, creating the row when
- * `scoreId` is null. Returns the score id, or null if the save failed.
+ * Saves every tab, every chat and a freshly rendered preview to the `scores` bucket, creating
+ * the row when `scoreId` is null. Returns the score id, or null if the save failed.
  * Leaves the shared Verovio toolkit laid out for the preview page — redraw the score afterwards.
  */
 export async function saveScore(
   userId: string,
   tabs: Tab[],
-  scoreId: string | null
+  scoreId: string | null,
+  chats: ChatSession[] = []
 ): Promise<string | null> {
   let id = scoreId;
 
@@ -78,7 +85,11 @@ export async function saveScore(
   const [xmlUpload, pngUpload] = await Promise.all([
     supabase.storage
       .from(BUCKET)
-      .upload(xmlPath(userId, id!), new Blob([JSON.stringify(tabs)], { type: "application/xml" }), { upsert: true }),
+      .upload(
+        xmlPath(userId, id!),
+        new Blob([JSON.stringify({ tabs, chats } satisfies ScoreDoc)], { type: "application/xml" }),
+        { upsert: true }
+      ),
     png
       ? supabase.storage
           .from(BUCKET)
@@ -93,6 +104,24 @@ export async function saveScore(
   if (pngUpload.error) console.error("Error uploading preview:", pngUpload.error);
 
   return id;
+}
+
+/**
+ * Reads a saved document, normalising the two older layouts: before chats were saved with the
+ * score a save was a bare `Tab[]`, and before tabs became a datatype, a plain name -> xml record.
+ */
+export function parseScoreDoc(json: string): ScoreDoc {
+  const saved = JSON.parse(json) as ScoreDoc | Tab[] | Record<string, string>;
+  if (Array.isArray(saved)) return { tabs: saved };
+  if ("tabs" in saved) return saved as ScoreDoc;
+  return {
+    tabs: Object.entries(saved).map(([name, content]) => ({
+      name,
+      description: "",
+      content,
+      template: null,
+    })),
+  };
 }
 
 export async function listScores(userId: string): Promise<ScoreRow[]> {
