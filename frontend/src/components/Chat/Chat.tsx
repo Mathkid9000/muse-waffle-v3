@@ -77,11 +77,20 @@ const TEST_OBJ = [
     }
 ] as (ThoughtProcessEvent | ThoughtProcessTask)[]
 
+/** Tokens a single step cost (in + out). Task rows are progress labels and carry none. */
+const stepTokens = (event: ThoughtProcessEvent | ThoughtProcessTask) =>
+    'title' in event ? event.tokensIn + event.tokensOut : 0
+
+/** Compact enough to sit on one line next to a title: 903, 1.1k, 14k. */
+function formatTokens(n: number) {
+    if (n < 1000) return String(n)
+    return n < 10000 ? `${(n / 1000).toFixed(1)}k` : `${Math.round(n / 1000)}k`
+}
+
 export default function Chat() {
     const [ inputPrompt, setInputPrompt ] = useState("")
     const [ loading, setLoading ] = useState(false)
-    const [ expandedThoughts, setExpandedThoughts ] = useState<number>(-1) 
-    const [ thoughtUsage, setThoughtUsage ] = useState<number>(0) 
+    const [ expandedThoughts, setExpandedThoughts ] = useState<number>(-1)
     const [ panelWidth, setPanelWidth ] = useState(400)
     // Chats live in the store so they persist with the project (see store/index and lib/scores).
     const chats = useStore((s) => s.chats)
@@ -90,6 +99,11 @@ export default function Chat() {
     const addNewChat = useStore((s) => s.addNewChat)
     const deleteChat = useStore((s) => s.deleteChat)
     const promptThoughtProcess = chats.find((c) => c.name === activeChat)?.thoughts ?? []
+    // What the last roadmap read in: the intro, this chat's history and the memory of every tab.
+    // Thoughts are newest-first, so the first roadmap found is the most recent one.
+    const contextTokens = (promptThoughtProcess.find(
+        (e): e is ThoughtProcessEvent => 'title' in e && !!e.isRoadmap
+    ))?.tokensIn ?? 0
     const isResizing = useRef(false)
     const resizeStartX = useRef(0)
     const resizeStartWidth = useRef(400)
@@ -129,7 +143,6 @@ export default function Chat() {
         const chatName = activeChat
         setInputPrompt("")
         setLoading(true)
-        setThoughtUsage(0)
 
         promptWithThoughtProcess(prompt, chatName).catch((e: unknown) => {
             addNewThought({ title: 'Prompt failed', input: e instanceof Error ? e.message : String(e), tokensIn: 0, tokensOut: 0 }, chatName)
@@ -150,7 +163,6 @@ export default function Chat() {
     }
 
     async function promptWithThoughtProcess(prompt: string, chatName: string) {
-        let usage = 0;
         // const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 		// // setPromptThoughtProcess([])
@@ -166,11 +178,6 @@ export default function Chat() {
         const history = useStore.getState().getChat(chatName)?.history ?? []
 		const recap = await promptTemplateAnthropic(history, prompt, useStore.getState().tabs, (thought) => {
             addNewThought(thought, chatName)
-            if (Object.keys(thought).includes('title')) {
-                thought = thought as ThoughtProcessEvent
-                usage += thought.tokensIn + thought.tokensOut
-                setThoughtUsage(usage)
-            }
         })
 
         // A run that ends without a recap (no roadmap, no tool) has nothing to reduce, and
@@ -207,6 +214,9 @@ export default function Chat() {
                             </button>
                         ))}
                         <button className={styles.chatTab} disabled={loading} onClick={() => handleSwitchChat(addNewChat())}>+</button>
+                        <span className={styles.chatUsage} title="Context read in by the last roadmap step (chat history, memory)">
+                            {formatTokens(contextTokens)} tk in
+                        </span>
                     </div>
                     <div className={styles.thoughtPanel}>
                     {
@@ -248,6 +258,11 @@ export default function Chat() {
 
                             return (
                                 <div className={containerClassList.join(' ')} onClick={() => { if (event.input !== '') handleExpandThought(idx) } }>
+                                    { stepTokens(event) > 0 && (
+                                        <span className={styles.stepTokens} title={`${event.tokensIn} in / ${event.tokensOut} out`}>
+                                            {formatTokens(stepTokens(event))} tk
+                                        </span>
+                                    )}
                                     <span className={[styles.thoughtTitle, event.loading && idx === 0 ? styles.loading : ''].join(' ')}>
                                         { event.input !== '' && (
                                             <img src={arrowImage} className={arrowClassList.join(' ')}/>

@@ -101,6 +101,8 @@ export interface ThoughtProcessEvent {
   tokensOut: number;
   loading?: boolean;
   isRecap?: boolean;
+  /** The roadmap step. Its `tokensIn` is the whole context — intro, chat history, memory. */
+  isRoadmap?: boolean;
 }
 
 export interface ThoughtProcessTask {

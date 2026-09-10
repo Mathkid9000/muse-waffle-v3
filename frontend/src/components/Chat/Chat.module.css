@@ -163,6 +163,18 @@
   opacity: 1;
 }
 
+/* Running total for the open chat, parked at the far end of the tab row. */
+.chatUsage {
+  margin-left: auto;
+  align-self: center;
+  padding-left: 8px;
+  font-family: 'Geist Pixel';
+  font-size: 10px;
+  color: var(--disabled-text);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
 .thoughtPanel {
   padding: 0;
   display: flex;
@@ -215,6 +227,7 @@
 }
 
 .thoughtContainer {
+  position: relative;
   padding: 12px;
   border: 1px solid rgba(255, 255, 255, 0.3);
   border-left: 10px solid var(--user-selection);
@@ -248,8 +261,24 @@
   font-size: 20px;
   display: block;
   font-weight: 200;
-  padding: 0 4px;
+  /* Right padding keeps a long title clear of the step's token count. */
+  padding: 0 44px 0 4px;
   font-family: 'Jersey 15';
+  color: var(--text);
+}
+
+/* Cost of one step, pinned to the row so it reads without expanding the step. */
+.stepTokens {
+  position: absolute;
+  top: 15px;
+  right: 12px;
+  font-family: 'Geist Pixel';
+  font-size: 10px;
+  color: var(--disabled-text);
+  transition: color 0.1s;
+}
+
+.thoughtContainer:hover > .stepTokens {
   color: var(--text);
 }
 

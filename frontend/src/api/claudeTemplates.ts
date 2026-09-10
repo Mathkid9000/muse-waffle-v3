@@ -43,7 +43,7 @@ export async function promptTemplateAnthropic(chatHistory: ChatItem[], prompt: s
         `# Step ${idx + 1} (tool=${s.tool}):\n${s.intention}`
     ).join('\n\n')
 
-    pushCallback({ title: "Generated a procedure", input: roadmap, tokensIn: roadmapResponse.usage.input_tokens, tokensOut: roadmapResponse.usage.output_tokens })
+    pushCallback({ title: "Generated a procedure", input: roadmap, tokensIn: roadmapResponse.usage.input_tokens, tokensOut: roadmapResponse.usage.output_tokens, isRoadmap: true })
 
     const messages: Anthropic.Messages.MessageParam[] = [{ role: 'user', content: prompt }, { role: 'assistant', content: roadmap }];
     let usageIn = roadmapResponse.usage.input_tokens;
