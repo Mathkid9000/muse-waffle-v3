@@ -6,12 +6,12 @@ import { api } from './client';
 import { applyClaudeEdit } from './applyClaudeEdit';
 import { fillTemplate, scoreToTemplate } from './templates';
 import { useStore } from '../store';
-import type { ThoughtProcessEvent, ThoughtProcessTask } from '../components/Chat/Chat';
+import type { ChatItem, ThoughtProcessEvent, ThoughtProcessTask } from '../components/Chat/Chat';
 import { getPromptContext, getReadResults, type ReadQuery } from './readContext';
 
 const MAX_TURNS = 10;
 
-export async function promptTemplateAnthropic(prompt: string, tabs: Tab[], pushCallback: (thought: ThoughtProcessEvent | ThoughtProcessTask) => void) {
+export async function promptTemplateAnthropic(chatHistory: ChatItem[], prompt: string, tabs: Tab[], pushCallback: (thought: ThoughtProcessEvent | ThoughtProcessTask) => void) {
     // propogate memory with tab data
     const memory: Record<string, string | AnyTemplateItem[]> = {}
     tabs.forEach(t => {
@@ -22,11 +22,13 @@ export async function promptTemplateAnthropic(prompt: string, tabs: Tab[], pushC
     pushCallback({ task: "Generating a procedure" })
 
     // step 1: roadmap
+    const context = PROMPT_INTRO + "\n\n" + getHistoryContext(chatHistory) + "\n\n" + getMemoryContext(memory) + "\n\nThe user's current selection:\nTab: " + useStore.getState().activeTab + "\nSelection: " + describeSelection(useStore.getState().selection)
+    console.log(context)
     const roadmapResponse = await anthropic.messages.create({
         model: 'claude-haiku-4-5-20251001',
         max_tokens: 1024,
         tools: [ ROADMAP_TOOL ] as unknown as Anthropic.Messages.ToolUnion[],
-        system: PROMPT_INTRO + "\n\n" + getMemoryContext(memory) + "\n\nThe user's current selection:\nTab: " + useStore.getState().activeTab + "\nSelection: " + describeSelection(useStore.getState().selection),
+        system: context,
         messages: [{ role: 'user', content: prompt }],
         tool_choice: { type: "tool", name: "roadmap_tool" }
     });
@@ -77,9 +79,11 @@ export async function promptTemplateAnthropic(prompt: string, tabs: Tab[], pushC
         const descriptorIndex = Math.floor(Math.random() * DESCRIPTORS.length)
         const context = getPromptContext(selectedTool, tabs)
 
-        if (selectedTool === 'complete') break;
-        pushCallback({ title: "Tool selected: " + selectedTool, input: (context ? (context + '\n\n') : '') + intention, tokensIn: toolSelectionMessage.usage.input_tokens, tokensOut: toolSelectionMessage.usage.output_tokens })
-        pushCallback({ task: (TOOL_DESCRIPTORS[selectedTool] ?? selectedTool).replace('<>',  DESCRIPTORS[descriptorIndex]) })
+        if (selectedTool !== 'complete') {
+            pushCallback({ title: (TOOL_DESCRIPTORS[selectedTool] ?? selectedTool).replace('<>',  DESCRIPTORS[descriptorIndex]),
+                loading: true, 
+                input: (context ? (context + '\n\n') : '') + intention, tokensIn: toolSelectionMessage.usage.input_tokens, tokensOut: toolSelectionMessage.usage.output_tokens })
+        }
 
         // if (selectedTool === 'edit_template') { console.log(memory); return; }
         const toolMessage = await anthropic.messages.create({
@@ -94,6 +98,14 @@ export async function promptTemplateAnthropic(prompt: string, tabs: Tab[], pushC
         usageOut += toolMessage.usage.output_tokens
 
         const toolUses = toolMessage.content.filter((b): b is ToolUseBlock => b.type === "tool_use");
+        if (selectedTool === "complete") {
+            const recap = (toolUses[0].input as Record<string, unknown>)['recap']
+            console.log(toolUses[0], recap)
+            pushCallback({ title: '', input: recap, tokensIn: toolSelectionMessage.usage.input_tokens + toolMessage.usage.input_tokens,
+                tokensOut: toolSelectionMessage.usage.output_tokens + toolMessage.usage.output_tokens, isRecap: true
+            }) 
+            return recap
+        }
         // console.log('Found Tool Uses:', toolUses, "in message:", toolMessage, getMemoryContext(memory))
 
         const results: Anthropic.Messages.ToolResultBlockParam[] = []
@@ -322,6 +334,11 @@ function getScoreInputOutputNames(input: Record<string, unknown>) {
     if ('memory_name' in input) input_name = input['memory_name'] as string
     if ('memory_output_name' in input) output_name = input['memory_output_name'] as string
     return { in_key: input_name, out_key: output_name }
+}
+
+function getHistoryContext(history: ChatItem[]) {
+    if (history.length === 0) return "" 
+    return "History of Prompts:\n" + history.map(h => "User prompt: " + h.prompt + "\nOutput: " + h.output).join('\n')
 }
 
 const TOOL_DESCRIPTORS: Record<string, string> = {
@@ -951,6 +968,19 @@ const TOOLS = {
                 }
             },
             required: [ "queries" ]
+        }
+    },
+    "complete": {
+        name: "complete",
+        description: "The final step: marks the user's task as complete",
+        input_schema: {
+            type: "object",
+            properties: {
+                recap: {
+                    type: "string",
+                    description: "Briefly summarize what was done to complete the user's prompt. A future model will use this as context for future user prompts, so ensure to include crucial details. For example, you should include what edits were made, the steps executed to complete the task, and what scores/templates in memory were modified/created and what they were for."
+                }
+            }
         }
     }
 }

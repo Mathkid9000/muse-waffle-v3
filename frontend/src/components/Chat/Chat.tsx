@@ -14,6 +14,25 @@ import { promptTemplateAnthropic } from '../../api/claudeTemplates'
 // claudeTools.ts (and the backend index conventions). TIME_SIG_LABELS above already
 // mirrors the time-signature enum, so it doubles as the lookup for new_time.
 
+export interface ThoughtProcessEvent {
+	title: string
+	input: any
+	tokensIn: number
+	tokensOut: number,
+    loading?: boolean,
+    isRecap?: boolean
+}
+
+export interface ThoughtProcessTask {
+	task: string
+    isPrompt?: boolean
+}
+
+export interface ChatItem {
+    prompt: string,
+    output: string
+}
+
 const TEST_OBJ = [
     {
         "task": "sdfhsdfjhsdkjf Do this tajxnlzkd.",
@@ -67,20 +86,15 @@ const TEST_OBJ = [
         "input": '',
         "tokensIn": 0,
         "tokensOut": 0
+    },
+    {// "Write a chorale (soprano, alto, tenor, and bass) of 8 bars. Then, create a template from it but remove all pitches in the bass and save this template in place."
+        "title": "sdfsdf",
+        "input": "Generated an 8-bar chorale with 4 staves (soprano, alto, tenor, and bass) and saved it to 'chorale_8bar'. Created a template from this score and saved it as 'chorale_template'. Then edited the template to remove all pitches in the bass staff while preserving the rhythm and other elements, saving the edited version back to 'chorale_template'.",
+        "tokensIn": 0,
+        "tokensOut": 0,
+        "isRecap": true
     }
 ] as (ThoughtProcessEvent | ThoughtProcessTask)[]
-
-export interface ThoughtProcessEvent {
-	title: string
-	input: any
-	tokensIn: number
-	tokensOut: number
-}
-
-export interface ThoughtProcessTask {
-	task: string
-    isPrompt?: boolean
-}
 
 export default function Chat() {
     const [ inputPrompt, setInputPrompt ] = useState("")
@@ -89,6 +103,7 @@ export default function Chat() {
     const [ thoughtUsage, setThoughtUsage ] = useState<number>(0) 
     const [ promptThoughtProcess, setPromptThoughtProcess ] = useState<(ThoughtProcessEvent | ThoughtProcessTask)[]>([])
     const [ panelWidth, setPanelWidth ] = useState(400)
+    const [ chatHistory, setChatHistory ] = useState<ChatItem[]>([])
     const isResizing = useRef(false)
     const resizeStartX = useRef(0)
     const resizeStartWidth = useRef(400)
@@ -135,15 +150,24 @@ export default function Chat() {
 
     function addNewThought(thoughtObj: ThoughtProcessEvent | ThoughtProcessTask) {
         setPromptThoughtProcess(prev => [thoughtObj, ...prev])
-        if (expandedThoughts !== -1) setExpandedThoughts(expandedThoughts + 1)
-        // setExpandedThoughts(prev => [...prev, false])
+        setExpandedThoughts(prev => prev === -1 ? -1 : prev + 1)
     }
 
     async function promptWithThoughtProcess(prompt: string) {
         let usage = 0;
+        // const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+		// // setPromptThoughtProcess([])
+		// TEST_OBJ.forEach(async (obj, i) => {
+		// 	await delay(1000 * (i + 1))
+		// 	addNewThought(obj)
+		// })
+
+        // await delay(1000 * (TEST_OBJ.length + 1))
+        
 
         addNewThought({ task: prompt, isPrompt: true })
-		await promptTemplateAnthropic(prompt, useStore.getState().tabs, (thought) => {
+		const recap = await promptTemplateAnthropic(chatHistory, prompt, useStore.getState().tabs, (thought) => {
             addNewThought(thought)
             if (Object.keys(thought).includes('title')) {
                 thought = thought as ThoughtProcessEvent
@@ -151,6 +175,11 @@ export default function Chat() {
                 setThoughtUsage(usage)
             }
         })
+
+        chatHistory.push({ prompt: prompt, output: recap as string })
+        setChatHistory(chatHistory)
+        console.log("HISTORY: ", chatHistory)
+        
         console.log(promptThoughtProcess)
         setLoading(false);
     }
@@ -194,11 +223,19 @@ export default function Chat() {
                                 )
                             }
 
+                            if (Object.keys(event).includes('isRecap') && (event as ThoughtProcessEvent).isRecap) {
+                                return (
+                                    <span className={styles.recap}>
+                                        {(event as ThoughtProcessEvent).input}
+                                    </span>
+                                )
+                            }
+
                             event = event as ThoughtProcessEvent
 
                             return (
                                 <div className={containerClassList.join(' ')} onClick={() => { if (event.input !== '') handleExpandThought(idx) } }>
-                                    <span className={styles.thoughtTitle}>
+                                    <span className={[styles.thoughtTitle, event.loading && idx === 0 ? styles.loading : ''].join(' ')}>
                                         { event.input !== '' && (
                                             <img src={arrowImage} className={arrowClassList.join(' ')}/>
                                         )}

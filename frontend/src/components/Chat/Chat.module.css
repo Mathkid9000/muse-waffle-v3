@@ -160,14 +160,14 @@
   font-family: 'TASA Orbiter';
   color: var(--text);
   margin-right: 8px;
-  margin-top: 25px;
+  margin-top: 10px;
   flex-shrink: 0;
 }
 
 .thoughtContainer {
   padding: 12px;
   border: 1px solid rgba(255, 255, 255, 0.3);
-  border-left: 10px solid rgba(255, 255, 255, 0.8);
+  border-left: 10px solid var(--user-selection);
   margin-bottom: 5px;
   transition: background 0.1s, max-height 0.1s ease-out;
   max-height: 50px;
@@ -176,6 +176,10 @@
   user-select: none;
   margin-right: 8px;
   flex-shrink: 0;
+}
+
+.thoughtContainer:has(.loading) {
+  border-left: 10px solid rgba(255, 255, 255, 0.8);
 }
 
 .thoughtContainer.hasContent {
@@ -247,6 +251,28 @@
   width: fit-content;
   font-size: 11px;
   line-height: 11px;
+}
+
+.recap {
+  color: var(--disabled-text);
+  padding: 10px 20px 0 15px;
+  background-color: transparent;
+  margin-bottom: 15px;
+  margin-right: 5px;
+  font-size: 14px;
+  font-family: "Geist Pixel";
+  font-weight: 400;
+  font-style: italic;
+  max-height: 300px;
+  height: fit-content;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;           /* Limits the text to exactly 3 lines */
+  line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;                /* Required to hide the remaining text */
+  text-overflow: ellipsis;
+  width: calc(100% - 5px);
+  flex-shrink: 0;
 }
 
 .loading {
