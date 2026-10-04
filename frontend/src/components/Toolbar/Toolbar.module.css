@@ -173,7 +173,7 @@
 
 .dropdownGrid {
   display: grid;
-  grid-template-columns: 50px 80px 50px 50px 300px;
+  grid-template-columns: 50px 50px 80px 50px 50px 300px;
   margin-left: 7px;
   margin-top: 5px;
 }

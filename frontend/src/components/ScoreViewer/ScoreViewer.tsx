@@ -699,6 +699,7 @@ export default function ScoreViewer() {
     const outputXml = await promptTemplateAnthropic(prompt, useStore.getState().getXml('Main'), useStore.getState().tabs)
     console.log(outputXml)
     if (outputXml) {
+      useStore.getState().checkpoint('Claude Edit')
       setXml(outputXml as string, 'Main')
       useStore.getState().resetCamera()
     }

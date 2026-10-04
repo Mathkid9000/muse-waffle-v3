@@ -143,6 +143,8 @@ export default function Chat() {
         const chatName = activeChat
         setInputPrompt("")
         setLoading(true)
+        // One checkpoint for the whole run, so a single Undo reverts everything Claude did.
+        useStore.getState().checkpoint('Claude Edit')
 
         promptWithThoughtProcess(prompt, chatName).catch((e: unknown) => {
             addNewThought({ title: 'Prompt failed', input: e instanceof Error ? e.message : String(e), tokensIn: 0, tokensOut: 0 }, chatName)

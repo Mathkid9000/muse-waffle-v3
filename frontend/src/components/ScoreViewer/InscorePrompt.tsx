@@ -4,7 +4,7 @@ import undoImage from '../../assets/undo.svg'
 import styles from './InscorePrompt.module.css'
 import { useState } from 'react'
 import { promptAnthropic } from '../../api/claudeTools'
-import type { MeasureSelection } from '../../store'
+import { useStore, type MeasureSelection } from '../../store'
 import { applyClaudeEdit } from '../../api/applyClaudeEdit'
 
 
@@ -256,6 +256,7 @@ export default function InscorePrompt({ getXml, getSelection, setXml }: InscoreP
 
         // console.log(getXml(), getSelection())
 		setOriginalXml(getXml())
+        useStore.getState().checkpoint('Claude Edit')
         promptWithThoughProcess(prompt).catch((e: unknown) => {
             addNewThought({ title: 'Prompt failed', input: e instanceof Error ? e.message : String(e), tokensIn: 0, tokensOut: 0 })
             setPromptState('done')

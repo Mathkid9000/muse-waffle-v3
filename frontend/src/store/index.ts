@@ -13,6 +13,13 @@ export interface ScoreAppData {
   numInstruments: number
 }
 
+/** The document as it stood before an undoable action. Tabs are immutable, so this is just a reference. */
+export interface Snapshot {
+  tabs: Tab[]
+  activeTab: string
+  label: string
+}
+
 interface AppState {
   /** Every open tab, in bar order. A tab owns its own content — there is no parallel xml map. */
   tabs: Tab[]
@@ -45,6 +52,14 @@ interface AppState {
   redrawNonce: number
   /** Show the open template as its raw JSON instead of the readable item list. */
   textView: boolean
+  /** Undo/redo stacks, newest last. Session-only — never persisted. */
+  past: Snapshot[]
+  future: Snapshot[]
+
+  /** Records the current document before an undoable action; clears redo. */
+  checkpoint: (label: string) => void
+  undo: () => void
+  redo: () => void
 
   setTabs: (tabs: Tab[]) => void
   setActiveTab: (tab: string) => void
@@ -94,6 +109,7 @@ const clampZoom = (v: number) => Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, v))
 
 const PERSIST_KEY = 'muse-waffle:editor'
 const WRITE_DELAY_MS = 400
+const HISTORY_MAX = 50
 
 const mainTab = (): Tab[] => [{ name: 'Main', description: '', content: null, template: null }]
 const mainChat = (): ChatSession[] => [{ name: 'Chat', thoughts: [], history: [] }]
@@ -180,6 +196,37 @@ export const useStore = create<AppState>()(persist((set, get) => ({
   streamMode: null,
   redrawNonce: 0,
   textView: false,
+  past: [],
+  future: [],
+
+  // Checkpoints are taken once per logical action (a whole Claude run, a tab delete) rather
+  // than on every set, so streaming setXml calls don't each become an undo step.
+  checkpoint: (label) =>
+    set((s) => ({ past: [...s.past, { tabs: s.tabs, activeTab: s.activeTab, label }].slice(-HISTORY_MAX), future: [] })),
+  undo: () =>
+    set((s) => {
+      const snap = s.past.at(-1)
+      if (!snap) return {}
+      return {
+        past: s.past.slice(0, -1),
+        future: [...s.future, { tabs: s.tabs, activeTab: s.activeTab, label: snap.label }],
+        tabs: snap.tabs,
+        activeTab: snap.tabs.some((t) => t.name === snap.activeTab) ? snap.activeTab : 'Main',
+        redrawNonce: s.redrawNonce + 1,
+      }
+    }),
+  redo: () =>
+    set((s) => {
+      const snap = s.future.at(-1)
+      if (!snap) return {}
+      return {
+        future: s.future.slice(0, -1),
+        past: [...s.past, { tabs: s.tabs, activeTab: s.activeTab, label: snap.label }],
+        tabs: snap.tabs,
+        activeTab: snap.tabs.some((t) => t.name === snap.activeTab) ? snap.activeTab : 'Main',
+        redrawNonce: s.redrawNonce + 1,
+      }
+    }),
 
   getTab: (name) => get().tabs.find((t) => t.name === (name ?? get().activeTab)),
   getChat: (name) => get().chats.find((c) => c.name === (name ?? get().activeChat)),
@@ -223,7 +270,8 @@ export const useStore = create<AppState>()(persist((set, get) => ({
   updateChat: (chat, patch) =>
     set((s) => ({ chats: s.chats.map((c) => (c.name === chat ? { ...c, ...patch } : c)) })),
 
-  setTabs: (tabs) => set({ tabs: tabs }),
+  // Loading a score replaces the document, so the old one's history can't apply to it.
+  setTabs: (tabs) => set({ tabs: tabs, past: [], future: [] }),
   setActiveTab: (tab) => set({ activeTab: tab }),
   setChats: (chats) => {
     const next = chats.length ? chats : mainChat()
@@ -291,6 +339,8 @@ export const useStore = create<AppState>()(persist((set, get) => ({
       streamBar: null,
       totalBars: null,
       streamMode: null,
+      past: [],
+      future: [],
     }),
 }), {
   name: PERSIST_KEY,

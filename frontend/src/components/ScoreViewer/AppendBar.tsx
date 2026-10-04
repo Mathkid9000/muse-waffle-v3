@@ -19,6 +19,7 @@ export default function AppendBar() {
 
   async function handleAppend() {
     if (!currentXml) return
+    useStore.getState().checkpoint('Continue Score')
     setLoading(true)
     try {
       for await (const evt of api.streamAppend({

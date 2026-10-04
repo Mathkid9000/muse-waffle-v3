@@ -32,8 +32,14 @@ export default function Toolbar() {
   const setActiveTab = useStore((s) => s.setActiveTab)
   const textView = useStore((s) => s.textView)
   const toggleTextView = useStore((s) => s.toggleTextView)
+  const checkpoint = useStore((s) => s.checkpoint)
+  const undo = useStore((s) => s.undo)
+  const redo = useStore((s) => s.redo)
+  const undoLabel = useStore((s) => s.past.at(-1)?.label)
+  const redoLabel = useStore((s) => s.future.at(-1)?.label)
 
   const [ isFileDdOpen, setIsFileDdOpen ] = useState<boolean>(false)
+  const [ isEditDdOpen, setIsEditDdOpen ] = useState<boolean>(false)
   const [ isViewDdOpen, setIsViewDdOpen ] = useState<boolean>(false)
   const [ isTemplateDdOpen, setIsTemplateDdOpen ] = useState<boolean>(false)
   const [ isExitDdOpen, setIsExitDdOpen ] = useState<boolean>(false)
@@ -48,6 +54,7 @@ export default function Toolbar() {
     setScoreData({ numInstruments })
     // A freshly imported file replaces the whole document — drop any tabs left over
     // from whatever was open before instead of appending to them.
+    checkpoint('Import')
     const tab = addNewTab('Imported Score', { name: "Imported Score", content: xml })
     setActiveTab(tab)
   }
@@ -98,6 +105,17 @@ export default function Toolbar() {
         e.preventDefault()
         handleSave()
       }
+      // Text fields (chat box, score name, a tab mid-rename) keep their own native undo.
+      const target = e.target as HTMLElement
+      if (target.isContentEditable || target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return
+      const key = e.key.toLowerCase()
+      if ((e.metaKey || e.ctrlKey) && (key === 'y' || (key === 'z' && e.shiftKey))) {
+        e.preventDefault()
+        redo()
+      } else if ((e.metaKey || e.ctrlKey) && key === 'z') {
+        e.preventDefault()
+        undo()
+      }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
@@ -145,6 +163,7 @@ export default function Toolbar() {
     e.stopPropagation()
     setIsTemplateDdOpen(false)
     // A template tab starts as an empty item list — that's what marks it as a template.
+    checkpoint('Create Tab')
     const tabName = addNewTab('New Template', { content: [] })
     setActiveTab(tabName)
   }
@@ -190,6 +209,7 @@ export default function Toolbar() {
       cleanup()
 
       // The tab carries its own content, so renaming is a field edit — nothing to move.
+      checkpoint('Rename Tab')
       setActiveTab(renameTab(name, newName ?? name))
     }
 
@@ -208,6 +228,7 @@ export default function Toolbar() {
     if (activeTab === 'Main') return
     e.stopPropagation()
     setIsTemplateDdOpen(false)
+    checkpoint('Delete Tab')
     deleteTab(activeTab)
     setActiveTab('Main')
   }
@@ -240,6 +261,15 @@ export default function Toolbar() {
               <li className={styles.dropdownItem} onClick={() => fileInputRef.current?.click()}>Import File</li>
               <li className={styles.dropdownItem} onClick={handleSave}>Save</li>
               <li className={styles.dropdownItem} onClick={handleDownload}>Export</li>
+            </ul>
+          )}
+        </button>
+        <button className={styles.dropdownBtn} onClick={() => setIsEditDdOpen(true)} onMouseLeave={() => setIsEditDdOpen(false)}>
+          Edit
+          {isEditDdOpen && (
+            <ul className={styles.dropdownContainer}>
+              <li className={!undoLabel ? `${styles.dropdownItem} ${styles.disabled}` : `${styles.dropdownItem}`} onClick={undo}>Undo{undoLabel && ` ${undoLabel}`}</li>
+              <li className={!redoLabel ? `${styles.dropdownItem} ${styles.disabled}` : `${styles.dropdownItem}`} onClick={redo}>Redo{redoLabel && ` ${redoLabel}`}</li>
             </ul>
           )}
         </button>
