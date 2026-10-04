@@ -21,12 +21,15 @@ export async function promptTemplateAnthropic(chatHistory: ChatItem[], prompt: s
     pushCallback({ task: "Generating a procedure" })
 
     // step 1: roadmap
-    const context = PROMPT_INTRO + "\n\n" + getHistoryContext(chatHistory) + "\n\n" + getMemoryContext(memory) + "\n\nThe user's current selection:\nTab: " + useStore.getState().activeTab + "\nSelection: " + describeSelection(useStore.getState().selection)
+    const activeName = useStore.getState().activeTab
+    const activeIsTemplate = tabs.some(t => t.name === activeName && t.template)
+    const context = PROMPT_INTRO + "\n\n" + getHistoryContext(chatHistory) + "\n\n" + getMemoryContext(memory) + "\n\nThe user's current selection:\nTab: " + activeName
+        + (activeIsTemplate ? " (a TEMPLATE; removing instruments/voices, editing clefs, tempos, key signatures or any other change to it must use edit_template, never any of the other edits)" : " (a score)") + "\nSelection: " + describeSelection(useStore.getState().selection)
     console.log(context)
     const roadmapResponse = await anthropic.messages.create({
         model: 'claude-haiku-4-5-20251001',
         max_tokens: 1024,
-        tools: [ ROADMAP_TOOL ] as unknown as Anthropic.Messages.ToolUnion[],
+        tools: [ withoutScoreTools(ROADMAP_TOOL, activeIsTemplate, memory) ] as unknown as Anthropic.Messages.ToolUnion[],
         system: context,
         messages: [{ role: 'user', content: prompt }],
         tool_choice: { type: "tool", name: "roadmap_tool" }
@@ -56,7 +59,7 @@ export async function promptTemplateAnthropic(chatHistory: ChatItem[], prompt: s
         const toolSelectionMessage = await anthropic.messages.create({
             model: 'claude-haiku-4-5-20251001',
             max_tokens: 1024,
-            tools: TOOL_INTROS as unknown as Anthropic.Messages.ToolUnion[],
+            tools: withoutScoreTools(TOOL_INTROS, activeIsTemplate, memory) as unknown as Anthropic.Messages.ToolUnion[],
             system: getMemoryContext(memory),
             messages: messages,
             tool_choice: { type: "tool", name: "trigger_tool" }
@@ -136,6 +139,15 @@ export async function promptTemplateAnthropic(chatHistory: ChatItem[], prompt: s
     console.log('PROMPTING COMPLETE', memory, usageIn, usageOut)
 }
 
+const SCORE_ONLY_TOOLS = [ "edit_clef", "edit_time_sig", "edit_key_sig", "edit_tempo", "edit_add_instrument", "edit_delete_staff", "edit_delete_measures" ]
+
+// Drops the score-only tools from every tool-name enum while the active tab is a template and
+// memory holds no score they could act on, so they can't be picked at all.
+function withoutScoreTools<T>(tools: T, activeIsTemplate: boolean, memory: Record<string, string | AnyTemplateItem[]>): T {
+    if (!activeIsTemplate || Object.values(memory).some(v => typeof v === 'string')) return tools
+    return JSON.parse(JSON.stringify(tools, (k, v) => k === 'enum' && Array.isArray(v) ? v.filter(x => !SCORE_ONLY_TOOLS.includes(x)) : v))
+}
+
 function describeSelection(sel?: ScoreSelection | null): string {
     if (!sel) return "The user has not selected anything on the tab.";
     const parts: string[] = [];
@@ -164,8 +176,19 @@ async function processCommand(command: { tool: string, input: Record<string, unk
         case "edit_delete_staff":
         case "edit_delete_measures": {
             const { in_key, out_key } = getScoreInputOutputNames(command.input)
-            const xml = memory[in_key] as string
-            if (!xml) {
+            const stored = memory[in_key]
+            if (Array.isArray(stored) && command.tool === "edit_add_instrument") {
+                // the target is a template, not a score: add an instrument item for a new voice
+                const voices = stored.flatMap(i => 'voice_idx' in i && typeof i.voice_idx === 'number' ? [i.voice_idx] : [])
+                const item: AnyTemplateItem = {
+                    kind: "instrument", instrument: String(command.input['new_instrument']),
+                    voice_idx: voices.length ? Math.max(...voices) + 1 : 0, measure: 1, pos: 0,
+                }
+                saveToMemory(memory, out_key, [...stored, item])
+                break
+            }
+            const xml = stored
+            if (typeof xml !== 'string' || !xml) {
                 console.warn(command, "No score stored under", in_key)
                 break
             }
@@ -377,7 +400,7 @@ const PROMPT_INTRO = "Your job is to classify which edit types are required next
     + "For example, if you are creating a song in AABA format, you might want to first generate 8 bars (the first A), use it to create a template, then edit the template by taking the converted score and stripping it of some of its qualities (e.g. chords, rhythm, some pitches). Then, you may command the template to be filled in and placed into the first 8 bars, then commanding it to fill in the template once more and place this in the second 8 bars (Note: when you fill in a template, you get a new object that is no longer considered a template as it is completely filled). "
     + "If nothing matches an edit type, return no tool. You also have the ability to store/retrieve templates and score segments to/from memory with a name identifier so that they can be reused (Note: operations do not happen in place automatically)."
     + "Do not worry about missing details like which measures/staves/values are meant. "
-    + "If the user gives no location on where something should happen, assume the user means their current selection and tab."
+    + "If the user gives no location on where something should happen, assume the user means their current selection and tab. Consider the type of the current tab (score or template) to decide what specific commands should be used. Mention this in your roadmap."
     + "Finally, unless specified, the operation should typically be done in place."
 
 const ROADMAP_TOOL = {
@@ -408,10 +431,11 @@ const ROADMAP_TOOL = {
                                 + "\nfill_template: \"Fills a template's masked elements, essentially converting it from a template to a score and storing it to a new name on memory.\""
                                 + "\nwrite_score: \"Write a score onto another score. Essentially a copy and paste. Accepts multiple writes to perfrom at once to save tokens.\""
                                 + "\nread_tab: \"Use to read specific elements of a score/template, typically to locate places defined by the user (e.g. 'where the key changes to D major'). May also be used to read the user's current selection (e.g. 'where I am currently highlighting' or 'my current tab').\""
+                                + "\n\nedit_clef, edit_time_sig, edit_key_sig, edit_tempo, edit_add_instrument, edit_delete_staff, and edit_delete_measures are all only usable for editing scores, not templates."
                         },
                         intention: {
                             type: "string",
-                            description: "A brief description of what this step should do on a per step basis with any needed implementation details including the names of what will be read and stored to memory (e.g. generate a score with 16 measures and save to '16_bar_score')"
+                            description: "A brief description of what this step should do on a per step basis with any needed implementation details including the names of what will be read and stored to memory (e.g. generate a score with 16 measures and save to '16_bar_score')."
                         },
                         // macro_intention: {
                         //     type: "string",
@@ -419,7 +443,7 @@ const ROADMAP_TOOL = {
                         // }
                     }
                 },
-                description: "The steps that comprise the plan to complete the user's request. These should be in order of implementation. Tools may be used more than once (e.g. generate score, convert score to template, edit template, etc...)"
+                description: "The steps that comprise the plan to complete the user's request. These should be in order of implementation. Tools may be used more than once (e.g. generate score, convert score to template, edit template, etc...). If the user is asking for any edit to be made on a template, always use edit_template over any other edit like edit_delete_staff."
             }
         }
     }

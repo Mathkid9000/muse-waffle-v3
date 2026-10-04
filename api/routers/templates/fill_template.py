@@ -15,6 +15,9 @@ router = APIRouter()
 
 _DISPLAY = dict(zip(_TEMPLATE_INSTRUMENTS, _INSTR_DISPLAY))
 _FIGURES = {template: figure for figure, template in reversed(_QUALITIES.items())}
+# the corpus never named a diminished seventh, so QUAL_o7 has no embedding and would be handed to the
+# model as a MASK; the diminished triad is the nearest chord the model can actually be told
+_CANVAS_FIGURES = {**_FIGURES, "dim7": "dim"}
 # the order rows of the same beat are written in, mirroring tokenize_score_as_text's own priority;
 # a masked block goes last, after whatever its first bar places before it
 _KINDS = ("key", "time", "tempo", "clef", "chord", "note", "masked")
@@ -73,10 +76,13 @@ def _canvas(template) -> list[tuple[str, str, str, str, str]]:
                 rows.append((advance, pos, tok("DUR", None if it.duration is None else round(it.duration * SUB)),
                              tok("PITCH", it.pitch), tok("VOICE", it.voice_idx)))
             case "chord":
-                root = m21.roman.RomanNumeral(it.degree, key).root().pitchClass if it.degree else None
+                # degree keeps alterations (bVII); rootNumeral is the plain scale degree, often given as a digit
+                numeral = it.degree or it.rootNumeral
+                if numeral and numeral.isdigit(): numeral = int(numeral)
+                root = m21.roman.RomanNumeral(numeral, key).root().pitchClass if numeral else None
                 degree = None if root is None else (root - key.asKey().tonic.pitchClass) % 12
                 rows.append((advance, pos, tok("DEG", degree), tok("ROOT", root),
-                             tok("QUAL", _FIGURES.get(it.quality) if it.quality else None)))
+                             tok("QUAL", _CANVAS_FIGURES.get(it.quality) if it.quality else None)))
 
     rows.append(("EOS", "", "", "", ""))
     return rows
