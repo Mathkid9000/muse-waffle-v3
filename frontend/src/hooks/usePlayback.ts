@@ -1,4 +1,5 @@
 import { useState, useRef } from 'react'
+import { useStore } from '../store'
 import { getCurrentMidi, getMeasureStartTimes } from './useVerovio'
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -132,7 +133,11 @@ export function usePlayback() {
     reverbRef.current = reverb
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const activeTracks = midi.tracks.filter((t: any) => t.notes.length > 0)
+    const noted = midi.tracks.filter((t: any) => t.notes.length > 0)
+    // Play only the selected staves (track order matches staff order); none selected = all
+    const parts = useStore.getState().selection?.parts
+    const picked = parts?.length ? noted.filter((_: unknown, i: number) => parts.includes(i)) : noted
+    const activeTracks = picked.length ? picked : noted
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const samplers = activeTracks.map((track: any) =>

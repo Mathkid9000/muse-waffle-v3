@@ -23,13 +23,13 @@ export default function PlaybackBar() {
     <div className={styles.bar}>
       <button
         className={playing ? styles.stopBtn : styles.playBtn}
-        onClick={() => (playing ? stop() : play(fromMeasure))}
+        onMouseDown={(e) => { e.stopPropagation(); (playing ? stop() : play(fromMeasure)) }}
         disabled={loading}
         title={playing ? 'Stop' : 'Play'}
       >
-        {playing ? '■' : '▶'}
+        {playing ? '-' : '▶'}
       </button>
-      <label className={styles.label}>
+      {/* <label className={styles.label}>
         From measure
         <input
           type="number"
@@ -39,8 +39,8 @@ export default function PlaybackBar() {
           disabled={playing}
           className={styles.input}
         />
-      </label>
-      <label className={styles.label}>
+      </label> */}
+      {/* <label className={styles.label}>
         Vol
         <input
           type="range"
@@ -53,7 +53,7 @@ export default function PlaybackBar() {
         />
       </label>
       {loading && <span className={styles.loading}>Loading…</span>}
-      {playing && <span className={styles.playing}>Playing…</span>}
+      {playing && <span className={styles.playing}>Playing…</span>} */}
     </div>
   )
 }

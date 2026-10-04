@@ -1,20 +1,22 @@
 .bar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 6px 16px;
-  background: var(--background-grey);
-  border-top: 1px solid var(--text);
-  flex-shrink: 0;
-  height: 40px;
+  display: block;
+  padding: 5px;
+  border: 1px solid var(--background);
+  background: var(--transparent-accent);
+  height: fit-content;
+  width: fit-content;
+  position: absolute;
+  right: 10px;
+  top: 10px;
+  z-index: 999;
 }
 
 .playBtn, .stopBtn {
   width: 32px;
-  height: 28px;
+  height: 32px;
   border: none;
-  border-radius: 4px;
   font-size: 14px;
+  line-height: 32px;
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -22,13 +24,14 @@
 }
 
 .playBtn {
-  background: var(--primary);
+  background: var(--background-green2);
   color: #fff;
 }
 
 .stopBtn {
   background: #cb5148;
   color: #fff;
+  line-height: 12px !important;
 }
 
 .label {

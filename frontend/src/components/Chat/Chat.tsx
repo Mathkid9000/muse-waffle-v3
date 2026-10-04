@@ -255,7 +255,7 @@ export default function Chat() {
                             }
 
                             event = event as ThoughtProcessEvent
-                            if (event.loading) return
+                            // if (event.loading && expandedThoughts !== -1) return
 
                             return (
                                 <div className={containerClassList.join(' ')} onClick={() => { if (event.input !== '') handleExpandThought(idx) } }>
@@ -296,9 +296,23 @@ export default function Chat() {
                                                 <ul className={styles.thoughtText}>
                                                     {
                                                         Object.entries(event.input).map((entry) => (
-                                                            <li className={[ styles.thoughtTextListItem, styles.codeText ].join(' ')}>{entry[0]} = "{String(entry[1])}"</li>
+                                                            Array.isArray(entry[1]) ? (
+                                                                <ul className={styles.thoughtText}>
+                                                                    {entry[1].map((v: any) => (
+                                                                        typeof v === 'object' ? (
+                                                                            Object.entries(v).map((subEntry) => (
+                                                                                <li className={[ styles.thoughtTextListItem, styles.codeText ].join(' ')}>{subEntry[0]} = "{String(subEntry[1])}"</li>
+                                                                            ))
+                                                                        ) : (
+                                                                            <li className={[ styles.thoughtTextListItem, styles.codeText ].join(' ')}>{String(v)}</li>
+                                                                        )
+                                                                    ))}
+                                                                </ul>
+                                                            ) : (
+                                                                <li className={[ styles.thoughtTextListItem, styles.codeText ].join(' ')}>{entry[0]} = "{String(entry[1])}"</li>
+                                                            )
                                                         ))
-                                                    }													
+                                                    }
                                                 </ul>
                                             ) : (
                                                 <span className={styles.thoughtText}>

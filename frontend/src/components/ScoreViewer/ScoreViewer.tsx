@@ -10,6 +10,7 @@ import { applyClaudeEdit } from '../../api/applyClaudeEdit'
 import { promptTemplateAnthropic } from '../../api/claudeTemplates'
 import { tabTemplate, tabXml } from '../../types'
 import { templateToXml } from '../../api/templates'
+import PlaybackBar from '../PlaybackBar/PlaybackBar'
 
 const MEASURE_SEL = 'g.measure'
 const STAFF_SEL = 'g.staff'
@@ -187,7 +188,6 @@ export default function ScoreViewer() {
   const resetPromptHost = () => {
     const host = document.createElement('div')
     // Read the active tab at call time — this root is created once and outlives tab switches.
-    createRoot(host).render(<InscorePrompt getXml={() => useStore.getState().getXml(useStore.getState().activeTab)} getSelection={() => useStore.getState().selection!} setXml={(xml) => setXml(xml, useStore.getState().activeTab)} />)
     promptHostRef.current = host
     return () => host.remove()
   }
@@ -730,6 +730,7 @@ export default function ScoreViewer() {
       onMouseUp={onMouseUp}
       onContextMenu={(e) => { if (e.ctrlKey || e.metaKey) e.preventDefault() }}
     >
+      <PlaybackBar />
       {/* Text view wins over the engraving: a template tab is normally engraved the moment
           it has items (see buildXmlFromTemplate above), so gating on !xml alone would keep
           the paper — and the toggle — invisible. */}

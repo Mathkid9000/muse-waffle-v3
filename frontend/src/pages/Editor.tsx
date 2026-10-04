@@ -3,7 +3,6 @@ import { useParams } from 'react-router-dom'
 import Toolbar from '../components/Toolbar/Toolbar'
 import Chat from '../components/Chat/Chat'
 import ScoreViewer from '../components/ScoreViewer/ScoreViewer'
-import PlaybackBar from '../components/PlaybackBar/PlaybackBar'
 import { useAuth } from '../contexts/AuthContext'
 import { useStore } from '../store'
 import { fetchScoreXml, parseScoreDoc } from '../lib/scores'
@@ -52,7 +51,6 @@ export default function Editor() {
           <main className={styles.score}>
             <ScoreViewer />
           </main>
-          <PlaybackBar />
         </div>
         <Chat />
       </div>

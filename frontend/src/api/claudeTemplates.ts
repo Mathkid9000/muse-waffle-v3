@@ -1,7 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { anthropic, type ScoreSelection } from "./claudeTools";
 import type { ToolUseBlock } from "@anthropic-ai/sdk/resources";
-import type { AnyTemplateItem, ChatItem, Tab, ThoughtProcessEvent, ThoughtProcessTask } from '../types';
+import type { AnyTemplateItem, ChatItem, ChordTemplateItem, Tab, ThoughtProcessEvent, ThoughtProcessTask } from '../types';
 import { api } from './client';
 import { applyClaudeEdit } from './applyClaudeEdit';
 import { fillTemplate, scoreToTemplate } from './templates';
@@ -99,7 +99,6 @@ export async function promptTemplateAnthropic(chatHistory: ChatItem[], prompt: s
         const toolUses = toolMessage.content.filter((b): b is ToolUseBlock => b.type === "tool_use");
         if (selectedTool === "complete") {
             const recap = (toolUses[0].input as Record<string, unknown>)['recap']
-            console.log(toolUses[0], recap)
             pushCallback({ title: '', input: recap, tokensIn: toolSelectionMessage.usage.input_tokens + toolMessage.usage.input_tokens,
                 tokensOut: toolSelectionMessage.usage.output_tokens + toolMessage.usage.output_tokens, isRecap: true
             }) 
@@ -284,12 +283,14 @@ async function processCommand(command: { tool: string, input: Record<string, unk
                 let source = memory[in_key] as string | null
                 const state = useStore.getState()
                 if (source) {
-                    const result = getReadResults([ read['element'] as ReadQuery ], source!, in_key, state.selection)
+                    const result = read['element'] === 'chord' ? describeChords(source as unknown as AnyTemplateItem[])
+                        : getReadResults([ read['element'] as ReadQuery ], source!, in_key, state.selection)
                     readOutput.push("# Read for tab: " + in_key + "\n" + result)
                 }
                 else {
                     source = memory[state.activeTab] as string | null
-                    const result = getReadResults([ read['element'] as ReadQuery ], source!, state.activeTab, state.selection)
+                    const result = read['element'] === 'chord' ? describeChords(source as unknown as AnyTemplateItem[])
+                        : getReadResults([ read['element'] as ReadQuery ], source!, state.activeTab, state.selection)
                     readOutput.push("# Read for tab: " + state.activeTab + "\n" + result)
                 }
             }
@@ -311,6 +312,17 @@ function keepInstruments(source: AnyTemplateItem[], edited: AnyTemplateItem[]): 
     if (instruments.length === 0) return edited
     console.warn('edit_template dropped every instrument item — re-adding', instruments)
     return [...instruments, ...edited]
+}
+
+// Chords aren't part of a template's XML rendering — the item list is the only place they
+// live — so read_tab's "chord" element reads straight off the template's items instead of
+// going through readContext's XML-based getReadResults.
+function describeChords(template: AnyTemplateItem[]): string {
+    const chords = (template ?? []).filter((i): i is ChordTemplateItem => i.kind === 'chord')
+    if (chords.length === 0) return "No chords found."
+    return chords
+        .map(c => `m${c.measure ?? '?'}${c.pos != null ? `.${c.pos}` : ''}: ${c.rootNumeral ?? c.degree ?? '?'}${c.quality ?? ''}`)
+        .join("\n")
 }
 
 function saveToMemory(memory: Record<string, string | AnyTemplateItem[]>, key: string, value: string | AnyTemplateItem[]) {
@@ -955,7 +967,7 @@ const TOOLS = {
                         properties: {
                             element: {
                                 type: "string",
-                                enum: [ "clef", "key_signature", "time_signature", "tempo", "staves", "measure_count", "selection", "tab" ]
+                                enum: [ "clef", "key_signature", "time_signature", "tempo", "staves", "measure_count", "selection", "tab", "chord" ]
                             },
                             memory_name: {
                                 type: "string",
@@ -963,7 +975,7 @@ const TOOLS = {
                             }
                         }
                     },
-                    description: "Aspects to read. clef=per-staff clef changes; key_signature/time_signature/tempo=value at measure 1 and every measure it changes; staves=instrument roster with 0-based staff_num; measure_count=number of measures; selection=the measure(s) and staff/staves the user has selected on the score."
+                    description: "Aspects to read. clef=per-staff clef changes; key_signature/time_signature/tempo=value at measure 1 and every measure it changes; staves=instrument roster with 0-based staff_num; measure_count=number of measures; selection=the measure(s) and staff/staves the user has selected on the score; chord=every chord item defined on a template, with its measure/position, roman numeral and quality."
                 }
             },
             required: [ "queries" ]
