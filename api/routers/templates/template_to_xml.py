@@ -117,9 +117,10 @@ def _run_conversion(template: list[AnyTemplateItem]) -> str:
             el = tempo21.MetronomeMark(number=it.tempo) if it.tempo is not None else _blank('tempo')
             placed.setdefault((top_voice, it.measure), []).append((_pos(it), el))
         elif it.kind == 'chord':
-            if it.degree and it.quality:
-                root = roman21.RomanNumeral(it.degree, current_key).root().name
-                el = harmony21.ChordSymbol(root + _FIGURES.get(it.quality, ''))
+            if (it.degree or it.rootNumeral) and it.quality:
+                # root = roman21.RomanNumeral(, key21.Key('C')).root().name
+                root = it.degree if it.degree else ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII'][int(it.rootNumeral)-1]
+                el = expr21.TextExpression(root + _FIGURES.get(it.quality, ''))
                 chords.add(it.measure, round(_pos(it) * SUB), el)
             else:
                 el = _blank('chord')

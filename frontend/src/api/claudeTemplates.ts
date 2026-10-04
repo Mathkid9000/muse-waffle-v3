@@ -465,7 +465,7 @@ const TEMPLATE_ITEM_LOCATION = {
     },
     pos: {
         type: "number",
-        description: "The beat position (or rhythm) within the measure this item belongs to where 1 is a quarter note, 0.5 is an eighth note, etc... Omit to mask this note's rhythmic placement, to leave this item blank."
+        description: "The beat position (or rhythm) within the measure this item belongs to where 0 is the first beat of the measure, 1 is after a quarter note duration, and 0.5 is after an eighth note duration, etc... Omit to mask this note's rhythmic placement, to leave this item blank."
     }
 }
 
