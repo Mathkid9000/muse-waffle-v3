@@ -108,6 +108,15 @@ export default function Chat() {
     const resizeStartX = useRef(0)
     const resizeStartWidth = useRef(400)
 
+    function onKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
+        const key = e.key.toLowerCase()
+        if (key === 'delete' && (!document.activeElement || document.activeElement?.tagName !== 'INPUT')) {
+            e.preventDefault()
+            useStore.getState().checkpoint('Delete Chat')
+            deleteChat(activeChat)
+        }
+    }
+
     useEffect(() => {
         function onMouseMove(e: MouseEvent) {
             if (!isResizing.current) return
@@ -118,7 +127,8 @@ export default function Chat() {
             isResizing.current = false
             document.body.style.cursor = ''
             document.body.style.userSelect = ''
-        }
+        }    
+
         window.addEventListener('mousemove', onMouseMove)
         window.addEventListener('mouseup', onMouseUp)
         return () => {
@@ -201,7 +211,7 @@ export default function Chat() {
 	}
 
     return (
-        <>
+        <div onKeyDown={onKeyDown}>
             <div className={styles.panel} style={ { borderTop: "1px solid grey", width: panelWidth } }>
                 <div className={styles.resizeHandle} onMouseDown={handleResizeStart} />
                 <div className={styles.section}>
@@ -356,6 +366,6 @@ export default function Chat() {
                     </div>
                 </div>
             </div>
-        </>
+        </div>
     )
 }

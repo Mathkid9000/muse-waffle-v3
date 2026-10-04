@@ -18,6 +18,7 @@ export interface Snapshot {
   tabs: Tab[]
   activeTab: string
   label: string
+  chats: ChatSession[]
 }
 
 interface AppState {
@@ -203,15 +204,16 @@ export const useStore = create<AppState>()(persist((set, get) => ({
   // Checkpoints are taken once per logical action (a whole Claude run, a tab delete) rather
   // than on every set, so streaming setXml calls don't each become an undo step.
   checkpoint: (label) =>
-    set((s) => ({ past: [...s.past, { tabs: s.tabs, activeTab: s.activeTab, label }].slice(-HISTORY_MAX), future: [] })),
+    set((s) => ({ past: [...s.past, { tabs: s.tabs, activeTab: s.activeTab, label, chats: s.chats }].slice(-HISTORY_MAX), future: [] })),
   undo: () =>
     set((s) => {
       const snap = s.past.at(-1)
       if (!snap) return {}
       return {
         past: s.past.slice(0, -1),
-        future: [...s.future, { tabs: s.tabs, activeTab: s.activeTab, label: snap.label }],
+        future: [...s.future, { tabs: s.tabs, activeTab: s.activeTab, label: snap.label, chats: snap.chats }],
         tabs: snap.tabs,
+        chats: snap.chats,
         activeTab: snap.tabs.some((t) => t.name === snap.activeTab) ? snap.activeTab : 'Main',
         redrawNonce: s.redrawNonce + 1,
       }
@@ -222,8 +224,9 @@ export const useStore = create<AppState>()(persist((set, get) => ({
       if (!snap) return {}
       return {
         future: s.future.slice(0, -1),
-        past: [...s.past, { tabs: s.tabs, activeTab: s.activeTab, label: snap.label }],
+        past: [...s.past, { tabs: s.tabs, activeTab: s.activeTab, label: snap.label, chats: snap.chats }],
         tabs: snap.tabs,
+        chats: snap.chats,
         activeTab: snap.tabs.some((t) => t.name === snap.activeTab) ? snap.activeTab : 'Main',
         redrawNonce: s.redrawNonce + 1,
       }

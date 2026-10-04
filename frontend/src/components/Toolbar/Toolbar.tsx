@@ -119,14 +119,7 @@ export default function Toolbar() {
         e.preventDefault()
         undo()
       }
-
-      if (key === 'delete' && document.activeElement?.tagName === 'BUTTON') {
-        const name = (document.activeElement?.textContent as string).replace('×', '').trim()
-        if (chats.some(t => t.name === name)) {
-          e.preventDefault()
-          deleteChat(name)
-        }
-      }
+      // if (key === 'space')
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
