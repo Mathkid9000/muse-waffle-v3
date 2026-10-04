@@ -119,7 +119,6 @@ export default function Toolbar() {
         e.preventDefault()
         undo()
       }
-      // if (key === 'space')
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)

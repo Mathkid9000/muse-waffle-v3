@@ -11,6 +11,7 @@ import { promptTemplateAnthropic } from '../../api/claudeTemplates'
 import { tabTemplate, tabXml } from '../../types'
 import { templateToXml } from '../../api/templates'
 import PlaybackBar from '../PlaybackBar/PlaybackBar'
+import { usePlayback } from '../../hooks/usePlayback'
 
 const MEASURE_SEL = 'g.measure'
 const STAFF_SEL = 'g.staff'
@@ -168,6 +169,8 @@ export default function ScoreViewer() {
   const staffCountRef = useRef(0)
   const lastSelKeyRef = useRef<string>('')
   const zoomRef = useRef(zoom)
+  const playbackRef = useRef<HTMLDivElement>(null)
+  const playback = usePlayback()
   zoomRef.current = zoom
   // True while a Ctrl+right-drag pan gesture is in progress (transform is updated
   // imperatively during the drag, then committed to the store on release).
@@ -582,6 +585,9 @@ export default function ScoreViewer() {
     // Only the left button drives selection.
     if (e.button !== 0) return
     e.preventDefault()
+    // preventDefault above also blocks the browser's focus-on-click, so focus explicitly
+    // for onKeyDown to receive keys.
+    outerRef.current?.focus()
     dragStartClientRef.current = { x: e.clientX, y: e.clientY }
     lastSelKeyRef.current = ''
     buildRectCache()
@@ -661,6 +667,15 @@ export default function ScoreViewer() {
     hideMarquee()
   }
 
+  function onKeyDown(e: React.KeyboardEvent) {
+    if (e.key === ' ' && !e.repeat) {
+      e.preventDefault()
+      e.stopPropagation()
+      if (playback.playing) playback.stop()
+      else if (!playback.loading) playback.play(selection?.start ?? 1)
+    }
+  }
+
   // Ctrl + right-drag pans the camera. The transform is updated imperatively on the
   // inner element during the gesture (no React re-render per move), then committed to
   // the store on release. Window listeners ensure the gesture ends even if the cursor
@@ -691,28 +706,28 @@ export default function ScoreViewer() {
     window.addEventListener('mouseup', onUp)
   }
 
- async function handleBlankScoreInput(e: React.KeyboardEvent) {
-    if (e.key !== 'Enter') return
+//  async function handleBlankScoreInput(e: React.KeyboardEvent) {
+//     if (e.key !== 'Enter') return
 
-    console.log(e.target.value)
-    const prompt = e.target.value
-    const outputXml = await promptTemplateAnthropic(prompt, useStore.getState().getXml('Main'), useStore.getState().tabs)
-    console.log(outputXml)
-    if (outputXml) {
-      useStore.getState().checkpoint('Claude Edit')
-      setXml(outputXml as string, 'Main')
-      useStore.getState().resetCamera()
-    }
-    // const response = await promptAnthropic(prompt, '', 
-    //   (thought) => {console.log(thought)}, 
-    //   (title) => {console.log(title)}, null)
+//     console.log(e.target.value)
+//     const prompt = e.target.value
+//     const outputXml = await promptTemplateAnthropic(prompt, useStore.getState().getXml('Main'), useStore.getState().tabs)
+//     console.log(outputXml)
+//     if (outputXml) {
+//       useStore.getState().checkpoint('Claude Edit')
+//       setXml(outputXml as string, 'Main')
+//       useStore.getState().resetCamera()
+//     }
+//     // const response = await promptAnthropic(prompt, '', 
+//     //   (thought) => {console.log(thought)}, 
+//     //   (title) => {console.log(title)}, null)
 
-    // console.log(response)
-    // const edits = Array.isArray(response[0]) ? response[0] : []
-    // for (const { tool, input } of edits) {
-    //   applyClaudeEdit(tool, input, getXml(activeTab) ?? '', (xml) => setXml(xml, activeTab))
-    // }
-  }
+//     // console.log(response)
+//     // const edits = Array.isArray(response[0]) ? response[0] : []
+//     // for (const { tool, input } of edits) {
+//     //   applyClaudeEdit(tool, input, getXml(activeTab) ?? '', (xml) => setXml(xml, activeTab))
+//     // }
+//   }
 
   async function buildXmlFromTemplate() {
     const tabName = tab?.name
@@ -725,13 +740,15 @@ export default function ScoreViewer() {
   return (
     <div
       ref={outerRef}
+      tabIndex={0}
       className={styles.outer}
       onMouseDown={onMouseDown}
       onMouseMove={onMouseMove}
       onMouseUp={onMouseUp}
+      onKeyDown={onKeyDown}
       onContextMenu={(e) => { if (e.ctrlKey || e.metaKey) e.preventDefault() }}
     >
-      <PlaybackBar />
+      <PlaybackBar ref={playbackRef} playback={playback} />
       {/* Text view wins over the engraving: a template tab is normally engraved the moment
           it has items (see buildXmlFromTemplate above), so gating on !xml alone would keep
           the paper — and the toggle — invisible. */}

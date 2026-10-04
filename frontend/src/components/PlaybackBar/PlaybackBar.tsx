@@ -1,14 +1,16 @@
-import { useState } from 'react'
+import React, { useState, type Ref } from 'react'
 import { usePlayback } from '../../hooks/usePlayback'
 import { useStore } from '../../store'
 import styles from './PlaybackBar.module.css'
 
-export default function PlaybackBar() {
+export default React.forwardRef(PlaybackBar);
+
+export function PlaybackBar({ playback }: { playback: ReturnType<typeof usePlayback> }, ref: Ref<HTMLDivElement>) {
   const getXml = useStore((s) => s.getXml)
   const activeTab = useStore((s) => s.activeTab)
   useStore((s) => s.tabs) // Forces playback bar to load
   const selection = useStore((s) => s.selection)
-  const { playing, loading, play, stop, volume, setVolume } = usePlayback()
+  const { playing, loading, play, stop } = playback
   const [fromMeasure, setFromMeasure] = useState(1)
 
   // Sync fromMeasure with score selection when it changes
@@ -20,7 +22,7 @@ export default function PlaybackBar() {
   if (!getXml(activeTab)) return null
 
   return (
-    <div className={styles.bar}>
+    <div className={styles.bar} ref={ref}>
       <button
         className={playing ? styles.stopBtn : styles.playBtn}
         onMouseDown={(e) => { e.stopPropagation(); (playing ? stop() : play(fromMeasure)) }}

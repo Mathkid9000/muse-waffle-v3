@@ -5,6 +5,7 @@
   background: var(--background);
   cursor: crosshair;
   user-select: none;
+  outline: none;
 }
 
 .marquee {
