@@ -724,7 +724,11 @@ def tokens_to_score(tokens, labels=None):
             m, pos, bucket, _, _ = parse_tok(tok)
             mm = music21.tempo.MetronomeMark(number=bucket * 16)
             mm.offset = pos / SUBDIVISIONS_PER_QUARTER
-            general_score_elements.setdefault(m, []).append(mm)
+            marks = voice_score_elements.setdefault((0, m), [])
+            # one tempo per spot, written once above the top staff: the first row to name the spot
+            # wins, so a generated block's header beats the mark it replaces
+            if not any(isinstance(e, music21.tempo.MetronomeMark) and e.offset == mm.offset for e in marks):
+                marks.append(mm)
         # add dynamic
         if tok[2].startswith('DYN'):
             m, pos, dyn, _, voz = parse_tok(tok)

@@ -198,6 +198,17 @@ def test_a_chord_symbol_does_not_print_or_suppress_accidentals():
     assert [n['accidental'] for n in m0] == [None, None]
 
 
+def test_a_tempo_is_written_once_above_the_top_staff():
+    # two staves, and the same spot named twice (a generated header over the mark it replaces)
+    two = [HEADER[0], HEADER[1], ('INSTR_piano', '', '', '', 'VOICE_1'), HEADER[2]]
+    rows = [('M_0', 'POS_0', 'NUM_4', 'DEN_4', ''), ('M_0', 'POS_0', 'TEMPO_6', '', ''),
+            ('M_0', 'POS_0', 'TEMPO_8', '', ''), note(0, 0, 96, 60), note(0, 0, 96, 48, voice=1)]
+    root = ET.fromstring(tokens_to_score([*two, *rows, ('EOS', '', '', '', '')]))
+    per_part = [len(part.findall('.//metronome')) for part in root.findall('part')]
+    assert per_part == [1, 0]
+    assert root.findtext('.//metronome/per-minute') == '96'
+
+
 def test_an_imported_score_with_blank_and_gapped_bars_is_completed():
     import music21 as m21
     from notation import finish_edited

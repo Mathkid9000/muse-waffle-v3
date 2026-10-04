@@ -58,6 +58,13 @@ def _voice(row):
     return int(row[4].split('_')[-1]) if row[4].startswith('VOICE') else None
 
 
+def _rewritten(row, targets):
+    """Whether a row in a rewritten block comes from the new material rather than the old score:
+    every row when all staves are rewritten, otherwise the target staves' rows plus the chord
+    symbols, which are read off every staff's notes and so change whenever any of them does."""
+    return targets is None or _voice(row) in targets or row[2].startswith('DEG')
+
+
 def _bar_after(bar, f0):
     """The absolute bar a row lands in, given the bar the row before it landed in. This is
     resolve_bars' rule one row at a time, which is what streaming needs: the bar has to be known
@@ -291,7 +298,7 @@ def generate_stream(xml_str, start_measure, instruments, parts, key, time_sig, t
         prefix = [ row for row, bar in zip(rows, bars) if bar < start ]
         if overwrite:
             kept = [ row for row, bar in zip(absolute, bars) if start <= bar <= end
-                     and targets is not None and _voice(row) not in targets ]
+                     and not _rewritten(row, targets) ]
             tail = [ row for row, bar in zip(absolute, bars) if bar > end ]
         else:
             kept = []
@@ -306,7 +313,7 @@ def generate_stream(xml_str, start_measure, instruments, parts, key, time_sig, t
     for done, rows_out in _stream_bars(model, tokenizer, prefix, start, num_bars, max_new,
                                        temperature, top_k, cfg['max_seq_len']):
         block = [ (f'M_{bar}', *row[1:]) for bar, row in rows_out
-                  if bar >= start and (targets is None or _voice(row) in targets) ]
+                  if bar >= start and _rewritten(row, targets) ]
         xml = _to_xml([ *prefix, *block, *kept, *tail ])
         if xml is None: continue
         rendered += 1
@@ -348,8 +355,9 @@ def infill_stream(xml_str, start_measure, end_measure, parts=None, max_new=1500,
     left to right, so the gap is conditioned on the music before it; the measures after it are
     spliced back on unchanged, keeping their own bar numbers, so the rest of the score doesn't
     move while the gap streams. With `parts` given, only those staves are resampled and the rest
-    of the gap -- the other staves, plus the key, time, tempo, barlines and chord symbols the
-    whole score shares -- is kept as it was, as vertical context for the ear if not for the model.
+    of the gap -- the other staves, plus the key, time, tempo and barlines the whole score
+    shares -- is kept as it was, as vertical context for the ear if not for the model. Chord
+    symbols are the exception: they are the harmony of every staff, so the model's replace them.
     """
     model, cfg, tokenizer = _load(model_name, device)
     rows = _score_rows(xml_str)
@@ -364,14 +372,14 @@ def infill_stream(xml_str, start_measure, end_measure, parts=None, max_new=1500,
     # to its own absolute bar, so it cannot drift if the gap fills with a different number of rows
     prefix = [ row for row, bar in zip(rows, bars) if bar < start ]
     kept = [ row for row, bar in zip(absolute, bars)
-             if start <= bar <= end and targets is not None and _voice(row) not in targets ]
+             if start <= bar <= end and not _rewritten(row, targets) ]
     tail = [ row for row, bar in zip(absolute, bars) if bar > end ]
     log(f'Filling bars {start_measure}-{end_measure} of {max(bars) + 1} with {model_name}')
 
     for done, rows_out in _stream_bars(model, tokenizer, prefix, start, end - start + 1, max_new,
                                        temperature, top_k, cfg['max_seq_len']):
         filled = [ (f'M_{bar}', *row[1:]) for bar, row in rows_out
-                   if bar >= start and (targets is None or _voice(row) in targets) ]
+                   if bar >= start and _rewritten(row, targets) ]
         xml = _to_xml([ *prefix, *filled, *kept, *tail ])
         if xml is None: continue
         log(f'Filled bar {done} of {end - start + 1}')
