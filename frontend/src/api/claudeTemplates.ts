@@ -296,6 +296,13 @@ async function processCommand(command: { tool: string, input: Record<string, unk
 
                 saveToMemory(memory, out_key, newXml)
             }
+
+            const open = (command.input['open'] ?? '') as string
+            console.log(command.input, open)
+            if (open !== '') {
+                console.log(useStore.getState().tabs)
+                useStore.getState().setActiveTab(open);
+            }
             break
         }
         case "read_score": {
@@ -429,7 +436,7 @@ const ROADMAP_TOOL = {
                                 + "\ncreate_template_from_score: \"Create a template from an existing score in memory. To be used in combination with generate_score when the user does not have specific intentions (e.g. melodic ideas, rhythmic ideas, chord progs, etc...)\""
                                 + "\nedit_template: \"Edit a template already stored in memory (e.g. to strip it down/mask some of its musical elements). Use this to alter a template so that there is more variance when it is filled.\""
                                 + "\nfill_template: \"Fills a template's masked elements, essentially converting it from a template to a score and storing it to a new name on memory.\""
-                                + "\nwrite_score: \"Write a score onto another score. Essentially a copy and paste. Accepts multiple writes to perfrom at once to save tokens.\""
+                                + "\nwrite_score: \"Write a score onto another score. Essentially a copy and paste. Accepts multiple writes to perfrom at once to save tokens. Also lets you open a score if the user requires it.\""
                                 + "\nread_tab: \"Use to read specific elements of a score/template, typically to locate places defined by the user (e.g. 'where the key changes to D major'). May also be used to read the user's current selection (e.g. 'where I am currently highlighting' or 'my current tab').\""
                                 + "\n\nedit_clef, edit_time_sig, edit_key_sig, edit_tempo, edit_add_instrument, edit_delete_staff, and edit_delete_measures are all only usable for editing scores, not templates."
                         },
@@ -973,6 +980,10 @@ const TOOLS = {
                         description: "A singular write command. Use multiple to make multiple edits. Edits made in the order provided."
                     },
                     description: "The write commands, carried out in the order given."
+                },
+                open: {
+                    type: "string",
+                    description: "Enter an existing tab or written-to tab to draw the user's attention by opening it. Omit to not open the tab."
                 }
             },
             required: [ "writes" ]
