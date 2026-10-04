@@ -114,14 +114,13 @@
 }
 
 .chatTabs {
-  display: flex;
-  gap: 5px;
+  display: block;
   width: calc(100% - 12px);
-  height: 26px;
+  height: fit-content;
   margin-bottom: 8px;
   margin-right: 12px;
-  overflow-x: auto;
-  scrollbar-width: none;
+  /* overflow-x: auto; */
+  /* scrollbar-width: none; */
   flex-shrink: 0;
 }
 
@@ -138,6 +137,7 @@
   cursor: pointer;
   white-space: nowrap;
   flex-shrink: 0;
+  margin: 3px;
 }
 
 .chatTab:hover {

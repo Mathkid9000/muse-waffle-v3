@@ -144,7 +144,7 @@ export default function Chat() {
         setInputPrompt("")
         setLoading(true)
         // One checkpoint for the whole run, so a single Undo reverts everything Claude did.
-        useStore.getState().checkpoint('Claude Edit')
+        useStore.getState().checkpoint('Chat Edit')
 
         promptWithThoughtProcess(prompt, chatName).catch((e: unknown) => {
             addNewThought({ title: 'Prompt failed', input: e instanceof Error ? e.message : String(e), tokensIn: 0, tokensOut: 0 }, chatName)
@@ -175,11 +175,13 @@ export default function Chat() {
 
         // await delay(1000 * (TEST_OBJ.length + 1))
         
-
+        
         addNewThought({ task: prompt, isPrompt: true }, chatName)
         const history = useStore.getState().getChat(chatName)?.history ?? []
 		const recap = await promptTemplateAnthropic(history, prompt, useStore.getState().tabs, (thought) => {
             addNewThought(thought, chatName)
+        }, (title) => {
+            chatName = useStore.getState().renameChat(chatName, title)
         })
 
         // A run that ends without a recap (no roadmap, no tool) has nothing to reduce, and

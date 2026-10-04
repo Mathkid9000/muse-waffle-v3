@@ -80,6 +80,7 @@ interface AppState {
   deleteChat: (chat: string) => void
   /** Patches one chat's fields (thoughts, history) in place. */
   updateChat: (chat: string, patch: Partial<ChatSession>) => void
+  renameChat: (chat: string, newName: string) => string
 
   setXml: (xml: string | null, key?: string) => void
   setTemplate: (xml: AnyTemplateItem[], key?: string) => void
@@ -269,6 +270,14 @@ export const useStore = create<AppState>()(persist((set, get) => ({
     }),
   updateChat: (chat, patch) =>
     set((s) => ({ chats: s.chats.map((c) => (c.name === chat ? { ...c, ...patch } : c)) })),
+  renameChat: (chat, newName) => {
+    const name = uniqueName(newName, get().chats.filter((c) => c.name !== chat).map((c) => c.name))
+    set((s) => ({
+      chats: s.chats.map((c) => (c.name === chat ? { ...c, name } : c)),
+      activeChat: s.activeChat === chat ? name : s.activeChat,
+    }))
+    return name
+  },
 
   // Loading a score replaces the document, so the old one's history can't apply to it.
   setTabs: (tabs) => set({ tabs: tabs, past: [], future: [] }),

@@ -38,6 +38,9 @@ export default function Toolbar() {
   const undoLabel = useStore((s) => s.past.at(-1)?.label)
   const redoLabel = useStore((s) => s.future.at(-1)?.label)
 
+  const chats = useStore((s) => s.chats)
+  const deleteChat = useStore((s) => s.deleteChat)
+
   const [ isFileDdOpen, setIsFileDdOpen ] = useState<boolean>(false)
   const [ isEditDdOpen, setIsEditDdOpen ] = useState<boolean>(false)
   const [ isViewDdOpen, setIsViewDdOpen ] = useState<boolean>(false)
@@ -115,6 +118,14 @@ export default function Toolbar() {
       } else if ((e.metaKey || e.ctrlKey) && key === 'z') {
         e.preventDefault()
         undo()
+      }
+
+      if (key === 'delete' && document.activeElement?.tagName === 'BUTTON') {
+        const name = (document.activeElement?.textContent as string).replace('×', '').trim()
+        if (chats.some(t => t.name === name)) {
+          e.preventDefault()
+          deleteChat(name)
+        }
       }
     }
     window.addEventListener('keydown', onKeyDown)

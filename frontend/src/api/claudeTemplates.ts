@@ -10,7 +10,7 @@ import { getPromptContext, getReadResults, type ReadQuery } from './readContext'
 
 const MAX_TURNS = 10;
 
-export async function promptTemplateAnthropic(chatHistory: ChatItem[], prompt: string, tabs: Tab[], pushCallback: (thought: ThoughtProcessEvent | ThoughtProcessTask) => void) {
+export async function promptTemplateAnthropic(chatHistory: ChatItem[], prompt: string, tabs: Tab[], pushCallback: (thought: ThoughtProcessEvent | ThoughtProcessTask) => void, pushChatRename: (title: string) => void) {
     // propogate memory with tab data
     const memory: Record<string, string | AnyTemplateItem[]> = {}
     tabs.forEach(t => {
@@ -42,6 +42,12 @@ export async function promptTemplateAnthropic(chatHistory: ChatItem[], prompt: s
         console.log('Found no roadmap. Terminating...')
         return []
     }
+    
+    const chatName = (roadmapTool.input as any)['chat_name'] as string | null
+    if (chatName !== null && chatName !== '') {
+        pushChatRename(chatName)
+    }
+
     const roadmap = "ROADMAP (complete these steps one by one):\n" + (roadmapTool.input as any).steps.map((s: { tool: string, intention: string }, idx: number) => 
         `# Step ${idx + 1} (tool=${s.tool}):\n${s.intention}`
     ).join('\n\n')
@@ -451,6 +457,10 @@ const ROADMAP_TOOL = {
                     }
                 },
                 description: "The steps that comprise the plan to complete the user's request. These should be in order of implementation. Tools may be used more than once (e.g. generate score, convert score to template, edit template, etc...). If the user is asking for any edit to be made on a template, always use edit_template over any other edit like edit_delete_staff."
+            },
+            chat_name: {
+                type: "string",
+                description: "A very brief title for the name of this chat. Take into consideration previous chats. Omit to keep old name or no name at all"
             }
         }
     }
