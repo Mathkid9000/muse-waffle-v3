@@ -11,8 +11,7 @@ export default function App() {
             <BrowserRouter basename={import.meta.env.BASE_URL}>
                 <Routes>
                     <Route path="/login" element={ <Login/> } />
-                    <Route path="/" element={ <Navigate to="/dashboard" replace /> } />
-                    <Route path="/dashboard" element={
+                    <Route path="/" element={
                         <ProtectedRoute><Dashboard /></ProtectedRoute>
                     } />
                     <Route path="/editor" element={

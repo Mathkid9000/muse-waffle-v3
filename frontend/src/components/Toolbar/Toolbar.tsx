@@ -301,8 +301,8 @@ export default function Toolbar() {
           Exit
           {isExitDdOpen && (
             <ul className={styles.dropdownContainer}>
-              <li className={styles.dropdownItem} onClick={async () => { await handleSave(); navigate('/dashboard') }}>Save and Exit</li>
-              <li className={styles.dropdownItem} onClick={() => navigate('/dashboard')}>Exit without Saving</li>
+              <li className={styles.dropdownItem} onClick={async () => { await handleSave(); navigate('/') }}>Save and Exit</li>
+              <li className={styles.dropdownItem} onClick={() => navigate('/')}>Exit without Saving</li>
             </ul>
           )}
         </button>

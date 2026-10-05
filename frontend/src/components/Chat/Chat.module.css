@@ -117,12 +117,13 @@
   display: block;
   width: calc(100% - 12px);
   height: fit-content;
-  margin-bottom: 8px;
-  margin-right: 12px;
+  padding-bottom: 20px;
   position: absolute;
   /* overflow-x: auto; */
   /* scrollbar-width: none; */
   flex-shrink: 0;
+  background: linear-gradient(to bottom, var(--background) 80%, transparent 100%);
+  z-index: 90;
 }
 
 .chatTab {

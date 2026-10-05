@@ -47,7 +47,7 @@ export default function Login() {
               data: {
                 name: data.username,
               },
-              emailRedirectTo: window.location.origin + '/dashboard',
+              emailRedirectTo: window.location.origin + '/',
             },
           });
 
@@ -84,7 +84,7 @@ export default function Login() {
             password: data.password,
             options: {
               // Ensure redirect stays on current origin
-              emailRedirectTo: window.location.origin + '/dashboard',
+              emailRedirectTo: window.location.origin + '/',
             },
           });
 
@@ -104,7 +104,7 @@ export default function Login() {
         }
 
         console.log("Login successful! Navigating to dashboard...");
-        navigate("/dashboard");
+        navigate("/");
       }
     } catch (err: any) {
       console.error("=== AUTH ERROR ===");
