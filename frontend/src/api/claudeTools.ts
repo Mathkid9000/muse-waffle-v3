@@ -1,14 +1,14 @@
-import Anthropic from '@anthropic-ai/sdk';
+import type Anthropic from '@anthropic-ai/sdk';
+import { claudeApi } from './client';
 import { getSharedToolkit } from '../hooks/useVerovio';
 import type { ToolUseBlock } from '@anthropic-ai/sdk/resources';
 import type { ThoughtProcessEvent, ThoughtProcessTask } from '../components/ScoreViewer/InscorePrompt'
 
-// Local dev only: the API key is bundled into the client, so never deploy this
-// build publicly — move the call behind the FastAPI backend before sharing.
-export const anthropic = new Anthropic({
-    apiKey: import.meta.env.VITE_ANTHROPIC_API_KEY,
-    dangerouslyAllowBrowser: true,
-});
+// Calls go through the FastAPI proxy, which attaches the signed-in user's own stored API key;
+// the key never reaches the browser. Same shape as the SDK client so call sites are unchanged.
+export const anthropic = {
+    messages: { create: claudeApi.messages },
+};
 
 export interface ScoreEdit {
     tool: string;

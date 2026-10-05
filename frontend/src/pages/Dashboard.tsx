@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import Avatar from '../components/Avatar/Avatar'
+import { claudeApi, type ClaudeKeyStatus } from '../api/client'
 import { useAuth } from '../contexts/AuthContext'
 import { formatDate, listScores, previewUrl, type ScoreRow } from '../lib/scores'
 import { useStore } from '../store'
@@ -22,6 +23,25 @@ export default function Dashboard() {
     if (user) listScores(user.id).then(setScores)
   }, [user])
 
+  // The key itself lives encrypted on the server; the page only ever learns its last 4 characters.
+  const [keyStatus, setKeyStatus] = useState<ClaudeKeyStatus | null>(null)
+  const [keyInput, setKeyInput] = useState('')
+  const [keyError, setKeyError] = useState('')
+
+  useEffect(() => {
+    if (user) claudeApi.getKey().then(setKeyStatus).catch(e => setKeyError(e.message))
+  }, [user])
+
+  async function updateKey(request: Promise<ClaudeKeyStatus>) {
+    setKeyError('')
+    try {
+      setKeyStatus(await request)
+      setKeyInput('')
+    } catch (e) {
+      setKeyError((e as Error).message)
+    }
+  }
+
   return (
     <>
       <header className={styles.headerBar}>
@@ -30,6 +50,22 @@ export default function Dashboard() {
           <Avatar profile={profile} />
         </div>
       </header>
+      <form className={styles.apiKeyBar} onSubmit={e => { e.preventDefault(); if (keyInput.trim()) updateKey(claudeApi.setKey(keyInput)) }}>
+        {keyStatus?.has_key ? (
+          <>
+            <span>Claude API key saved (…{keyStatus.last4})</span>
+            <button type="button" onClick={() => updateKey(claudeApi.deleteKey())}>Remove</button>
+          </>
+        ) : (
+          <>
+            <label htmlFor="claude-api-key">Claude API key</label>
+            <input id="claude-api-key" type="password" autoComplete="off" spellCheck={false} placeholder="sk-ant-..."
+              value={keyInput} onChange={e => setKeyInput(e.target.value)} />
+            <button type="submit">Save</button>
+          </>
+        )}
+        {keyError && <span className={styles.apiKeyError}>{keyError}</span>}
+      </form>
       <div className={styles.scoreGrid}>
         <div className={styles.background}></div>
         <div className={`${styles.scoreGridItem} ${styles.newScore}`} onClick={newScore}>

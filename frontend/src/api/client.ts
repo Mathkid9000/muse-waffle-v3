@@ -1,4 +1,6 @@
+import type Anthropic from '@anthropic-ai/sdk'
 import type { AnyTemplateItem } from "../types"
+import { supabase } from '../lib/supabase'
 
 const BASE = '/api'
 
@@ -156,6 +158,31 @@ async function post<T>(path: string, body: unknown): Promise<T> {
   })
   if (!res.ok) throw await errorFrom(res)
   return res.json()
+}
+
+// The Claude routes are per-user (each user's own stored API key), so they carry the Supabase session token.
+async function claudeFetch<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const { data: { session } } = await supabase.auth.getSession()
+  const res = await fetch(`${BASE}${path}`, {
+    method,
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session?.access_token ?? ''}` },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  })
+  if (!res.ok) throw await errorFrom(res)
+  return res.json()
+}
+
+export interface ClaudeKeyStatus {
+  has_key: boolean
+  last4: string | null
+}
+
+export const claudeApi = {
+  getKey: () => claudeFetch<ClaudeKeyStatus>('GET', '/claude/key'),
+  setKey: (key: string) => claudeFetch<ClaudeKeyStatus>('PUT', '/claude/key', { key }),
+  deleteKey: () => claudeFetch<ClaudeKeyStatus>('DELETE', '/claude/key'),
+  messages: (params: Anthropic.Messages.MessageCreateParamsNonStreaming) =>
+    claudeFetch<Anthropic.Messages.Message>('POST', '/claude/messages', params),
 }
 
 async function* streamPost(path: string, body: unknown): AsyncGenerator<StreamEvent> {

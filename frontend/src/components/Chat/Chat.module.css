@@ -172,7 +172,7 @@
   padding-left: 8px;
   font-family: 'Geist Pixel';
   font-size: 10px;
-  color: var(--disabled-text);
+  color: var(--accent);
   white-space: nowrap;
   flex-shrink: 0;
 }
@@ -277,7 +277,7 @@
   right: 12px;
   font-family: 'Geist Pixel';
   font-size: 10px;
-  color: var(--disabled-text);
+  color: var(--accent);
   transition: color 0.1s;
 }
 
