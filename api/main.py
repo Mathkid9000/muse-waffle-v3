@@ -37,7 +37,9 @@ app = FastAPI(title="Muse Waffle API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:4173"],
+    # production adds the frontend's origin(s) through ALLOWED_ORIGINS, comma-separated
+    allow_origins=["http://localhost:5173", "http://localhost:4173"]
+        + [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()],
     allow_methods=["*"],
     allow_headers=["*"],
 )

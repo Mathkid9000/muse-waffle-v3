@@ -2,7 +2,8 @@ import type Anthropic from '@anthropic-ai/sdk'
 import type { AnyTemplateItem } from "../types"
 import { supabase } from '../lib/supabase'
 
-const BASE = '/api'
+// Empty in dev (Vite proxies /api to localhost:8000); in production the API's own origin, e.g. https://api.example.com
+const BASE = `${import.meta.env.VITE_API_URL ?? ''}/api`
 
 // Creative
 export interface InfillRequest {
