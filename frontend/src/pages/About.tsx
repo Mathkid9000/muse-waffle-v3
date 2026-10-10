@@ -58,10 +58,10 @@ export default function About() {
   return (
     <>
       <header className={styles.headerBar}>
-        <Link to="/" className={styles.titleLink}>
+        <Link to={user ? '/' : '/login'} className={styles.titleLink}>
           <h1 className={styles.museWaffleTitle}>MUSEWAFFLE</h1>
         </Link>
-        <Link to="/" className={styles.headerButton}>{user ? 'Dashboard' : 'Sign in'}</Link>
+        <Link to={user ? '/' : '/login'} className={styles.headerButton}>{user ? 'Dashboard' : 'Sign in'}</Link>
       </header>
       <div className={styles.background}></div>
       <main className={styles.page}>
@@ -132,7 +132,7 @@ export default function About() {
         <section className={styles.cta}>
           <h2 className={styles.sectionTitle}>Try it!</h2>
           <p className={styles.bodyText}>Note: requires a Claude API Key</p>
-          <Link to="/" className={styles.ctaButton}>{user ? 'Open dashboard' : 'Get started'}</Link>
+          <Link to={user ? '/' : '/login'} className={styles.ctaButton}>{user ? 'Open Dashboard' : 'Get Started'}</Link>
         </section>
       </main>
     </>
