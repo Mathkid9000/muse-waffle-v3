@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import Avatar from '../components/Avatar/Avatar'
 import { claudeApi, type ClaudeKeyStatus } from '../api/client'
 import { useAuth } from '../contexts/AuthContext'
@@ -47,6 +47,7 @@ export default function Dashboard() {
       <header className={styles.headerBar}>
         <h1 className={styles.museWaffleTitle}>MUSEWAFFLE</h1>
         <div className={styles.avatarContainer}>
+          <Link to="/about" className={styles.aboutButton}>About</Link>
           <Avatar profile={profile} />
         </div>
       </header>

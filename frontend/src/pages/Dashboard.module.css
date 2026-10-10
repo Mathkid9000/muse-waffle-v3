@@ -46,6 +46,26 @@
     width: fit-content;
     height: fit-content;
     display: flex;
+    gap: 10px;
+}
+
+.aboutButton {
+    height: 40px;
+    padding: 0 12px;
+    line-height: 38px;
+    font-family: 'Jersey 15';
+    font-size: 24px;
+    letter-spacing: 2px;
+    text-decoration: none;
+    color: var(--text);
+    background-color: var(--background);
+    border: 1px solid var(--background);
+    box-shadow: 0 4px 0 rgba(0, 0, 0, 0.3);
+    transition: scale 0.05s;
+}
+
+.aboutButton:hover {
+    scale: 1.05;
 }
 
 .apiKeyBar {

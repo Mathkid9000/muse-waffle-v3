@@ -130,7 +130,8 @@ export default function Login() {
     try {
       // Build redirect URL - use current origin for better localhost support
       const baseUrl = import.meta.env.BASE_URL || '/';
-      const redirectTo = `${window.location.origin}${baseUrl}dashboard`.replace(/\/+/g, '/').replace(':/', '://');
+      // the dashboard lives at the root route
+      const redirectTo = `${window.location.origin}${baseUrl}`.replace(/\/+/g, '/').replace(':/', '://');
 
       console.log('OAuth redirect URL:', redirectTo);
 

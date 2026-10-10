@@ -1,0 +1,259 @@
+.headerBar {
+    composes: headerBar from './Dashboard.module.css';
+}
+
+.background {
+    composes: background from './Dashboard.module.css';
+    background-image: repeating-linear-gradient(45deg, transparent 0 24px, rgba(112, 120, 122, 0.08) 24px 25px);
+}
+
+.museWaffleTitle {
+    composes: museWaffleTitle from './Dashboard.module.css';
+}
+
+.titleLink {
+    text-decoration: none;
+}
+
+.headerButton {
+    composes: aboutButton from './Dashboard.module.css';
+    position: absolute;
+    right: 10px;
+    top: 10px;
+}
+
+.page {
+    position: relative;
+    top: 60px;
+    width: 100%;
+    max-width: 1000px;
+    margin: 0 auto;
+    padding: 60px 30px 100px;
+    font-family: 'TASA Orbiter';
+    color: var(--text);
+}
+
+.hero {
+    text-align: center;
+}
+
+.heroTitle {
+    font-family: 'Jersey 15';
+    font-size: 100px;
+    font-weight: 400;
+    letter-spacing: 3px;
+    line-height: 56px;
+    margin: 0;
+    color: var(--text);
+    text-shadow: 0 5px 0 var(--background-green1), 0 10px 2px rgba(0, 0, 0, 0.4);
+}
+
+.waveText span {
+    display: inline-block;
+    font-size: 4rem;
+    animation: wave 2s ease-in-out infinite;
+    margin-right: 5px;
+}
+
+.waveText span:nth-child(1) {
+    animation-delay: -2s;
+}
+.waveText span:nth-child(2) {
+    animation-delay: -1.8s;
+}
+.waveText span:nth-child(3) {
+    animation-delay: -1.6s;
+}
+.waveText span:nth-child(4) {
+    animation-delay: -1.4s;
+}
+.waveText span:nth-child(5) {
+    animation-delay: -1.2s;
+}
+.waveText span:nth-child(6) {
+    animation-delay: -1s;
+}
+.waveText span:nth-child(7) {
+    animation-delay: -0.8s;
+}
+.waveText span:nth-child(8) {
+    animation-delay: -0.6s;
+}
+.waveText span:nth-child(9) {
+    animation-delay: -0.4s;
+}
+.waveText span:nth-child(10) {
+    animation-delay: -0.2s;
+}
+.waveText span:nth-child(11) {
+    animation-delay: 0s;
+}
+
+@keyframes wave {
+    0%, 100% {
+        transform: translateY(0);
+    }
+    50% {
+        transform: translateY(-5px);
+    }
+}
+
+.heroText {
+    max-width: 600px;
+    margin: 20px auto 40px;
+    font-size: 18px;
+    line-height: 28px;
+    color: var(--background-grey);
+}
+
+.sectionTitle {
+    font-family: 'Jersey 15';
+    font-size: 40px;
+    font-weight: 400;
+    letter-spacing: 2px;
+    margin: 80px 0 30px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--accent);
+    color: var(--text);
+}
+
+.step {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 40px;
+    align-items: center;
+    margin-bottom: 50px;
+}
+
+/* alternate which side the image sits on */
+.step:nth-child(odd) .stepText {
+    order: 1;
+}
+
+.stepNumber {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    height: 40px;
+    font-family: 'Jersey 15';
+    font-size: 30px;
+    color: var(--background);
+    background-color: var(--primary);
+    border: 1px solid var(--background);
+    box-shadow: 0 4px 0 rgba(0, 0, 0, 0.3);
+}
+
+.stepTitle {
+    font-family: 'Jersey 15';
+    font-size: 30px;
+    font-weight: 400;
+    letter-spacing: 1px;
+    margin: 16px 0 8px;
+    color: var(--text);
+}
+
+.bodyText {
+    margin: 0;
+    font-size: 15px;
+    line-height: 25px;
+    color: var(--background-grey);
+}
+
+.figure {
+    display: block;
+    width: 100%;
+    /* aspect-ratio: 16 / 10; */
+    object-fit: cover;
+    background-color: var(--background-light);
+    border: 1px solid var(--accent);
+    box-shadow: 0 4px 0 rgba(0, 0, 0, 0.3);
+}
+
+.figurePlaceholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: 'Jersey 15';
+    font-size: 24px;
+    letter-spacing: 1px;
+    color: var(--accent);
+    background-image: repeating-linear-gradient(45deg, transparent 0 14px, rgba(112, 120, 122, 0.12) 14px 15px);
+}
+
+.featureGrid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 30px;
+}
+
+.featureCard {
+    padding: 20px;
+    background-color: var(--background-light);
+    border: 1px solid var(--accent);
+    box-shadow: 0 4px 0 rgba(0, 0, 0, 0.3);
+}
+
+.featureTitle {
+    font-family: 'Jersey 15';
+    font-size: 26px;
+    font-weight: 400;
+    margin: 0 0 8px;
+    color: var(--background);
+}
+
+.featureText {
+    margin: 0;
+    font-size: 14px;
+    line-height: 22px;
+    color: var(--dark-text);
+}
+
+.cta {
+    text-align: center;
+}
+
+.cta .sectionTitle {
+    border-bottom: none;
+    margin-bottom: 10px;
+}
+
+.ctaButton {
+    display: inline-block;
+    margin-top: 30px;
+    padding: 6px 30px;
+    scale: 1.4;
+    font-family: 'Jersey 15';
+    font-size: 30px;
+    letter-spacing: 2px;
+    text-decoration: none;
+    color: var(--background);
+    background-color: var(--primary);
+    border: 1px solid var(--background);
+    box-shadow: 0 4px 0 rgba(0, 0, 0, 0.3);
+    transition: transform 0.2s;
+}
+
+.ctaButton:hover {
+    transform: translateY(5px);
+}
+
+@media (max-width: 750px) {
+    .page {
+        padding: 40px 16px 80px;
+    }
+    .heroTitle {
+        font-size: 44px;
+        line-height: 40px;
+    }
+    .step {
+        grid-template-columns: 1fr;
+        gap: 20px;
+    }
+    .step:nth-child(odd) .stepText {
+        order: 0;
+    }
+    .featureGrid {
+        grid-template-columns: 1fr;
+    }
+}
