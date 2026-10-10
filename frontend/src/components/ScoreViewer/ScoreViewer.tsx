@@ -3,7 +3,6 @@ import { createRoot } from 'react-dom/client'
 import { useVerovio, getSharedToolkit, loadAndGetPageCount } from '../../hooks/useVerovio'
 import { useStore } from '../../store'
 import styles from './ScoreViewer.module.css'
-import AppendBar from './AppendBar'
 import InscorePrompt from './InscorePrompt'
 import { promptAnthropic } from '../../api/claudeTools'
 import { applyClaudeEdit } from '../../api/applyClaudeEdit'
@@ -808,7 +807,6 @@ export default function ScoreViewer() {
               </div>
             )
           })}
-          <AppendBar />
         </div>
       )}
       <div ref={marqueeRef} className={styles.marquee} style={{ display: 'none' }} />
