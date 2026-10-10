@@ -14,6 +14,7 @@ router = APIRouter()
 def _run_edit(body: EditRmMeasureRequest) -> str:
     import music21 as m21
     from api.routers.infill import _ordinal_to_measure_numbers
+    from notation import carry_state, finish_edited
 
     orig_score = m21.converter.parseData(body.xml, format="musicxml")
     if not orig_score.parts:
@@ -25,8 +26,14 @@ def _run_edit(body: EditRmMeasureRequest) -> str:
 
     removed_any = False
     for part in orig_score.parts:
+        measures = list(part.getElementsByClass(m21.stream.Measure))
+        # a removed bar takes the clef, key, meter and tempo it set with it, so the bar that
+        # closes the gap is handed whatever it was reading from them
+        cut = [i for i, measure in enumerate(measures) if start_m <= measure.measureNumber <= end_m]
+        if cut: carry_state(measures, cut[-1] + 1)
+
         keep = []
-        for measure in list(part.getElementsByClass(m21.stream.Measure)):
+        for measure in measures:
             if start_m <= measure.measureNumber <= end_m:
                 part.remove(measure)
                 removed_any = True
@@ -46,7 +53,6 @@ def _run_edit(body: EditRmMeasureRequest) -> str:
             f"Remove measures failed: no measures in range {body.measure_start_num}-{body.measure_end_num}"
         )
 
-    from notation import finish_edited
     return finish_edited(orig_score)
 
 

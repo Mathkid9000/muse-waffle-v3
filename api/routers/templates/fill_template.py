@@ -3,6 +3,7 @@
 from __future__ import annotations
 import asyncio
 import logging
+import re
 import traceback
 from api.schemas import XmlResponse
 from fastapi import APIRouter, HTTPException
@@ -21,6 +22,27 @@ _CANVAS_FIGURES = {**_FIGURES, "dim7": "dim"}
 # the order rows of the same beat are written in, mirroring tokenize_score_as_text's own priority;
 # a masked block goes last, after whatever its first bar places before it
 _KINDS = ("key", "time", "tempo", "clef", "chord", "note", "masked")
+# a chord root given absolutely; a roman numeral never reads as one, its letters being I and V
+_NOTE_NAME = re.compile(r"[A-Ga-g](#{1,2}|b{1,2}|-{1,2}|♯|♭)?")
+
+
+def chord_root(root: str | None, key):
+    """The pitch a chord item's root names: a note name (G, Bb) as written, anything else as a
+    roman numeral in `key` (ii, bVII), a bare digit being the plain scale degree. None for a root
+    left blank, and for one that reads as neither -- which a caller treats as blank, leaving the
+    choice to the model."""
+    import music21 as m21
+    from api.keys import normalize_tonic
+
+    root = (root or "").strip()
+    if not root:
+        return None
+    try:
+        if _NOTE_NAME.fullmatch(root):
+            return m21.pitch.Pitch(normalize_tonic(root))
+        return m21.roman.RomanNumeral(int(root) if root.isdigit() else root, key).root()
+    except Exception:
+        return None
 
 
 def _canvas(template) -> list[tuple[str, str, str, str, str]]:
@@ -76,10 +98,8 @@ def _canvas(template) -> list[tuple[str, str, str, str, str]]:
                 rows.append((advance, pos, tok("DUR", None if it.duration is None else round(it.duration * SUB)),
                              tok("PITCH", it.pitch), tok("VOICE", it.voice_idx)))
             case "chord":
-                # degree keeps alterations (bVII); rootNumeral is the plain scale degree, often given as a digit
-                numeral = it.degree or it.rootNumeral
-                if numeral and numeral.isdigit(): numeral = int(numeral)
-                root = m21.roman.RomanNumeral(numeral, key).root().pitchClass if numeral else None
+                root = chord_root(it.root, key)
+                root = None if root is None else root.pitchClass
                 degree = None if root is None else (root - key.asKey().tonic.pitchClass) % 12
                 rows.append((advance, pos, tok("DEG", degree), tok("ROOT", root),
                              tok("QUAL", _CANVAS_FIGURES.get(it.quality) if it.quality else None)))

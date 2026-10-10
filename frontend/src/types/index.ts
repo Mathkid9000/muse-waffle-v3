@@ -58,8 +58,7 @@ export interface NoteTemplateItem extends TemplateItem {
 
 export interface ChordTemplateItem extends TemplateItem {
   kind: "chord";
-  degree?: string; // roman numeral
-  rootNumeral?: string; // numeral of the chord degree
+  root?: string; // an absolute note name (G, Bb) or a roman numeral in the key in effect (ii, bVII)
   quality?: "maj7" | "maj" | "min" | "dom7" | "min7" | "dim7" | "dim" | "m7b5" | "sus2" | "7sus" | "7aug" | "aug";
 }
 

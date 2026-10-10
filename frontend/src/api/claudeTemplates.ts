@@ -357,7 +357,7 @@ function describeChords(template: AnyTemplateItem[]): string {
     const chords = (template ?? []).filter((i): i is ChordTemplateItem => i.kind === 'chord')
     if (chords.length === 0) return "No chords found."
     return chords
-        .map(c => `m${c.measure ?? '?'}${c.pos != null ? `.${c.pos}` : ''}: ${c.rootNumeral ?? c.degree ?? '?'}${c.quality ?? ''}`)
+        .map(c => `m${c.measure ?? '?'}${c.pos != null ? `.${c.pos}` : ''}: ${c.root ?? '?'}${c.quality ?? ''}`)
         .join("\n")
 }
 
@@ -611,8 +611,7 @@ const TEMPLATE_ITEM_SCHEMAS = [
         properties: {
             kind: { type: "string", enum: [ "chord" ] },
             ...TEMPLATE_ITEM_LOCATION,
-            degree: { type: "string", description: "The chord's roman numeral degree. Omit to leave this item blank." },
-            rootNumeral: { type: "string", description: "The numeral of the chord's root degree. Omit to leave this item blank." },
+            root: { type: "string", description: "The chord's root only, without its quality. Either an absolute note name (G, Bb, F#) or a roman numeral relative to the key in effect (ii, V, bVII) — Gm7 is root \"G\" with quality \"min7\", iim7 is root \"ii\" with quality \"min7\". Omit to leave this item blank." },
             quality: {
                 type: "string",
                 enum: [ "maj7", "maj", "min", "dom7", "min7", "dim7", "dim", "m7b5", "sus2", "7sus", "7aug", "aug" ],
@@ -1020,7 +1019,7 @@ const TOOLS = {
                             }
                         }
                     },
-                    description: "Aspects to read. clef=per-staff clef changes; key_signature/time_signature/tempo=value at measure 1 and every measure it changes; staves=instrument roster with 0-based staff_num; measure_count=number of measures; selection=the measure(s) and staff/staves the user has selected on the score; chord=every chord item defined on a template, with its measure/position, roman numeral and quality."
+                    description: "Aspects to read. clef=per-staff clef changes; key_signature/time_signature/tempo=value at measure 1 and every measure it changes; staves=instrument roster with 0-based staff_num; measure_count=number of measures; selection=the measure(s) and staff/staves the user has selected on the score; chord=every chord item defined on a template, with its measure/position, root (a note name or a roman numeral) and quality."
                 }
             },
             required: [ "queries" ]

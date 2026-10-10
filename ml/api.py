@@ -206,10 +206,21 @@ def _instr_token(tokenizer, instr):
     return tok if tok in tokenizer.vocabs[0] else 'INSTR_piano'
 
 
-def _header_rows(key, time_sig, tempo, first='M_SAME'):
+def _in_effect(rows):
+    """The key, time signature and tempo a run of rows leaves in effect, as the (field 2, field 3)
+    pairs of the last row to set each."""
+    state = {}
+    for row in rows:
+        kind = row[2].split('_')[0]
+        if kind in ('KEY', 'NUM', 'TEMPO'): state[kind] = (row[2], row[3])
+    return set(state.values())
+
+
+def _header_rows(key, time_sig, tempo, first='M_SAME', in_effect=()):
     """The key, time signature and tempo a generated block opens with, `first` being the bar advance
     that lands them in its first bar. A field left as None emits nothing at all, so it carries on
-    from whatever the prefix already put in effect."""
+    from whatever the prefix already put in effect -- and so does one that names what `in_effect`
+    already holds: asked for again, it would read to the model as a piece starting over."""
     fields = []
     if key is not None:
         tonic = (7 * (key - 6)) % 12   # key index 0..12 is 6 flats..6 sharps, ie. a fifth per step
@@ -219,6 +230,7 @@ def _header_rows(key, time_sig, tempo, first='M_SAME'):
         fields.append((f'NUM_{num}', f'DEN_{den}'))
     if tempo is not None:
         fields.append((f'TEMPO_{tempo}', ''))
+    fields = [ field for field in fields if field not in in_effect ]
     return [ (first if i == 0 else 'M_SAME', 'POS_0', a, b, '') for i, (a, b) in enumerate(fields) ]
 
 
@@ -304,7 +316,8 @@ def generate_stream(xml_str, start_measure, instruments, parts, key, time_sig, t
             kept = []
             tail = [ (f'M_{bar + num_bars}', *row[1:])
                      for row, bar in zip(absolute, bars) if bar >= start ]
-        prefix = [ *prefix, *_header_rows(key, time_sig, tempo, _advance(start - _last_bar(prefix))) ]
+        prefix = [ *prefix, *_header_rows(key, time_sig, tempo, _advance(start - _last_bar(prefix)),
+                                          _in_effect(prefix)) ]
 
     staves = sum(1 for row in prefix if row[0].startswith('INSTR'))
     log(f'Generating {num_bars} bars from bar {start} for {staves} staves with {model_name}')

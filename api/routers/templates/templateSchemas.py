@@ -8,11 +8,12 @@ from __future__ import annotations
 
 from typing import Annotated, Literal, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 ChordQuality = Literal[
     "maj7", "maj", "min", "dom7", "min7", "dim7", "dim", "m7b5", "sus2", "7sus", "7aug", "aug"
 ]
+_SCALE_DEGREES = dict(zip("1234567", ("I", "II", "III", "IV", "V", "VI", "VII")))
 
 
 class TemplateItemBase(BaseModel):
@@ -82,9 +83,21 @@ class ChordTemplateItem(TemplateItemBase):
     """Assigns/blanks a chord."""
 
     kind: Literal["chord"] = "chord"
-    degree: str | None = Field(None, description="The chord's roman numeral degree. Omit to leave this item blank.")
-    rootNumeral: str | None = Field(None, description="The numeral of the chord's root degree. Omit to leave this item blank.")
+    root: str | None = Field(None, description="The chord's root: either an absolute note name (G, Bb, F#) or a roman numeral relative to the key in effect (ii, V, bVII). Omit to leave this item blank.")
     quality: ChordQuality | None = Field(None, description="The chord's quality. Omit to leave this item blank.")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy_root(cls, data):
+        # a template written before `root` named its root as `degree` (a roman numeral, which kept
+        # alterations) and/or `rootNumeral` (the plain scale degree, as a digit)
+        if isinstance(data, dict) and data.get("root") is None:
+            legacy = data.get("degree") or data.get("rootNumeral")
+            if legacy is not None:
+                legacy = str(legacy)
+                if legacy in _SCALE_DEGREES: legacy = _SCALE_DEGREES[legacy]
+                data = {**data, "root": legacy}
+        return data
 
 
 AnyTemplateItem = Annotated[

@@ -7,7 +7,7 @@ import logging
 import traceback
 from api.schemas import XmlResponse
 from fastapi import APIRouter, HTTPException
-from api.routers.templates.fill_template import _FIGURES
+from api.routers.templates.fill_template import _FIGURES, chord_root
 from api.routers.templates.templateSchemas import AnyTemplateItem, TemplateResponse
 from music21 import stream
 from music21 import instrument as instrument21
@@ -117,11 +117,14 @@ def _run_conversion(template: list[AnyTemplateItem]) -> str:
             el = tempo21.MetronomeMark(number=it.tempo) if it.tempo is not None else _blank('tempo')
             placed.setdefault((top_voice, it.measure), []).append((_pos(it), el))
         elif it.kind == 'chord':
-            if (it.degree or it.rootNumeral) and it.quality:
-                # root = roman21.RomanNumeral(, key21.Key('C')).root().name
-                root = it.degree if it.degree else ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII'][int(it.rootNumeral)-1]
-                el = expr21.TextExpression(root + _FIGURES.get(it.quality, ''))
-                chords.add(it.measure, round(_pos(it) * SUB), el)
+            if it.root and it.quality:
+                # labelled the way it was written, absolute or numeral; spelling the notes under
+                # it needs the chord's actual pitches, which a numeral only has in the key
+                figure = _FIGURES.get(it.quality, '')
+                el = expr21.TextExpression(it.root + figure)
+                root = chord_root(it.root, current_key)
+                if root is not None:
+                    chords.add(it.measure, round(_pos(it) * SUB), harmony21.ChordSymbol(root.name + figure))
             else:
                 el = _blank('chord')
             placed.setdefault((top_voice, it.measure), []).append((_pos(it), el))

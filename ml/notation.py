@@ -12,6 +12,7 @@ decided here, deterministically, so a score renders the same however its rows ar
   * every bar complete, a blank bar a whole rest   (fill_rests)
   * enharmonic spelling from key, chord and melodic context   (spell_pitch)
   * accidental display, once per bar, in time order across voices   (make_accidentals)
+  * a clef, key, meter or tempo written only where it changes   (drop_restated, carry_state)
   * beams, tuplet brackets, and an export that re-derives nothing   (engrave, export_xml)
 
 Positions and durations in this module are integers in grid units unless a name says otherwise
@@ -20,12 +21,14 @@ Positions and durations in this module are integers in grid units unless a name 
 
 from __future__ import annotations
 import bisect
+import copy
 import logging
 from dataclasses import dataclass
 from fractions import Fraction
 
 import music21
 from music21 import chord as chord21
+from music21 import clef as clef21
 from music21 import duration as duration21
 from music21 import harmony as harmony21
 from music21 import key as key21
@@ -33,6 +36,7 @@ from music21 import meter as meter21
 from music21 import note as note21
 from music21 import pitch as pitch21
 from music21 import stream as stream21
+from music21 import tempo as tempo21
 from music21 import tie as tie21
 from music21.stream import makeNotation
 
@@ -650,6 +654,58 @@ def make_accidentals(part: stream21.Part) -> None:
         m.streamStatus.accidentals = True
 
 
+_STATE_CLASSES = (clef21.Clef, key21.KeySignature, meter21.TimeSignature, tempo21.MetronomeMark)
+
+
+def _state_of(el) -> tuple[str, object]:
+    """Which piece of running state an element sets, and the value it sets it to. A tempo mark
+    with no number (a bare "Andante") comes back valueless: it is never a restatement."""
+    if isinstance(el, clef21.Clef): return 'clef', (el.sign, el.line, el.octaveChange)
+    if isinstance(el, key21.KeySignature): return 'key', el.sharps
+    if isinstance(el, meter21.TimeSignature): return 'time', el.ratioString
+    return 'tempo', el.number
+
+
+def _state_marks(measure: stream21.Measure) -> list:
+    """The clefs, key and time signatures and tempo marks of a bar, in the order they take effect."""
+    return sorted((el for el in measure.recurse().getElementsByClass(_STATE_CLASSES) if _state_of(el)[1] is not None),
+                  key=lambda el: el.getOffsetInHierarchy(measure))
+
+
+def drop_restated(score: stream21.Score) -> None:
+    """Remove every clef, key signature, time signature and tempo mark that only restates what is
+    already in effect on its staff. These are changes of state, not content, but they are stored
+    on the bar they happen in -- so a bar that is copied, generated or pasted somewhere else
+    brings its own along, and without this the score opens again wherever one lands."""
+    for part in score.parts:
+        state: dict[str, object] = {}
+        for m in part.getElementsByClass(stream21.Measure):
+            for el in _state_marks(m):
+                kind, value = _state_of(el)
+                if state.get(kind) == value:
+                    m.remove(el, recurse=True)
+                else:
+                    state[kind] = value
+
+
+def carry_state(measures: list[stream21.Measure], index: int) -> None:
+    """Write the clef, key, time signature and tempo in effect as `measures[index]` begins onto
+    that bar itself, wherever it does not open by setting its own. For the bar that follows a
+    block about to be removed or replaced: what it inherited from the bars before it is about to
+    change under it, and this is what keeps it reading the way it did. Anything written here
+    that turns out to restate the new bars before it is dropped again by drop_restated."""
+    if not 0 < index < len(measures): return
+    state: dict[str, object] = {}
+    for m in measures[:index]:
+        for el in _state_marks(m):
+            state[_state_of(el)[0]] = el
+    target = measures[index]
+    opening = {_state_of(el)[0] for el in _state_marks(target) if el.getOffsetInHierarchy(target) == 0}
+    for kind, el in state.items():
+        if kind not in opening:
+            target.insert(0, copy.deepcopy(el))
+
+
 def engrave(score: stream21.Score) -> None:
     """Beams, tuplet brackets and accidental display for every part, in place. Measures must
     already be inside their parts (beaming reads the time signature from context)."""
@@ -676,6 +732,7 @@ def export_xml(score: stream21.Score) -> str:
 
 def finish(score: stream21.Score) -> str:
     """engrave + export, for producers holding a complete score."""
+    drop_restated(score)
     engrave(score)
     return export_xml(score)
 
@@ -716,6 +773,7 @@ def finish_edited(score: stream21.Score, respell_from: int | None = None) -> str
     as they came, blank bars are filled, accidentals are decided afresh (music21's reader leaves
     them undecided, and its exporter would decide them with the repeat-the-cautionary rule), and
     with `respell_from` every note from that bar on is respelled for a changed key."""
+    drop_restated(score)
     fill_rests(score)
     if respell_from is not None:
         respell(score, respell_from)

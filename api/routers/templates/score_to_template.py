@@ -63,8 +63,7 @@ def _chord_item(chord_sym, num: int, pos: float) -> ChordTemplateItem:
     key_ctx = _as_key(chord_sym.getContextByClass(m21.key.KeySignature) or m21.key.KeySignature(0))
     rn = m21.roman.romanNumeralFromChord(m21.chord.Chord(chord_sym.pitches), key_ctx)
     quality = chord_sym.chordKindStr or re.split(r"/|add|omit|dim5", chord_sym.figure[len(chord_sym.root().name):])[0]
-    return ChordTemplateItem(measure=num, pos=pos, degree=rn.romanNumeral,
-                             rootNumeral=str(rn.scaleDegree), quality=_QUALITIES.get(quality, "maj"))
+    return ChordTemplateItem(measure=num, pos=pos, root=rn.romanNumeral, quality=_QUALITIES.get(quality, "maj"))
 
 
 def _run_conversion(body: XmlResponse) -> list[AnyTemplateItem]:

@@ -14,6 +14,7 @@ router = APIRouter()
 
 def _run_edit(body: EditWriteScoreRequest) -> str:
     import music21 as m21
+    from notation import carry_state, finish_edited
 
     source = m21.converter.parseData(body.source_xml, format="musicxml")
     if not source.parts:
@@ -33,7 +34,9 @@ def _run_edit(body: EditWriteScoreRequest) -> str:
         measures = list(into.getElementsByClass(m21.stream.Measure))
         copied = [copy.deepcopy(m) for m in part.getElementsByClass(m21.stream.Measure)]
         # the copy replaces what it lands on; a paste past the end pads the gap with empty bars,
-        # and whatever the target held on either side of the block is kept
+        # and whatever the target held on either side of the block is kept -- in the clef, key,
+        # meter and tempo it was already in, whatever the copy brings with it
+        carry_state(measures, start + len(copied))
         head = measures[:start] + [m21.stream.Measure() for _ in range(start - len(measures))]
         written = head + copied + measures[start + len(copied):]
 
@@ -54,7 +57,6 @@ def _run_edit(body: EditWriteScoreRequest) -> str:
             part.insert(offset, m21.stream.Measure(number=num))
             offset += part.getElementsByClass(m21.stream.Measure)[-1].barDuration.quarterLength
 
-    from notation import finish_edited
     return finish_edited(target)
 
 
