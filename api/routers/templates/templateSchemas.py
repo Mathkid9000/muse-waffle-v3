@@ -13,7 +13,8 @@ from pydantic import BaseModel, Field, model_validator
 ChordQuality = Literal[
     "maj7", "maj", "min", "dom7", "min7", "dim7", "dim", "m7b5", "sus2", "7sus", "7aug", "aug"
 ]
-_SCALE_DEGREES = dict(zip("1234567", ("I", "II", "III", "IV", "V", "VI", "VII")))
+_QUALITY_ALIASES = {"7": "dom7", "m": "min", "m7": "min7", "": "maj", "o7": "dim7", "ø7": "m7b5", "sus": "7sus", "7+": "7aug", "+": "aug"}
+_SCALE_DEGREES =dict(zip("1234567", ("I", "II", "III", "IV", "V", "VI", "VII")))
 
 
 class TemplateItemBase(BaseModel):
@@ -97,6 +98,9 @@ class ChordTemplateItem(TemplateItemBase):
                 legacy = str(legacy)
                 if legacy in _SCALE_DEGREES: legacy = _SCALE_DEGREES[legacy]
                 data = {**data, "root": legacy}
+        # chord-symbol spellings of a quality ("7" for a dominant seventh) are accepted too
+        if isinstance(data, dict) and data.get("quality") in _QUALITY_ALIASES:
+            data = {**data, "quality": _QUALITY_ALIASES[data["quality"]]}
         return data
 
 

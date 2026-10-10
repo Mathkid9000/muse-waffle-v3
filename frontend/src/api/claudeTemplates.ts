@@ -7,6 +7,7 @@ import { applyClaudeEdit } from './applyClaudeEdit';
 import { fillTemplate, scoreToTemplate } from './templates';
 import { useStore } from '../store';
 import { getPromptContext, getReadResults, type ReadQuery } from './readContext';
+import { chordProblems, repairChords } from './templateGuard';
 
 const MAX_TURNS = 10;
 
@@ -94,16 +95,44 @@ export async function promptTemplateAnthropic(chatHistory: ChatItem[], prompt: s
         }
 
         // if (selectedTool === 'edit_template') { console.log(memory); return; }
-        const toolMessage = await anthropic.messages.create({
+        // the model writing a template is the one that has to know what the filler does with it
+        const writesTemplate = selectedTool === 'create_template_from_scratch'
+        const toolRequest = {
             model: 'claude-haiku-4-5-20251001',
-            max_tokens: 1024,
+            // a whole template is returned in one go
+            max_tokens: writesTemplate ? 4096 : 1024,
             tools: [ TOOLS[selectedTool as keyof typeof TOOLS] ] as unknown as Anthropic.Messages.ToolUnion[],
-            system: (context ? (context + '\n\n') : '') + getMemoryContext(memory),
-            messages: [{ role: 'user', content: `${prompt}\n\n${roadmap}\n\nDo this now: ${intention}` }],
-            tool_choice: { type: "tool", name: selectedTool }
-        });
+            system: (writesTemplate ? TEMPLATE_CONTRACT + '\n\n' : '') + (context ? (context + '\n\n') : '') + getMemoryContext(memory),
+            tool_choice: { type: "tool", name: selectedTool },
+        } as const
+        const toolPrompt = `${prompt}\n\n${roadmap}\n\nDo this now: ${intention}`
+        let toolMessage = await anthropic.messages.create({ ...toolRequest, messages: [{ role: 'user', content: toolPrompt }] });
         usageIn += toolMessage.usage.input_tokens
         usageOut += toolMessage.usage.output_tokens
+
+        if (writesTemplate) {
+            // A named chord has to arrive as a chord item, or the filler never hears about it. Check
+            // the template against what the user asked for, give the model one correction, and as
+            // a last resort fix it up in code rather than fill a template that ignores the request.
+            const userText = `${prompt}\n${intention}`
+            const written = () => toolMessage.content.find((b): b is ToolUseBlock => b.type === 'tool_use')
+            const templateOf = () => (written()?.input as Record<string, unknown> | undefined)?.['template'] as AnyTemplateItem[] | undefined
+            const problems = chordProblems(userText, templateOf() ?? [])
+            const first = written()
+            if (problems.length && first) {
+                console.warn('Template does not carry the requested chords — asking for a correction:', problems)
+                toolMessage = await anthropic.messages.create({ ...toolRequest, messages: [
+                    { role: 'user', content: toolPrompt },
+                    { role: 'assistant', content: toolMessage.content },
+                    { role: 'user', content: [{ type: 'tool_result', tool_use_id: first.id, is_error: true,
+                        content: 'The template was not accepted:\n- ' + problems.join('\n- ') + '\nCall the tool again with a corrected template.' }] },
+                ] })
+                usageIn += toolMessage.usage.input_tokens
+                usageOut += toolMessage.usage.output_tokens
+                const retried = templateOf()
+                if (retried && chordProblems(userText, retried).length) repairChords(userText, retried)
+            }
+        }
 
         const toolUses = toolMessage.content.filter((b): b is ToolUseBlock => b.type === "tool_use");
         if (selectedTool === "complete") {
@@ -117,7 +146,17 @@ export async function promptTemplateAnthropic(chatHistory: ChatItem[], prompt: s
 
         const results: Anthropic.Messages.ToolResultBlockParam[] = []
         for (const tool of toolUses) {
-            const readResult = await processCommand({ tool: tool.name, input: tool.input as Record<string, unknown> }, memory, intention)
+            let readResult: string | undefined
+            try {
+                readResult = await processCommand({ tool: tool.name, input: tool.input as Record<string, unknown> }, memory, intention)
+            } catch (e) {
+                // An API error (a 422/500 from the backend) ends the whole run: carrying on would
+                // tell the model the step was "done" and have it build on a result that never arrived.
+                console.error(`${tool.name} failed:`, e)
+                pushCallback({ title: `${TOOL_DESCRIPTORS[selectedTool] ?? selectedTool} failed`.replace('<>', 'a step'),
+                    input: e instanceof Error ? e.message : String(e), tokensIn: usageIn, tokensOut: usageOut })
+                return
+            }
             if (readResult) {
                 results.push({
                     type: "tool_result",
@@ -302,13 +341,6 @@ async function processCommand(command: { tool: string, input: Record<string, unk
 
                 saveToMemory(memory, out_key, newXml)
             }
-
-            const open = (command.input['open'] ?? '') as string
-            console.log(command.input, open)
-            if (open !== '') {
-                console.log(useStore.getState().tabs)
-                useStore.getState().setActiveTab(open);
-            }
             break
         }
         case "read_score": {
@@ -335,6 +367,13 @@ async function processCommand(command: { tool: string, input: Record<string, unk
         default: {
             console.warn(command, "No implementation yet")
         }
+    }
+
+    const open = (command.input['open'] ?? '') as string
+    console.log(command.input, open)
+    if (open !== '') {
+        console.log(useStore.getState().tabs)
+        useStore.getState().setActiveTab(open);
     }
 }
 
@@ -409,12 +448,12 @@ const DESCRIPTORS = [ 'Modifying', 'Editing', 'Shifting', 'Revising', 'Adjusting
 const DESCRIPTORS_PAST = [ 'Modified', 'Edited', 'Shifted', 'Revised', 'Adjusted', 'Shaped', 'Composed', 'Arranged', 'Wrote' ]
 
 const PROMPT_INTRO = "Your job is to classify which edit types are required next to achieve the user's goal and in what order."
-    + "You may use templates to achieve generation and repetitive tasks (e.g. an AABA song from scratch). A template is score abstraction where some elements are intentionally left blank to be filled in by a different model. Actions like creating a template from a score don't change anything about the score, it just modifies the type of the object so that it can be edited using other actions. When a template is filled in, it merely takes the blank/masked elements of the template and fills them in automatically."
-    + "For example, if you are creating a song in AABA format, you might want to first generate 8 bars (the first A), use it to create a template, then edit the template by taking the converted score and stripping it of some of its qualities (e.g. chords, rhythm, some pitches). Then, you may command the template to be filled in and placed into the first 8 bars, then commanding it to fill in the template once more and place this in the second 8 bars (Note: when you fill in a template, you get a new object that is no longer considered a template as it is completely filled). "
+    + "For generation tasks with content details or repetition (ex. \"Generate a score in AABA form\" or \"Write a song with this chord progression: D, Em, A7\"), always use templates. A template is score abstraction where some elements are intentionally masked to be filled in by a creative model. Actions like creating a template from a score don't change anything about the score, it just modifies the type of the object so that it can be edited using other actions. When a template is filled in, it merely takes the blank/masked elements of the template and fills them in automatically."
+    + "Using templates is your only way of biasing what is generated by the creative model. For example, if the user wants you to write string pads over a chord, insert whole notes with masked pitches and the given chord progression."
     + "If nothing matches an edit type, return no tool. You also have the ability to store/retrieve templates and score segments to/from memory with a name identifier so that they can be reused (Note: operations do not happen in place automatically)."
     + "Do not worry about missing details like which measures/staves/values are meant. "
     + "If the user gives no location on where something should happen, assume the user means their current selection and tab. Consider the type of the current tab (score or template) to decide what specific commands should be used. Mention this in your roadmap."
-    + "Finally, unless specified, the operation should typically be done in place."
+    + "Finally, unless specified, the operation should typically be done in place, and you should draw the user's attention to your actions by opening the score or template."
 
 const ROADMAP_TOOL = {
     name: "roadmap_tool",
@@ -437,14 +476,14 @@ const ROADMAP_TOOL = {
                                 "read_tab"
                             ],
                             description: "Each distinct type of edit that can be made. Tool descriptions:"
-                                + "\ngenerate_score: \"Uses a transformer model to generate a new score if no current score exists. Else, inserts into the given location. Do not include key, time_signature, or tempo when these attributes should remain the same.\""
+                                + "\ngenerate_score: \"Uses a transformer model only to append more creative measures to the score. Your only controls are the key, time_sig, tempo so do not use if there are detailed content requirements. Do not include key, time_signature, or tempo when these attributes should remain the same.\""
                                 + "\ncreate_template_from_scratch: \"Create a template from scratch. Only to be used when the user has very specific intentions.\""
                                 + "\ncreate_template_from_score: \"Create a template from an existing score in memory. To be used in combination with generate_score when the user does not have specific intentions (e.g. melodic ideas, rhythmic ideas, chord progs, etc...)\""
                                 + "\nedit_template: \"Edit a template already stored in memory (e.g. to strip it down/mask some of its musical elements). Use this to alter a template so that there is more variance when it is filled.\""
                                 + "\nfill_template: \"Fills a template's masked elements, essentially converting it from a template to a score and storing it to a new name on memory.\""
                                 + "\nwrite_score: \"Write a score onto another score. Essentially a copy and paste. Accepts multiple writes to perfrom at once to save tokens. Also lets you open a score if the user requires it.\""
                                 + "\nread_tab: \"Use to read specific elements of a score/template, typically to locate places defined by the user (e.g. 'where the key changes to D major'). May also be used to read the user's current selection (e.g. 'where I am currently highlighting' or 'my current tab').\""
-                                + "\n\nedit_clef, edit_time_sig, edit_key_sig, edit_tempo, edit_add_instrument, edit_delete_staff, and edit_delete_measures are all only usable for editing scores, not templates."
+                                + "\n\nedit_clef, edit_time_sig, edit_key_sig, edit_tempo, edit_add_instrument, edit_delete_staff, and edit_delete_measures are all ONLY usable for editing scores, not templates."
                         },
                         intention: {
                             type: "string",
@@ -483,7 +522,7 @@ const TOOL_INTROS = [
                         "read_tab",
                         "complete"
                     ],
-                    description: "The tool to execute, as provided by the current roadmap step. Use complete when the user's prompt has been completed."
+                    description: "The tool to execute, as provided by the current roadmap step. Use complete when the user's prompt has been completed. edit_clef, edit_time_sig, edit_key_sig, edit_tempo, edit_add_instrument, edit_delete_staff, and edit_delete_measures are all ONLY usable for editing scores, not templates."
                 },
                 intention: {
                     type: "string",
@@ -533,7 +572,7 @@ const TEMPLATE_ITEM_SCHEMAS = [
     },
     {
         type: "object",
-        description: "Assigns/blanks an instrument for a voice.",
+        description: "Assigns/blanks an instrument for a voice. Note: you should use multiple if the instrument has two staffs (ex. piano should have one for treble and the other for bass)",
         properties: {
             kind: { type: "string", enum: [ "instrument" ] },
             ...TEMPLATE_ITEM_LOCATION,
@@ -611,7 +650,7 @@ const TEMPLATE_ITEM_SCHEMAS = [
         properties: {
             kind: { type: "string", enum: [ "chord" ] },
             ...TEMPLATE_ITEM_LOCATION,
-            root: { type: "string", description: "The chord's root only, without its quality. Either an absolute note name (G, Bb, F#) or a roman numeral relative to the key in effect (ii, V, bVII) — Gm7 is root \"G\" with quality \"min7\", iim7 is root \"ii\" with quality \"min7\". Omit to leave this item blank." },
+            root: { type: "string", description: "The chord's root only, without its quality. Either an absolute note name (G, Bb, F#) or a roman numeral relative to the key in effect (ii, V, bVII) — Ex: For Gm7, the root is \"G\". iim7 has root \"ii\". Omit to leave this item blank." },
             quality: {
                 type: "string",
                 enum: [ "maj7", "maj", "min", "dom7", "min7", "dim7", "dim", "m7b5", "sus2", "7sus", "7aug", "aug" ],
@@ -622,7 +661,24 @@ const TEMPLATE_ITEM_SCHEMAS = [
     }
 ]
 
+// What the model writing a template must know about whatever reads it. The roadmap model is told a
+// version of this in PROMPT_INTRO, but it is the model writing the items that has to act on it.
+const TEMPLATE_CONTRACT = "HOW A TEMPLATE IS USED:"
+    + "\n- A separate creative model fills the template. It sees ONLY the items in the template -- not the user's request, not this conversation. Anything the user wants that is not encoded as an item is lost."
+    + "\n- Items you keep complete are fixed and copied through as written. A field you omit is masked: the filler invents it."
+    + "\n- A `chord` item (root + quality + measure + pos) is how you tell the filler what harmony to write. The filler chooses the pitches that realise it."
+    + "\n- A chord item alone writes nothing: the filler needs somewhere to put notes. For a pad or sustained harmony, give EVERY instrument voice one `note` item per measure (kind 'note', voice_idx, measure, pos 0, duration = the whole measure, e.g. 4 in 4/4) with `pitch` OMITTED. That is a whole note whose pitch the filler chooses to fit the chord."
+    + "\n- So encode the user's intent as structure, not as the answer: every chord the user names is a chord item with root, quality, measure and pos all set; the notes that realise it are pitch-less note items. Do NOT spell a requested chord out as note pitches -- that fixes those exact notes and leaves nothing to generate. Use a `masked` block only when the rhythm itself is open."
+    + "\n- Never omit measure/pos/root/quality from a chord the user asked for; an omitted field masks it, and the chord is then not constrained at all."
+    + "\n\nEXAMPLE -- \"a string pad over Abmaj7 for one measure\" with violin (voice 0), viola (voice 1) and cello (voice 2), key Ab, 4/4:"
+    + "\n  CORRECT: instrument + clef items for the 3 voices, time 4/4, key Ab major,"
+    + "\n    {kind:'chord', root:'Ab', quality:'maj7', measure:1, pos:0},"
+    + "\n    {kind:'note', voice_idx:0, measure:1, pos:0, duration:4}, {kind:'note', voice_idx:1, measure:1, pos:0, duration:4}, {kind:'note', voice_idx:2, measure:1, pos:0, duration:4}   <- no pitch"
+    + "\n  WRONG 1: note items with pitch 56, 60, 63, 67 hardcoded and no chord item. The chord is baked in and invisible to the filler."
+    + "\n  WRONG 2: a chord item and instruments but no note items. The filler has no slot to write into, so nothing is generated."
+
 const EDIT_TEMPLATE_STAGE2_INTRO = "You are editing one existing template in place. A template is an ordered list of items describing a piece of music; an element is masked by keeping its item and omitting the field being masked (e.g. drop `pitch` from a note item to mask that note's pitch), which is what lets the filler model regenerate it."
+    + "\nA separate creative model fills the masked fields and sees ONLY the items of this template, so anything the user wants must be encoded as an item: name harmony with `chord` items (root, quality, measure, pos all set) and leave the pitches to be generated; never spell a requested chord out as hardcoded note pitches."
     + "\nRules:"
     + "\n- Return the COMPLETE edited template: every item of the input template, in its original order, including the items you did not touch. Any item you leave out is deleted from the template."
     + "\n- You are modifying the template you were given. Never return a brand new template, and never collapse it into a single fully-masked block, unless the request explicitly asks to replace all of its content."
@@ -902,6 +958,11 @@ const TOOLS = {
         input_schema: {
             type: "object",
             properties: {
+                // written before `template` on purpose: the model reasons here, then builds the items
+                plan: {
+                    type: "string",
+                    description: "Scratchpad, written first. (1) List each concrete musical requirement in the user's request (chords, instruments, length, key, rhythm...). (2) For each, name the template item that will carry it -- the filler sees only the items. Chords are `chord` items, never hardcoded pitches. (3) State which items are left masked for the filler to write."
+                },
                 memory_output_name: {
                     type: "string",
                     description: "The new name of the template to be stored in memory."
@@ -909,14 +970,18 @@ const TOOLS = {
                 template: {
                     type: "array",
                     items: { anyOf: TEMPLATE_ITEM_SCHEMAS },
-                    description: "The ordered list of items making up the template. Each item's `kind` selects which fields apply. Omit a non-required field to leave that item blank, to be filled in later."
+                    description: "The ordered list of items making up the template. Each item's `kind` selects which fields apply. Omit a non-required field to leave that item blank, to be filled in later. Every chord the user names must appear here as a chord item with root, quality, measure and pos all set."
                 },
+                open: {
+                    type: "string",
+                    description: "Enter an existing tab or written-to tab to draw the user's attention by opening it. Omit to not open the tab."
+                }
             }
         }
     },
     "create_template_from_score": {
         name: "create_template_from_score",
-        description: "Create a template from an existing score in memory. To be used in combination with generate_score when the user does not have specific intentions (e.g. melodic ideas, rhythmic ideas, chord progs, etc...)",
+        description: "Create a template from an existing score in memory.",
         input_schema: {
             type: "object",
             properties: {
@@ -927,6 +992,10 @@ const TOOLS = {
                 memory_output_name: {
                     type: "string",
                     description: "The new name of the template to be stored in memory."
+                },
+                open: {
+                    type: "string",
+                    description: "Enter an existing tab or written-to tab to draw the user's attention by opening it. Omit to not open the tab."
                 }
             }
         }
@@ -940,6 +1009,10 @@ const TOOLS = {
                 memory_name: {
                     type: "string",
                     description: "The name of the template already stored in memory that will be edited."
+                },
+                open: {
+                    type: "string",
+                    description: "Enter an existing tab or written-to tab to draw the user's attention by opening it. Omit to not open the tab."
                 }
             }
         }
@@ -957,6 +1030,10 @@ const TOOLS = {
                 memory_output_name: {
                     type: "string",
                     description: "The name of the filled score to be stored in memory."
+                },
+                open: {
+                    type: "string",
+                    description: "Enter an existing tab or written-to tab to draw the user's attention by opening it. Omit to not open the tab."
                 }
             }
         }
