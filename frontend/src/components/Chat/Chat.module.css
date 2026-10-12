@@ -45,6 +45,46 @@
   transition: background 0.1s;
 }
 
+.commandPopup {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: -1px;
+  width: calc(100% + 2px);
+  max-height: 200px;
+  overflow-y: auto;
+  background: var(--user-selection);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  backdrop-filter: blur(6px);
+}
+
+.commandOption {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  padding: 7px 20px;
+  cursor: pointer;
+  font-family: 'TASA Orbiter';
+  font-size: 13px;
+  color: var(--text);
+}
+
+.commandOptionActive {
+  background: var(--transparent-accent);
+}
+
+.commandLabel {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.commandDescription {
+  opacity: 0.6;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .promptContainer.promptLoading {
   background: rgba(0, 0, 0, 0.1);
   border: 1px solid var(--transparent-accent);
@@ -236,7 +276,7 @@
   border-left: 10px solid var(--user-selection);
   margin-bottom: 5px;
   transition: background 0.1s, max-height 0.1s ease-out;
-  max-height: 50px;
+  max-height: 80px;
   overflow-y: hidden;
   interpolate-size: allow-keywords;
   user-select: none;

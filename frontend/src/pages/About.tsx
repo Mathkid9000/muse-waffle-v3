@@ -5,43 +5,6 @@ import Screenshot1 from '../assets/about/Screenshot1.png'
 import Screenshot2 from '../assets/about/Screenshot2.png'
 import Figure2 from '../assets/about/Figure2.png'
 
-// Placeholder content — swap the copy, and give a step/feature an `image` to replace its placeholder box.
-interface Step {
-  title: string
-  body: string
-  image?: string
-  imageLabel: string
-}
-
-const STEPS: Step[] = [
-  {
-    title: 'Start a score',
-    body: 'Placeholder text. Describe how a new score is created — picking a template, setting up staves, and landing in the editor.',
-    imageLabel: 'Screenshot: new score',
-  },
-  {
-    title: 'Write and edit notation',
-    body: 'Placeholder text. Describe the editor — selecting measures, entering notes, and hearing the result with playback.',
-    imageLabel: 'Screenshot: editor',
-  },
-  {
-    title: 'Ask for help in the chat',
-    body: 'Placeholder text. Describe how the chat reads the score and applies edits directly to the notation.',
-    imageLabel: 'Screenshot: chat',
-  },
-  {
-    title: 'Generate and fill in music',
-    body: 'Placeholder text. Describe how the model continues a passage or fills in the staves and measures you select.',
-    imageLabel: 'Diagram: generation',
-  },
-]
-
-const FEATURES = [
-  { title: 'Feature one', body: 'Placeholder text. One or two sentences about this feature.' },
-  { title: 'Feature two', body: 'Placeholder text. One or two sentences about this feature.' },
-  { title: 'Feature three', body: 'Placeholder text. One or two sentences about this feature.' },
-]
-
 function Figure({ image, label, small }: { image?: string; label: string; small?: boolean }) {
   return image ? (
     <img className={styles.figure} src={image} alt={label} style={(small ?? false) ? { width: "50%", margin: '30px auto' }: {}} />
@@ -66,19 +29,20 @@ export default function About() {
       <div className={styles.background}></div>
       <main className={styles.page}>
         <section className={styles.hero}>
-          <h2 className={`${styles.heroTitle} ${styles.waveText}`}>
+          <div className={`${styles.heroTitle} ${styles.waveText}`}>
             <span>M</span>
             <span>U</span>
             <span>S</span>
             <span>E</span>
             <span>&nbsp;</span>
+            <wbr></wbr>
             <span>W</span>
             <span>A</span>
             <span>F</span>
             <span>F</span>
             <span>L</span>
             <span>E</span>
-          </h2>
+          </div>
           <p className={styles.heroText}>
             My attempt at symbolic music generation.
           </p>

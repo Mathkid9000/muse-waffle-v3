@@ -9,6 +9,7 @@ import styles from './Chat.module.css'
 import { promptAnthropic } from '../../api/claudeTools'
 import { tabXml, type ThoughtProcessEvent, type ThoughtProcessTask } from '../../types'
 import { promptTemplateAnthropic } from '../../api/claudeTemplates'
+import { commandSuggestions, runCommand, useChatSettings } from '../../api/chatCommands'
 
 // Claude tool string enums → backend indices. Order must match the enums in
 // claudeTools.ts (and the backend index conventions). TIME_SIG_LABELS above already
@@ -104,6 +105,35 @@ export default function Chat() {
     const contextTokens = (promptThoughtProcess.find(
         (e): e is ThoughtProcessEvent => 'title' in e && !!e.isRoadmap
     ))?.tokensIn ?? 0
+    // autofill for /commands: the choices for what's typed, minus any the user dismissed with Esc
+    const [ suggestionIdx, setSuggestionIdx ] = useState(0)
+    const [ dismissedFor, setDismissedFor ] = useState<string | null>(null)
+    // subscribing keeps the "current" markers in the popup in step with a just-run command
+    useChatSettings((s) => s.model + s.reasoning)
+    const suggestions = dismissedFor === inputPrompt ? [] : commandSuggestions(inputPrompt)
+    const selectedSuggestion = suggestions[Math.min(suggestionIdx, suggestions.length - 1)]
+
+    function onPromptKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+        if (suggestions.length) {
+            if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                e.preventDefault()
+                const step = e.key === 'ArrowDown' ? 1 : -1
+                setSuggestionIdx((Math.min(suggestionIdx, suggestions.length - 1) + step + suggestions.length) % suggestions.length)
+                return
+            }
+            if (e.key === 'Escape') { setDismissedFor(inputPrompt); return }
+            // Tab, or Enter on something not yet fully typed, completes it; Enter on a complete one runs it
+            const complete = selectedSuggestion.insert.trim() === inputPrompt.trim()
+            if (e.key === 'Tab' || (e.key === 'Enter' && !complete)) {
+                e.preventDefault()
+                setInputPrompt(selectedSuggestion.insert)
+                setSuggestionIdx(0)
+                return
+            }
+        }
+        if (e.key === 'Enter' && inputPrompt.length > 0) handleSubmit()
+    }
+
     const isResizing = useRef(false)
     const resizeStartX = useRef(0)
     const resizeStartWidth = useRef(400)
@@ -147,6 +177,13 @@ export default function Chat() {
     }
 
     function handleSubmit() {
+        // a /command changes how chat runs; it is not sent to the model and has nothing to undo
+        const command = runCommand(inputPrompt)
+        if (command) {
+            setInputPrompt("")
+            addNewThought({ title: command.message, input: '', tokensIn: 0, tokensOut: 0 }, activeChat)
+            return
+        }
         const prompt = inputPrompt
         // The chat the prompt was sent from: everything it produces lands there even if the
         // user switches chats while it runs.
@@ -353,13 +390,29 @@ export default function Chat() {
                     }
                     </div>
                     <div className={`${styles.promptContainer} ` + (loading ? styles.promptLoading : '')}>
+                        {suggestions.length > 0 && (
+                            <div className={styles.commandPopup} role="listbox">
+                                {suggestions.map((s, i) => (
+                                    <div key={s.insert}
+                                        role="option"
+                                        aria-selected={s === selectedSuggestion}
+                                        className={s === selectedSuggestion ? `${styles.commandOption} ${styles.commandOptionActive}` : styles.commandOption}
+                                        // mousedown, not click: the input must keep focus
+                                        onMouseDown={(e) => { e.preventDefault(); setInputPrompt(s.insert); setSuggestionIdx(0) }}
+                                        onMouseEnter={() => setSuggestionIdx(i)}>
+                                        <span className={styles.commandLabel}>{s.label}</span>
+                                        <span className={styles.commandDescription}>{s.description}</span>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
                         <input className={styles.promptInput}
-                            placeholder={loading ? '. . . .' : 'Type something...'}
+                            placeholder={loading ? '. . . .' : 'Type something... (/ for commands)'}
                             // rows={1}
                             disabled={loading}
                             value={inputPrompt}
-                            onChange={(e) => setInputPrompt(e.target!.value)} 
-                            onKeyDown={(e) => e.key === 'Enter' ? handleSubmit() : ''}/>
+                            onChange={(e) => { setInputPrompt(e.target!.value); setSuggestionIdx(0) }}
+                            onKeyDown={onPromptKeyDown}/>
                         <button className={styles.promptButton} disabled={loading || inputPrompt.length === 0} onClick={(_) => handleSubmit()}>
                             <img src={sendImage} className={styles.promptButtonImg} />
                         </button>

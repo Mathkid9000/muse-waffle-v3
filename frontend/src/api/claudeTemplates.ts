@@ -8,8 +8,39 @@ import { fillTemplate, scoreToTemplate } from './templates';
 import { useStore } from '../store';
 import { getPromptContext, getReadResults, type ReadQuery } from './readContext';
 import { chordProblems, repairChords } from './templateGuard';
+import { activeModel, reasoningOn } from './chatCommands';
 
 const MAX_TURNS = 10;
+
+const REASONING_INSTRUCTIONS = "Before acting, reason briefly in plain text (under 150 words, no lists of options, no tool calls): "
+    + "state each concrete requirement in the user's request, how it should be achieved with the available tools, and what could go wrong. "
+    + "Remember a template is the ONLY thing the filler model sees, so any musical intent has to be encoded in the template's items."
+
+/**
+ * A short reasoning pass for when /reasoning is on. The calls it precedes force a tool choice, which
+ * leaves the model no room to think (and rules out extended thinking), so the thinking is its own
+ * unforced call whose text is then handed to the forced one.
+ */
+async function reasonAbout(system: string, task: string): Promise<{ text: string, tokensIn: number, tokensOut: number } | null> {
+    if (!reasoningOn()) return null
+    try {
+        const response = await anthropic.messages.create({
+            model: activeModel(),
+            max_tokens: 400,
+            system: system + '\n\n' + REASONING_INSTRUCTIONS,
+            messages: [{ role: 'user', content: task }],
+        })
+        const text = response.content.flatMap(b => b.type === 'text' ? [b.text] : []).join('\n').trim()
+        return text ? { text, tokensIn: response.usage.input_tokens, tokensOut: response.usage.output_tokens } : null
+    } catch (e) {
+        // reasoning is an aid: a failure of it shouldn't take the real request down with it
+        console.warn('Reasoning pass failed, continuing without it:', e)
+        return null
+    }
+}
+
+const withReasoning = (system: string, reasoning: { text: string } | null) =>
+    reasoning ? `${system}\n\nYOUR REASONING ABOUT THIS REQUEST (follow it):\n${reasoning.text}` : system
 
 export async function promptTemplateAnthropic(chatHistory: ChatItem[], prompt: string, tabs: Tab[], pushCallback: (thought: ThoughtProcessEvent | ThoughtProcessTask) => void, pushChatRename: (title: string) => void) {
     // propogate memory with tab data
@@ -24,16 +55,21 @@ export async function promptTemplateAnthropic(chatHistory: ChatItem[], prompt: s
     // step 1: roadmap
     const activeName = useStore.getState().activeTab
     const activeIsTemplate = tabs.some(t => t.name === activeName && t.template)
-    const context = PROMPT_INTRO + "\n\n" + getHistoryContext(chatHistory) + "\n\n" + getMemoryContext(memory) + "\n\nThe user's current selection:\nTab: " + activeName
-        + (activeIsTemplate ? " (a TEMPLATE; removing instruments/voices, editing clefs, tempos, key signatures or any other change to it must use edit_template, never any of the other edits)" : " (a score)") + "\nSelection: " + describeSelection(useStore.getState().selection)
+    const context = PROMPT_INTRO + "\n\n" + getHistoryContext(chatHistory) + "\n\n" + 
+        getMemoryContext(memory) + "\n\nThe user's current selection:\nTab: " + activeName
+        + (activeName !== 'Main' ? (activeIsTemplate ? " (a TEMPLATE; removing instruments/voices, editing clefs, tempos, key signatures or any other change to it must use edit_template, never any of the other edits)" : " (a score)") : "") + "\nSelection: " + describeSelection(useStore.getState().selection)
     console.log(context)
+    const roadmapReasoning = await reasonAbout(context, prompt)
+    if (roadmapReasoning) {
+        pushCallback({ title: "Reasoned about the request", input: roadmapReasoning.text, tokensIn: roadmapReasoning.tokensIn, tokensOut: roadmapReasoning.tokensOut })
+    }
     const roadmapResponse = await anthropic.messages.create({
-        model: 'claude-haiku-4-5-20251001',
+        model: activeModel(),
         max_tokens: 1024,
         tools: [ withoutScoreTools(ROADMAP_TOOL, activeIsTemplate, memory) ] as unknown as Anthropic.Messages.ToolUnion[],
-        system: context,
+        system: withReasoning(context, roadmapReasoning),
         messages: [{ role: 'user', content: prompt }],
-        tool_choice: { type: "tool", name: "roadmap_tool" }
+        // tool_choice: { type: "tool", name: "roadmap_tool" }
     });
 
     const roadmapTool = roadmapResponse.content.find(
@@ -55,7 +91,9 @@ export async function promptTemplateAnthropic(chatHistory: ChatItem[], prompt: s
 
     pushCallback({ title: "Generated a procedure", input: roadmap, tokensIn: roadmapResponse.usage.input_tokens, tokensOut: roadmapResponse.usage.output_tokens, isRoadmap: true })
 
-    const messages: Anthropic.Messages.MessageParam[] = [{ role: 'user', content: prompt }, { role: 'assistant', content: roadmap }];
+    const messages: Anthropic.Messages.MessageParam[] = [{ role: 'user', content: prompt }, { role: 'assistant', content: roadmap },
+        // Sonnet/Opus reject a conversation that ends on an assistant turn (no prefill): a 400.
+        { role: 'user', content: 'Select the first step of the roadmap.' }];
     let usageIn = roadmapResponse.usage.input_tokens;
     let usageOut = roadmapResponse.usage.output_tokens;
 
@@ -64,12 +102,12 @@ export async function promptTemplateAnthropic(chatHistory: ChatItem[], prompt: s
         console.log('TURN:', turn, 'MESSAGES:', messages, 'USAGE IN:', usageIn, 'USAGE OUT:', usageOut)
         pushCallback({ task: "Querying next steps" })
         const toolSelectionMessage = await anthropic.messages.create({
-            model: 'claude-haiku-4-5-20251001',
+            model: activeModel(),
             max_tokens: 1024,
             tools: withoutScoreTools(TOOL_INTROS, activeIsTemplate, memory) as unknown as Anthropic.Messages.ToolUnion[],
             system: getMemoryContext(memory),
             messages: messages,
-            tool_choice: { type: "tool", name: "trigger_tool" }
+            // tool_choice: { type: "tool", name: "trigger_tool" }
         });
         usageIn += toolSelectionMessage.usage.input_tokens
         usageOut += toolSelectionMessage.usage.output_tokens
@@ -97,15 +135,22 @@ export async function promptTemplateAnthropic(chatHistory: ChatItem[], prompt: s
         // if (selectedTool === 'edit_template') { console.log(memory); return; }
         // the model writing a template is the one that has to know what the filler does with it
         const writesTemplate = selectedTool === 'create_template_from_scratch'
+        const toolPrompt = `${prompt}\n\n${roadmap}\n\nDo this now: ${intention}`
+        const toolSystem = (writesTemplate ? TEMPLATE_CONTRACT + '\n\n' : '') + (context ? (context + '\n\n') : '') + getMemoryContext(memory)
+        const stepReasoning = selectedTool === 'complete' ? null : await reasonAbout(toolSystem, toolPrompt)
+        if (stepReasoning) {
+            pushCallback({ title: "Reasoned about this step", input: stepReasoning.text, tokensIn: stepReasoning.tokensIn, tokensOut: stepReasoning.tokensOut })
+            usageIn += stepReasoning.tokensIn
+            usageOut += stepReasoning.tokensOut
+        }
         const toolRequest = {
-            model: 'claude-haiku-4-5-20251001',
+            model: activeModel(),
             // a whole template is returned in one go
             max_tokens: writesTemplate ? 4096 : 1024,
             tools: [ TOOLS[selectedTool as keyof typeof TOOLS] ] as unknown as Anthropic.Messages.ToolUnion[],
-            system: (writesTemplate ? TEMPLATE_CONTRACT + '\n\n' : '') + (context ? (context + '\n\n') : '') + getMemoryContext(memory),
-            tool_choice: { type: "tool", name: selectedTool },
+            system: withReasoning(toolSystem, stepReasoning),
+            // tool_choice: { type: "tool", name: selectedTool },
         } as const
-        const toolPrompt = `${prompt}\n\n${roadmap}\n\nDo this now: ${intention}`
         let toolMessage = await anthropic.messages.create({ ...toolRequest, messages: [{ role: 'user', content: toolPrompt }] });
         usageIn += toolMessage.usage.input_tokens
         usageOut += toolMessage.usage.output_tokens
@@ -173,8 +218,9 @@ export async function promptTemplateAnthropic(chatHistory: ChatItem[], prompt: s
             }
         }
         messages.push({ role: 'assistant', content: toolMessage.content });
-        if (results.length) messages.push({ role: 'user', content: results });
-        messages.push({ role: 'assistant', content: next_steps });
+        // the next-steps note rides in the user turn: ending on an assistant turn is a 400 on newer models
+        const nextNote = `Done. Plan from here: ${String(next_steps ?? '').trim() || 'continue the roadmap'}\nSelect the next tool.`
+        messages.push({ role: 'user', content: [...results, { type: 'text', text: nextNote }] });
 
         pushCallback({ title: (TOOL_DESCRIPTORS[selectedTool] ?? selectedTool).replace('ing', 'ed').replace('<>',  DESCRIPTORS_PAST[descriptorIndex]), 
             input: toolUses.length === 1 ? toolUses[0].input as Record<string, any> : toolUses.map(u => u.input as Record<string, any>), 
@@ -208,7 +254,7 @@ function describeSelection(sel?: ScoreSelection | null): string {
 function getMemoryContext(memory: Record<string, string | AnyTemplateItem[]>) {
     if (Object.keys(memory).length == 0) return "There are currently no scores or templates saved in memory." 
     return "Current scores and templates saved in memory that may be used:\n" + 
-        Object.keys(memory).map(k => `${k} (${typeof memory[k] === "string" ? 'score' : 'template'})`).join(', ')
+        Object.keys(memory).map(k => k === 'Main' ? `${k} (likely a null score that cannot be edited if no edits have been made. Double check first that it has content before editing)` : `${k} (${typeof memory[k] === "string" ? 'score' : 'template'})`).join(', ')
 }
 
 async function processCommand(command: { tool: string, input: Record<string, unknown> }, memory: Record<string, string | AnyTemplateItem[]>, intention: string) {
@@ -290,22 +336,21 @@ async function processCommand(command: { tool: string, input: Record<string, unk
                 break
             }
 
+            const stage2Task = `Template "${in_key}" — ${template.length} items:\n${JSON.stringify(template)}\n\n`
+                + `Edit this template so that: ${intention}\n\n`
+                + `Return the complete edited template: all ${template.length} items in their original order, with your edits applied.`
+            const stage2Reasoning = await reasonAbout(EDIT_TEMPLATE_STAGE2_INTRO, stage2Task)
             const messageStage2 = await anthropic.messages.create({
-                model: 'claude-haiku-4-5-20251001',
+                model: activeModel(),
                 // The whole edited template comes back in this response, so the budget has to fit
                 // every item of the input template, not just the ones being changed.
                 max_tokens: 16384,
                 tools: [ EDIT_TEMPLATE_STAGE2_TOOL ] as unknown as Anthropic.Messages.ToolUnion[],
-                system: EDIT_TEMPLATE_STAGE2_INTRO,
+                system: withReasoning(EDIT_TEMPLATE_STAGE2_INTRO, stage2Reasoning),
                 // A single self-contained request: the roadmap conversation ends on an assistant
                 // turn and never carries this step's intention, so stage 2 gets its own turn.
-                messages: [{
-                    role: 'user',
-                    content: `Template "${in_key}" — ${template.length} items:\n${JSON.stringify(template)}\n\n`
-                        + `Edit this template so that: ${intention}\n\n`
-                        + `Return the complete edited template: all ${template.length} items in their original order, with your edits applied.`
-                }],
-                tool_choice: { type: "tool", name: 'edit_template' }
+                messages: [{ role: 'user', content: stage2Task }],
+                // tool_choice: { type: "tool", name: 'edit_template' }
             });
             console.log('EDIT TEMPLATE STAGE 2:', messageStage2)
             if (messageStage2.stop_reason === 'max_tokens') {

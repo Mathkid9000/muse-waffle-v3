@@ -109,10 +109,14 @@
 }
 
 .apiKeyError {
-    color: rgb(170, 50, 40);
+    border: 2px solid rgb(255, 65, 65);
+    padding: 0 10px; 
     overflow: hidden;
     text-overflow: ellipsis;
+    font-size: 16px;
     white-space: nowrap;
+    margin-left: 3px;
+    scale: 0.8;
 }
 
 .scoreGrid {
@@ -170,6 +174,17 @@
     .scoreGrid {
         grid-template-columns: repeat(1, 300px);
         padding: 50px 10px;
+    }
+    .apiKeyBar {
+        height: 80px;
+        line-height: 20px;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        align-content: center;
+        text-align: center;
+    }
+    .apiKeyBar input {
+        display: block;
     }
 }
 

@@ -22,6 +22,17 @@
     top: 10px;
 }
 
+@media(max-width: 750px) {
+   .headerButton {
+        display: none;
+   } 
+   .museWaffleTitle {
+        text-align: center;
+        width: 100%;
+        display: block;
+   }
+}
+
 .page {
     position: relative;
     top: 60px;
@@ -46,6 +57,10 @@
     margin: 0;
     color: var(--text);
     text-shadow: 0 5px 0 var(--background-green1), 0 10px 2px rgba(0, 0, 0, 0.4);
+    overflow-wrap: break-word;
+    word-break: normal;
+    display: block;
+    white-space: nowrap;
 }
 
 .waveText span {
@@ -53,6 +68,7 @@
     font-size: 4rem;
     animation: wave 2s ease-in-out infinite;
     margin-right: 5px;
+    display: inline-block;
 }
 
 .waveText span:nth-child(1) {
