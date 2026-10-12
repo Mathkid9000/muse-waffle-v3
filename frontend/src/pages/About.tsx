@@ -53,32 +53,32 @@ export default function About() {
           <h2 className={styles.sectionTitle}>Structural Overview</h2>
           <p className={styles.bodyText}>
             Muse Waffle attempts to blend creative tasks like melodic generation with deterministic tasks like adding instruments.
-            When the user enters a prompt, it returns a call to the <strong style={{ textDecoration: 'underline' }}>Claude API</strong> that determines whether or not the creative model is needed. However, this creates an information problem. 
-            <br></br><br></br><em className={styles.heroText}>How we get the LLM to tell the creative music model what to generate?</em>
+            When the user enters a prompt, it makes a call to the <strong style={{ textDecoration: 'underline' }}>Claude API</strong> that determines whether or not the creative model is needed. However, this creates an information problem. 
+            <br></br><br></br><em className={styles.heroText}>How do we get the LLM to tell the creative music model what to generate?</em>
           </p>
           <div style={{ padding: '20px' }}></div>
 
           <div className={styles.step}>
             <div className={styles.stepText}>
-              <h3 className={styles.stepTitle}>Scores Vs. Templates</h3>
+              <h3 className={styles.stepTitle}>Scores vs. Templates</h3>
               <p className={styles.bodyText}>
-                My solution is to allow the LLM to mask elements of sheet music (ex. rhythm, pitches, chords, etc...) through the creation of these templates.
-                In obscuring parts of a score, the creative model can generate new content while staying within the bounds of the user's prompt.
+                My solution is to allow the LLM to mask elements of sheet music (ex. rhythm, pitches, chords, etc...) through the creation of templates.
+                By obscuring parts of a score, the creative model can generate new content while staying within the bounds of the user's prompt.
               </p>
             </div>
             <Figure image={Screenshot2} label={'Templates vs Scores'} />
           </div>
           <p className={styles.bodyText}> 
-            This strategy really shines, however, when writing parts that follow form. Currently, symbolic music generation is known for its tempermental and often sporadic passages due to the naturally long token context of multitrack music.
-            This is sidestepped both by using templates and a token-efficient architecture.
+            This strategy really shines when writing parts that follow form. Currently, symbolic music generation is known for its temperamental and often sporadic passages, due to the naturally long token context of multitrack music.
+            This is sidestepped by using both templates and a token-efficient architecture.
           </p>
         </section>
 
         <section className={styles.hero}>
           <h2 className={styles.sectionTitle}>Model Architecture</h2>
           <p className={styles.bodyText}> 
-            To create the music model, I implement the token structure outlined in the Zhu et. al paper, "<a href="https://arxiv.org/pdf/2409.00919" style={{ textDecoration: 'underline', color: 'inherit', fontWeight: '700' }}>MMT-BERT: Chord-aware Symbolic Music Generation Based on Multitrack Music Transformer and MusicBERT</a>".
-            In this paper, they outline a quintuple token, each representing a single musical element (note, chord, instrument, clef, ...) containing subsequent details (pitch, measure number, duration, ...). As a bonus, the model is trained with chords in its dataset, giving it the ability to write music around prompted harmony (returning to the idea of templates). 
+            To create the music model, I implement the token structure outlined in the Zhu et al. paper, "<a href="https://arxiv.org/pdf/2409.00919" style={{ textDecoration: 'underline', color: 'inherit', fontWeight: '700' }}>MMT-BERT: Chord-aware Symbolic Music Generation Based on Multitrack Music Transformer and MusicBERT</a>."
+            In this paper, it outlines a quintuple token where each represents a single musical element (note, chord, instrument, clef, ...) containing additional details (ex. pitch, measure number, duration). As a bonus, the model is trained with chords in its dataset, giving it the ability to write music around prompted harmony (returning to the idea of templates). 
           </p>
           <Figure image={Figure2} label={'Quintuple tokens'} small={true}/>
           <p className={styles.bodyText} style={{ fontStyle: 'italic', marginTop: '-20px' }}>A table extracted from the paper illustrating the quintuple token in practice.</p>
@@ -87,7 +87,7 @@ export default function About() {
         <section className={styles.hero}>
           <h2 className={styles.sectionTitle}>Training and Dataset</h2>
           <p className={styles.bodyText}>
-            Muse waffle uses a transformer architecture, not the GAN structure presented in the paper. While this was tested, I found less success as the GAN frequently collapsed in on itself. The current transformer is trained on data from&nbsp;
+            Muse Waffle uses a transformer architecture, not the GAN structure presented in the paper. While this was tested, I found less success as the GAN frequently collapsed in on itself. The current transformer is trained on data from&nbsp;
             <a href="https://fourscoreandmore.org/openscore/" style={{ textDecoration: 'underline', color: 'inherit', fontWeight: '700' }}>OpenScore</a> and&nbsp;
             <a href="https://github.com/pnlong/PDMX/" style={{ textDecoration: 'underline', color: 'inherit', fontWeight: '700' }}>PDMX</a>.
           </p>
