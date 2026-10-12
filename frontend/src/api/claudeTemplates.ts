@@ -12,35 +12,39 @@ import { activeModel, reasoningOn } from './chatCommands';
 
 const MAX_TURNS = 10;
 
-const REASONING_INSTRUCTIONS = "Before acting, reason briefly in plain text (under 150 words, no lists of options, no tool calls): "
-    + "state each concrete requirement in the user's request, how it should be achieved with the available tools, and what could go wrong. "
-    + "Remember a template is the ONLY thing the filler model sees, so any musical intent has to be encoded in the template's items."
+// thinking shares max_tokens with the answer, so a request that thinks is given this much more room
+const THINKING_HEADROOM = 4096
+
+// Time spent in thinking requests since the last takeReasonedSeconds(), for the chat's
+// "Reasoned for {x}s..." line. The API reports no thinking time, so this is the request's duration.
+let reasonedMs = 0
 
 /**
- * A short reasoning pass for when /reasoning is on. The calls it precedes force a tool choice, which
- * leaves the model no room to think (and rules out extended thinking), so the thinking is its own
- * unforced call whose text is then handed to the forced one.
+ * A request with the model's built-in thinking when /reasoning is on. No tool choice is forced
+ * anywhere here, so the model can think in the same call that picks its tool.
  */
-async function reasonAbout(system: string, task: string): Promise<{ text: string, tokensIn: number, tokensOut: number } | null> {
-    if (!reasoningOn()) return null
+async function createThinking(request: Anthropic.Messages.MessageCreateParamsNonStreaming) {
+    if (!reasoningOn()) return anthropic.messages.create(request)
+    const start = performance.now()
     try {
-        const response = await anthropic.messages.create({
-            model: activeModel(),
-            max_tokens: 400,
-            system: system + '\n\n' + REASONING_INSTRUCTIONS,
-            messages: [{ role: 'user', content: task }],
+        return await anthropic.messages.create({
+            ...request,
+            max_tokens: request.max_tokens + THINKING_HEADROOM,
+            // Haiku 4.5 predates adaptive thinking and takes a fixed budget instead
+            thinking: request.model.startsWith('claude-haiku-4-5')
+                ? { type: 'enabled', budget_tokens: THINKING_HEADROOM / 2 }
+                : { type: 'adaptive' },
         })
-        const text = response.content.flatMap(b => b.type === 'text' ? [b.text] : []).join('\n').trim()
-        return text ? { text, tokensIn: response.usage.input_tokens, tokensOut: response.usage.output_tokens } : null
-    } catch (e) {
-        // reasoning is an aid: a failure of it shouldn't take the real request down with it
-        console.warn('Reasoning pass failed, continuing without it:', e)
-        return null
+    } finally {
+        reasonedMs += performance.now() - start
     }
 }
 
-const withReasoning = (system: string, reasoning: { text: string } | null) =>
-    reasoning ? `${system}\n\nYOUR REASONING ABOUT THIS REQUEST (follow it):\n${reasoning.text}` : system
+function takeReasonedSeconds(): number | undefined {
+    const seconds = reasonedMs > 0 ? Math.round(reasonedMs / 100) / 10 : undefined
+    reasonedMs = 0
+    return seconds
+}
 
 export async function promptTemplateAnthropic(chatHistory: ChatItem[], prompt: string, tabs: Tab[], pushCallback: (thought: ThoughtProcessEvent | ThoughtProcessTask) => void, pushChatRename: (title: string) => void) {
     // propogate memory with tab data
@@ -59,15 +63,12 @@ export async function promptTemplateAnthropic(chatHistory: ChatItem[], prompt: s
         getMemoryContext(memory) + "\n\nThe user's current selection:\nTab: " + activeName
         + (activeName !== 'Main' ? (activeIsTemplate ? " (a TEMPLATE; removing instruments/voices, editing clefs, tempos, key signatures or any other change to it must use edit_template, never any of the other edits)" : " (a score)") : "") + "\nSelection: " + describeSelection(useStore.getState().selection)
     console.log(context)
-    const roadmapReasoning = await reasonAbout(context, prompt)
-    if (roadmapReasoning) {
-        pushCallback({ title: "Reasoned about the request", input: roadmapReasoning.text, tokensIn: roadmapReasoning.tokensIn, tokensOut: roadmapReasoning.tokensOut })
-    }
-    const roadmapResponse = await anthropic.messages.create({
+    reasonedMs = 0
+    const roadmapResponse = await createThinking({
         model: activeModel(),
         max_tokens: 1024,
         tools: [ withoutScoreTools(ROADMAP_TOOL, activeIsTemplate, memory) ] as unknown as Anthropic.Messages.ToolUnion[],
-        system: withReasoning(context, roadmapReasoning),
+        system: context,
         messages: [{ role: 'user', content: prompt }],
         // tool_choice: { type: "tool", name: "roadmap_tool" }
     });
@@ -89,7 +90,7 @@ export async function promptTemplateAnthropic(chatHistory: ChatItem[], prompt: s
         `# Step ${idx + 1} (tool=${s.tool}):\n${s.intention}`
     ).join('\n\n')
 
-    pushCallback({ title: "Generated a procedure", input: roadmap, tokensIn: roadmapResponse.usage.input_tokens, tokensOut: roadmapResponse.usage.output_tokens, isRoadmap: true })
+    pushCallback({ title: "Generated a procedure", input: roadmap, tokensIn: roadmapResponse.usage.input_tokens, tokensOut: roadmapResponse.usage.output_tokens, isRoadmap: true, reasonedSeconds: takeReasonedSeconds() })
 
     const messages: Anthropic.Messages.MessageParam[] = [{ role: 'user', content: prompt }, { role: 'assistant', content: roadmap },
         // Sonnet/Opus reject a conversation that ends on an assistant turn (no prefill): a 400.
@@ -137,21 +138,26 @@ export async function promptTemplateAnthropic(chatHistory: ChatItem[], prompt: s
         const writesTemplate = selectedTool === 'create_template_from_scratch'
         const toolPrompt = `${prompt}\n\n${roadmap}\n\nDo this now: ${intention}`
         const toolSystem = (writesTemplate ? TEMPLATE_CONTRACT + '\n\n' : '') + (context ? (context + '\n\n') : '') + getMemoryContext(memory)
-        const stepReasoning = selectedTool === 'complete' ? null : await reasonAbout(toolSystem, toolPrompt)
-        if (stepReasoning) {
-            pushCallback({ title: "Reasoned about this step", input: stepReasoning.text, tokensIn: stepReasoning.tokensIn, tokensOut: stepReasoning.tokensOut })
-            usageIn += stepReasoning.tokensIn
-            usageOut += stepReasoning.tokensOut
-        }
         const toolRequest = {
             model: activeModel(),
-            // a whole template is returned in one go
-            max_tokens: writesTemplate ? 4096 : 1024,
+            // a whole template is returned in one go: a long multi-voice one runs to hundreds of items
+            max_tokens: writesTemplate ? 32000 : 1024,
             tools: [ TOOLS[selectedTool as keyof typeof TOOLS] ] as unknown as Anthropic.Messages.ToolUnion[],
-            system: withReasoning(toolSystem, stepReasoning),
+            system: toolSystem,
             // tool_choice: { type: "tool", name: selectedTool },
         } as const
-        let toolMessage = await anthropic.messages.create({ ...toolRequest, messages: [{ role: 'user', content: toolPrompt }] });
+        let toolMessage: Anthropic.Messages.Message
+        try {
+            // the closing "complete" step only writes the recap, so it doesn't think
+            toolMessage = await (selectedTool === 'complete' ? anthropic.messages.create : createThinking)({ ...toolRequest, messages: [{ role: 'user', content: toolPrompt }] });
+        } catch (e) {
+            // A long template can outlast the proxy's timeout. End the run with the reason shown,
+            // rather than throw past the chat and leave it loading forever.
+            console.error(`${selectedTool} request failed:`, e)
+            pushCallback({ title: `${TOOL_DESCRIPTORS[selectedTool] ?? selectedTool} failed`.replace('<>', 'a step'),
+                input: e instanceof Error ? e.message : String(e), tokensIn: usageIn, tokensOut: usageOut })
+            return
+        }
         usageIn += toolMessage.usage.input_tokens
         usageOut += toolMessage.usage.output_tokens
 
@@ -166,14 +172,19 @@ export async function promptTemplateAnthropic(chatHistory: ChatItem[], prompt: s
             const first = written()
             if (problems.length && first) {
                 console.warn('Template does not carry the requested chords — asking for a correction:', problems)
-                toolMessage = await anthropic.messages.create({ ...toolRequest, messages: [
-                    { role: 'user', content: toolPrompt },
-                    { role: 'assistant', content: toolMessage.content },
-                    { role: 'user', content: [{ type: 'tool_result', tool_use_id: first.id, is_error: true,
-                        content: 'The template was not accepted:\n- ' + problems.join('\n- ') + '\nCall the tool again with a corrected template.' }] },
-                ] })
-                usageIn += toolMessage.usage.input_tokens
-                usageOut += toolMessage.usage.output_tokens
+                try {
+                    toolMessage = await createThinking({ ...toolRequest, messages: [
+                        { role: 'user', content: toolPrompt },
+                        { role: 'assistant', content: toolMessage.content },
+                        { role: 'user', content: [{ type: 'tool_result', tool_use_id: first.id, is_error: true,
+                            content: 'The template was not accepted:\n- ' + problems.join('\n- ') + '\nCall the tool again with a corrected template.' }] },
+                    ] })
+                    usageIn += toolMessage.usage.input_tokens
+                    usageOut += toolMessage.usage.output_tokens
+                } catch (e) {
+                    // the first template is still in hand: repair it in code instead of losing the run
+                    console.warn('Correction request failed — keeping the first template:', e)
+                }
                 const retried = templateOf()
                 if (retried && chordProblems(userText, retried).length) repairChords(userText, retried)
             }
@@ -217,7 +228,9 @@ export async function promptTemplateAnthropic(chatHistory: ChatItem[], prompt: s
                 })
             }
         }
-        messages.push({ role: 'assistant', content: toolMessage.content });
+        // Thinking blocks are only valid in the conversation that produced them, and this step ran
+        // as its own request, so they are left out of the roadmap conversation.
+        messages.push({ role: 'assistant', content: toolMessage.content.filter((b) => b.type !== 'thinking' && b.type !== 'redacted_thinking') });
         // the next-steps note rides in the user turn: ending on an assistant turn is a 400 on newer models
         const nextNote = `Done. Plan from here: ${String(next_steps ?? '').trim() || 'continue the roadmap'}\nSelect the next tool.`
         messages.push({ role: 'user', content: [...results, { type: 'text', text: nextNote }] });
@@ -225,7 +238,7 @@ export async function promptTemplateAnthropic(chatHistory: ChatItem[], prompt: s
         pushCallback({ title: (TOOL_DESCRIPTORS[selectedTool] ?? selectedTool).replace('ing', 'ed').replace('<>',  DESCRIPTORS_PAST[descriptorIndex]), 
             input: toolUses.length === 1 ? toolUses[0].input as Record<string, any> : toolUses.map(u => u.input as Record<string, any>), 
             tokensIn: toolSelectionMessage.usage.input_tokens,
-            tokensOut: toolSelectionMessage.usage.output_tokens })
+            tokensOut: toolSelectionMessage.usage.output_tokens, reasonedSeconds: takeReasonedSeconds() })
     }
     console.log('PROMPTING COMPLETE', memory, usageIn, usageOut)
 }
@@ -336,17 +349,33 @@ async function processCommand(command: { tool: string, input: Record<string, unk
                 break
             }
 
-            const stage2Task = `Template "${in_key}" — ${template.length} items:\n${JSON.stringify(template)}\n\n`
+            // With edit_measures, stage 2 only sees (and returns) the items in those measures; the
+            // rest is spliced back around its answer. Omitted, or matching nothing, the whole
+            // template is sent as before.
+            const measures = new Set((command.input['edit_measures'] ?? []) as number[])
+            const inMeasures = (i: AnyTemplateItem) => i.kind === 'masked'
+                ? [...measures].some((m) => m >= i.measure_start && m < i.measure_start + i.mask_measure_length)
+                : measures.has(i.measure as number)
+            const scoped = template.filter(inMeasures)
+            const shown = scoped.length ? scoped : template
+
+            // the setup the scoped items sit in, shown read-only so it is not returned (and duplicated)
+            const setup = scoped.length ? template.filter((i) => !inMeasures(i)
+                && ['instrument', 'clef', 'time', 'key', 'tempo'].includes(i.kind)) : []
+
+            const stage2Task = (setup.length ? `Context — the template's setup items, for reference only. Do NOT return these:\n${JSON.stringify(setup)}\n\n` : '')
+                + `Template "${in_key}" — ${shown.length} items`
+                + (scoped.length ? ` (only the items in measures ${[...measures].join(', ')}; the rest of the template is kept as is, so stay within these measures)` : '')
+                + `:\n${JSON.stringify(shown)}\n\n`
                 + `Edit this template so that: ${intention}\n\n`
-                + `Return the complete edited template: all ${template.length} items in their original order, with your edits applied.`
-            const stage2Reasoning = await reasonAbout(EDIT_TEMPLATE_STAGE2_INTRO, stage2Task)
-            const messageStage2 = await anthropic.messages.create({
+                + `Return the complete edited template: all ${shown.length} items in their original order, with your edits applied.`
+            const messageStage2 = await createThinking({
                 model: activeModel(),
                 // The whole edited template comes back in this response, so the budget has to fit
                 // every item of the input template, not just the ones being changed.
                 max_tokens: 16384,
                 tools: [ EDIT_TEMPLATE_STAGE2_TOOL ] as unknown as Anthropic.Messages.ToolUnion[],
-                system: withReasoning(EDIT_TEMPLATE_STAGE2_INTRO, stage2Reasoning),
+                system: EDIT_TEMPLATE_STAGE2_INTRO,
                 // A single self-contained request: the roadmap conversation ends on an assistant
                 // turn and never carries this step's intention, so stage 2 gets its own turn.
                 messages: [{ role: 'user', content: stage2Task }],
@@ -365,7 +394,11 @@ async function processCommand(command: { tool: string, input: Record<string, unk
                 console.warn('Stage 2 returned no template — keeping', in_key, 'as it was:', input)
                 break
             }
-            saveToMemory(memory, out_key || `${in_key}_edited`, keepInstruments(template, newTemplate))
+            const at = template.indexOf(scoped[0])
+            const merged = scoped.length
+                ? [...template.slice(0, at), ...newTemplate, ...template.slice(at).filter((i) => !inMeasures(i))]
+                : newTemplate
+            saveToMemory(memory, out_key || `${in_key}_edited`, keepInstruments(template, merged))
             break
         }
         case "write_score": {
@@ -1021,7 +1054,8 @@ const TOOLS = {
                     type: "string",
                     description: "Enter an existing tab or written-to tab to draw the user's attention by opening it. Omit to not open the tab."
                 }
-            }
+            },
+            required: [ "template", "memory_output_name" ]
         }
     },
     "create_template_from_score": {
@@ -1055,11 +1089,20 @@ const TOOLS = {
                     type: "string",
                     description: "The name of the template already stored in memory that will be edited."
                 },
+                edit_measures: {
+                    type: "array",
+                    items: {
+                        type: "number",
+                        description: "A measure that will be edited."
+                    },
+                    description: "The measures to edit. Only edits within the measures of this array will be allowed. Can be omitted to edit everything.",
+                },
                 open: {
                     type: "string",
                     description: "Enter an existing tab or written-to tab to draw the user's attention by opening it. Omit to not open the tab."
                 }
-            }
+            },
+            required: [ "memory_name", "open" ]
         }
     },
     "fill_template": {
@@ -1074,7 +1117,7 @@ const TOOLS = {
                 },
                 memory_output_name: {
                     type: "string",
-                    description: "The name of the filled score to be stored in memory."
+                    description: "The name of the filled score to be stored in memory. Must be different than the memory_name"
                 },
                 open: {
                     type: "string",

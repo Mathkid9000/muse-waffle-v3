@@ -102,6 +102,8 @@ export interface ThoughtProcessEvent {
   isRecap?: boolean;
   /** The roadmap step. Its `tokensIn` is the whole context — intro, chat history, memory. */
   isRoadmap?: boolean;
+  /** How long this step's thinking requests took; only set when /reasoning is on. */
+  reasonedSeconds?: number;
 }
 
 export interface ThoughtProcessTask {

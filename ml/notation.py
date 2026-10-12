@@ -540,11 +540,16 @@ def _grid(offset) -> int | None:
     return int(units) if units.denominator == 1 else None
 
 
-def _holes(container, span: float) -> list[tuple[float, float]]:
-    """The stretches of [0, span) that nothing in `container` sounds through."""
-    spans = sorted((float(el.offset), float(el.offset) + float(el.duration.quarterLength))
+def _holes(container, span: float) -> list[tuple[Fraction, Fraction]]:
+    """The stretches of [0, span) that nothing in `container` sounds through.
+
+    Measured in exact fractions: in floats a triplet's end (4/3 + 1/3) lands a hair short of the
+    note that starts where it stops (5/3), and that hair came back as a hole -- a rest of no
+    length, which the MusicXML exporter refuses outright."""
+    spans = sorted((Fraction(el.offset), Fraction(el.offset) + Fraction(el.duration.quarterLength))
                    for el in [*sounding(container), *container.getElementsByClass(note21.Rest)])
-    holes, cursor = [], 0.0
+    span = Fraction(span).limit_denominator(1024)
+    holes, cursor = [], Fraction(0)
     for start, end in spans:
         if start > cursor: holes.append((cursor, start))
         cursor = max(cursor, end)

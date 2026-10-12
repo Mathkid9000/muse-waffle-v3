@@ -320,6 +320,9 @@ export default function Chat() {
                                             <img src={arrowImage} className={arrowClassList.join(' ')}/>
                                         )}
                                         {event.title}
+                                        { expandedThoughts === idx && event.reasonedSeconds != null && (
+                                            <p className={styles.thinkText}>Reasoned for {event.reasonedSeconds}s...</p>
+                                        )}
                                         { expandedThoughts === idx ? (
                                             Array.isArray(event.input) ? (
                                                 <ul className={styles.thoughtText}>

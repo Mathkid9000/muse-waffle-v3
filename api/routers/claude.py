@@ -117,7 +117,11 @@ def messages(body: dict, user_id: str = Depends(current_user)):
     if key is None:
         raise HTTPException(400, detail="Add your Claude API key on the dashboard first")
     body.pop("stream", None)  # responses are relayed whole
-    res = requests.post(f"{ANTHROPIC_URL}/messages", json=body, headers=_anthropic_headers(key), timeout=600)
+    try:
+        res = requests.post(f"{ANTHROPIC_URL}/messages", json=body, headers=_anthropic_headers(key), timeout=600)
+    except requests.Timeout:
+        # otherwise an unhandled 500 with no message for the chat to show
+        raise HTTPException(504, detail="Claude API: timed out before the response finished. Try a shorter request or a faster model.")
     if res.status_code != 200:
         raise _anthropic_error(res)
     return res.json()
