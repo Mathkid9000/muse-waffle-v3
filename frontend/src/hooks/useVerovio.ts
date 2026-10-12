@@ -148,29 +148,14 @@ export function getCurrentMidi(): string {
 export function getMeasureStartTimes(): number[] {
   if (!shared) return []
   try {
-    const entries = shared.renderToTimemap({ includeMeasures: true }) as Array<{ tstamp?: number; on?: string[] }>
-    const noteToTstamp = new Map<string, number>()
-    for (const e of entries) {
-      if (e.on && e.tstamp !== undefined) {
-        for (const id of e.on) noteToTstamp.set(id, e.tstamp)
-      }
-    }
-    if (noteToTstamp.size === 0) return []
-
-    const pageCount = shared.getPageCount()
-    const parser = new DOMParser()
+    const entries = shared.renderToTimemap({ includeMeasures: true }) as Array<{ tstamp?: number; measureOn?: string }>
     const times: number[] = [0] // index 0 unused
-
-    for (let page = 1; page <= pageCount; page++) {
-      const doc = parser.parseFromString(shared.renderToSVG(page), 'image/svg+xml')
-      for (const measure of doc.querySelectorAll('g.measure')) {
-        let minTstamp = Infinity
-        for (const el of measure.querySelectorAll('[id]')) {
-          const t = noteToTstamp.get(el.getAttribute('id')!)
-          if (t !== undefined && t < minTstamp) minTstamp = t
-        }
-        if (minTstamp !== Infinity) times.push(minTstamp / 1000)
-      }
+    // Every measure (rest-only ones included) has a measureOn entry; keep the first per measure
+    const seen = new Set<string>()
+    for (const e of entries) {
+      if (!e.measureOn || e.tstamp === undefined || seen.has(e.measureOn)) continue
+      seen.add(e.measureOn)
+      times.push(e.tstamp / 1000)
     }
 
     return times.length > 1 ? times : []
