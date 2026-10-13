@@ -1,9 +1,85 @@
 import { getSharedToolkit } from "../hooks/useVerovio";
 import { useStore } from "../store";
-import type { Tab } from "../types";
+import type { AnyTemplateItem, ClefTemplateItem, InstrumentTemplateItem, Tab } from "../types";
 import type { ScoreSelection } from "./claudeTools";
 
 export type ReadQuery = "clef" | "key_signature" | "time_signature" | "tempo" | "staves" | "measure_count" | "selection" | "tab";
+
+// What read_tab reports about a score: its size, roster and the setup in effect.
+const SCORE_BASICS: ReadQuery[] = ["measure_count", "staves", "clef", "key_signature", "time_signature", "tempo"];
+
+/**
+ * read_tab for one tab: says whether it is a score or a template, then its basics (measure
+ * count, instruments, clef, key, time, tempo). `value` is what memory holds under the name:
+ * engraved MusicXML for a score, an item list for a template.
+ */
+export function describeTab(name: string, value: string | AnyTemplateItem[] | undefined): string {
+    if (value === undefined || value === "") return `# Tab "${name}"\nEmpty: it holds no score or template yet.`;
+    if (typeof value === "string") {
+        const head = `# Tab "${name}" — a score`;
+        try {
+            return `${head}\n${getReadResults(SCORE_BASICS, value, name)}`;
+        } catch (e) {
+            return `${head}\nIts basics could not be read: ${e instanceof Error ? e.message : String(e)}`;
+        }
+    }
+    return describeTemplate(name, value);
+}
+
+function describeTemplate(name: string, items: AnyTemplateItem[]): string {
+    const lines = [`# Tab "${name}" — a template (${items.length} item${items.length === 1 ? "" : "s"}; read_template shows the items of given measures)`];
+    const last = items.reduce((m, i) => Math.max(m, i.kind === "masked" ? i.measure_start + i.mask_measure_length - 1 : (i.measure ?? 0)), 0);
+    lines.push(last > 0 ? `Measures: ${last}, numbered 1 to ${last} (1-based).` : "Measures: none placed yet.");
+
+    // "m1=treble, m5=bass" in measure order; a masked value shows as "?"
+    const changes = (list: { measure?: number; value?: string }[]) => list
+        .slice()
+        .sort((a, b) => (a.measure ?? 1) - (b.measure ?? 1))
+        .map((c) => `m${c.measure ?? 1}=${c.value ?? "?"}`)
+        .join(", ");
+    const byVoice = <T extends InstrumentTemplateItem | ClefTemplateItem>(pick: (i: AnyTemplateItem) => i is T) => {
+        const voices = new Map<number, T[]>();
+        for (const i of items) if (pick(i)) voices.set(i.voice_idx, [...(voices.get(i.voice_idx) ?? []), i]);
+        return [...voices.entries()].sort((a, b) => a[0] - b[0]);
+    };
+
+    const instruments = byVoice((i): i is InstrumentTemplateItem => i.kind === "instrument").map(([v, list]) =>
+        `voice_idx ${v} — ${changes(list.map((i) => ({ measure: i.measure, value: i.instrument })))}`);
+    lines.push(instruments.length ? `Instruments (voice_idx is 0-based):\n${instruments.join("\n")}` : "Instruments: none named.");
+
+    const clefs = byVoice((i): i is ClefTemplateItem => i.kind === "clef").map(([v, list]) =>
+        `voice_idx ${v}: ${changes(list.map((i) => ({ measure: i.measure, value: i.name })))}`);
+    lines.push(clefs.length ? `Clefs:\n${clefs.join("\n")}` : "Clefs: none set.");
+
+    const setup = (label: string, found: string) => lines.push(found ? `${label}: ${found}` : `${label}: none set.`);
+    setup("Key signature", changes(items.flatMap((i) => i.kind === "key"
+        ? [{ measure: i.measure, value: i.key_tonic ? `${i.key_tonic} ${i.key_mode ?? ""}`.trim() : undefined }] : [])));
+    setup("Time signature", changes(items.flatMap((i) => i.kind === "time"
+        ? [{ measure: i.measure, value: i.numerator && i.denominator ? `${i.numerator}/${i.denominator}` : undefined }] : [])));
+    setup("Tempo", changes(items.flatMap((i) => i.kind === "tempo"
+        ? [{ measure: i.measure, value: i.tempo != null ? `${i.tempo} bpm` : undefined }] : [])));
+    return lines.join("\n");
+}
+
+/** Does this template item sit in one of `measures`? A masked block counts when it covers one. */
+export function templateItemInMeasures(item: AnyTemplateItem, measures: Set<number>): boolean {
+    return item.kind === "masked"
+        ? [...measures].some((m) => m >= item.measure_start && m < item.measure_start + item.mask_measure_length)
+        : measures.has(item.measure as number);
+}
+
+/** read_template: the template's items in the given measures, one JSON item per line. */
+export function describeTemplateMeasures(name: string, template: AnyTemplateItem[], measures: number[]): string {
+    if (measures.length === 0) return `No measures were given. Pass the measures of "${name}" whose items should be read.`;
+    const wanted = new Set(measures);
+    const inside = template.filter((i) => templateItemInMeasures(i, wanted));
+    const list = [...wanted].sort((a, b) => a - b).join(", ");
+    const lines = [`Template "${name}", measures ${list} (1-based): ${inside.length} item${inside.length === 1 ? "" : "s"}. A field an item lacks is masked.`];
+    if (inside.length) lines.push(...inside.map((i) => JSON.stringify(i)));
+    const empty = [...wanted].filter((m) => !inside.some((i) => templateItemInMeasures(i, new Set([m]))));
+    if (empty.length && inside.length) lines.push(`No items in measures: ${empty.sort((a, b) => a - b).join(", ")}.`);
+    return lines.join("\n");
+}
 
 // Resolve one read_score call: describe every requested aspect and join into one result.
 export function getReadResults(queries: ReadQuery[], xml: string, tab_name: string, selection?: ScoreSelection | null): string {

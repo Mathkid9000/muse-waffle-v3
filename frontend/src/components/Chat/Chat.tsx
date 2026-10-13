@@ -231,12 +231,11 @@ export default function Chat() {
             chatName = useStore.getState().renameChat(chatName, title)
         })
 
-        // A run that ends without a recap (no roadmap, no tool) has nothing to reduce, and
-        // pushing its empty result would feed the next prompt a blank turn.
-        if (typeof recap === 'string') {
-            const { getChat, updateChat } = useStore.getState()
-            updateChat(chatName, { history: [...(getChat(chatName)?.history ?? []), { prompt, output: recap }] })
-        }
+        // A run that ends without a recap (no roadmap, a failed step, a prose reply) has nothing to
+        // reduce, so it goes into the history as just its prompt rather than a blank output.
+        const { getChat, updateChat } = useStore.getState()
+        const item = typeof recap === 'string' && recap !== '' ? { prompt, output: recap } : { prompt }
+        updateChat(chatName, { history: [...(getChat(chatName)?.history ?? []), item] })
 
         setLoading(false);
     }

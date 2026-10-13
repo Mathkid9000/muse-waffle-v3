@@ -1,16 +1,18 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { anthropic, type ScoreSelection } from "./claudeTools";
 import type { ToolUseBlock } from "@anthropic-ai/sdk/resources";
-import type { AnyTemplateItem, ChatItem, ChordTemplateItem, Tab, ThoughtProcessEvent, ThoughtProcessTask } from '../types';
+import type { AnyTemplateItem, ChatItem, Tab, ThoughtProcessEvent, ThoughtProcessTask } from '../types';
 import { api } from './client';
 import { applyClaudeEdit } from './applyClaudeEdit';
 import { fillTemplate, scoreToTemplate } from './templates';
 import { useStore } from '../store';
-import { getPromptContext, getReadResults, type ReadQuery } from './readContext';
+import { describeTab, describeTemplateMeasures, getPromptContext, templateItemInMeasures } from './readContext';
 import { chordProblems, repairChords } from './templateGuard';
 import { activeModel, reasoningOn } from './chatCommands';
 
-const MAX_TURNS = 10;
+// A roadmap step takes one turn, and a long arrangement is edited a few measures at a time, so a
+// run can legitimately take dozens. The last turn is not a step: it is spent forcing the recap.
+const MAX_TURNS = 40;
 
 // thinking shares max_tokens with the answer, so a request that thinks is given this much more room
 const THINKING_HEADROOM = 4096
@@ -78,11 +80,15 @@ export async function promptTemplateAnthropic(chatHistory: ChatItem[], prompt: s
     );
     if (!roadmapTool) {
         console.log('Found no roadmap. Terminating...')
-        return []
+        // no roadmap means the model answered in prose (a question, a refusal): show it
+        const prose = textOf(roadmapResponse)
+        pushCallback({ title: '', input: prose || `The model returned no plan (stop reason: ${roadmapResponse.stop_reason}).`,
+            tokensIn: roadmapResponse.usage.input_tokens, tokensOut: roadmapResponse.usage.output_tokens, isRecap: true })
+        return
     }
     
     const chatName = (roadmapTool.input as any)['chat_name'] as string | null
-    if (chatName !== null && chatName !== '') {
+    if (chatName) {
         pushChatRename(chatName)
     }
 
@@ -99,30 +105,54 @@ export async function promptTemplateAnthropic(chatHistory: ChatItem[], prompt: s
     let usageOut = roadmapResponse.usage.output_tokens;
 
     // Step 2: carry out roadmap
+    // what each finished step did, so the closing recap knows what actually happened
+    const executed: string[] = []
     for (let turn = 0; turn < MAX_TURNS; turn++) {
         console.log('TURN:', turn, 'MESSAGES:', messages, 'USAGE IN:', usageIn, 'USAGE OUT:', usageOut)
         pushCallback({ task: "Querying next steps" })
-        const toolSelectionMessage = await anthropic.messages.create({
-            model: activeModel(),
-            max_tokens: 1024,
-            tools: withoutScoreTools(TOOL_INTROS, activeIsTemplate, memory) as unknown as Anthropic.Messages.ToolUnion[],
-            system: getMemoryContext(memory),
-            messages: messages,
-            // tool_choice: { type: "tool", name: "trigger_tool" }
-        });
-        usageIn += toolSelectionMessage.usage.input_tokens
-        usageOut += toolSelectionMessage.usage.output_tokens
 
-        const toolTriggerContent = (toolSelectionMessage.content.find(
-            (i): i is ToolUseBlock => i.type === "tool_use" && i.name === "trigger_tool"
-        )?.input as any);
-        if (!toolTriggerContent.tool) {
-            console.log('Found found tool. Terminating...')
-            return []
+        // Out of turns, the model is not asked for a next step: it is made to close the run, so
+        // that a run always ends with a recap (and the next prompt knows what is unfinished).
+        const outOfSteps = turn === MAX_TURNS - 1
+        let selectionUsage = { input_tokens: 0, output_tokens: 0 }
+        let toolTriggerContent: { tool?: string, intention?: string, next_steps?: string } | undefined
+        if (outOfSteps) {
+            console.warn(`Reached the ${MAX_TURNS} turn limit. Forcing a recap...`)
+            pushCallback({ title: 'Reached the step limit', input: `Stopped after ${MAX_TURNS - 1} steps and wrote a recap of what was done. Send another prompt to carry on.`,
+                tokensIn: usageIn, tokensOut: usageOut })
+            toolTriggerContent = {
+                tool: 'complete',
+                intention: `The step limit was reached before the roadmap finished. Recap what was actually completed (see the steps carried out so far) and state plainly what is still unfinished, so a follow-up prompt can pick it up.`,
+            }
+        }
+        else {
+            const toolSelectionMessage = await anthropic.messages.create({
+                model: activeModel(),
+                max_tokens: 1024,
+                tools: withoutScoreTools(TOOL_INTROS, activeIsTemplate, memory) as unknown as Anthropic.Messages.ToolUnion[],
+                system: getMemoryContext(memory),
+                messages: messages,
+                // tool_choice: { type: "tool", name: "trigger_tool" }
+            });
+            usageIn += toolSelectionMessage.usage.input_tokens
+            usageOut += toolSelectionMessage.usage.output_tokens
+            selectionUsage = toolSelectionMessage.usage
+
+            toolTriggerContent = toolSelectionMessage.content.find(
+                (i): i is ToolUseBlock => i.type === "tool_use" && i.name === "trigger_tool"
+            )?.input as typeof toolTriggerContent
+            if (!toolTriggerContent?.tool) {
+                // The model answered in prose instead of picking a tool (tool_choice can't be forced
+                // on every model). Show what it said: it is usually a question or a refusal.
+                console.log('Found no tool. Terminating...', toolSelectionMessage)
+                pushCallback({ title: '', input: textOf(toolSelectionMessage) || `The model did not pick a next step (stop reason: ${toolSelectionMessage.stop_reason}).`,
+                    tokensIn: usageIn, tokensOut: usageOut, isRecap: true })
+                return
+            }
         }
 
-        const selectedTool = toolTriggerContent.tool
-        const intention = toolTriggerContent.intention
+        const selectedTool = toolTriggerContent.tool!
+        const intention = toolTriggerContent.intention ?? ''
         const next_steps = toolTriggerContent.next_steps
         const descriptorIndex = Math.floor(Math.random() * DESCRIPTORS.length)
         const context = getPromptContext(selectedTool, tabs)
@@ -130,13 +160,16 @@ export async function promptTemplateAnthropic(chatHistory: ChatItem[], prompt: s
         if (selectedTool !== 'complete') {
             pushCallback({ title: (TOOL_DESCRIPTORS[selectedTool] ?? selectedTool).replace('<>',  DESCRIPTORS[descriptorIndex]),
                 loading: true, 
-                input: (context ? (context + '\n\n') : '') + intention, tokensIn: toolSelectionMessage.usage.input_tokens, tokensOut: toolSelectionMessage.usage.output_tokens })
+                input: (context ? (context + '\n\n') : '') + intention, tokensIn: selectionUsage.input_tokens, tokensOut: selectionUsage.output_tokens })
         }
 
         // if (selectedTool === 'edit_template') { console.log(memory); return; }
         // the model writing a template is the one that has to know what the filler does with it
         const writesTemplate = selectedTool === 'create_template_from_scratch'
-        const toolPrompt = `${prompt}\n\n${roadmap}\n\nDo this now: ${intention}`
+        // the recap is written from this prompt alone, so it is told what the steps so far did
+        const progress = selectedTool === 'complete' && executed.length
+            ? `\n\nSteps carried out so far:\n${executed.map((s, i) => `${i + 1}. ${s}`).join('\n')}` : ''
+        const toolPrompt = `${prompt}\n\n${roadmap}${progress}\n\nDo this now: ${intention}`
         const toolSystem = (writesTemplate ? TEMPLATE_CONTRACT + '\n\n' : '') + (context ? (context + '\n\n') : '') + getMemoryContext(memory)
         const toolRequest = {
             model: activeModel(),
@@ -191,12 +224,27 @@ export async function promptTemplateAnthropic(chatHistory: ChatItem[], prompt: s
         }
 
         const toolUses = toolMessage.content.filter((b): b is ToolUseBlock => b.type === "tool_use");
+        // A model that answers in prose instead of calling the tool is shown, not skipped over:
+        // carrying on would tell the next step this one was done.
+        const prose = textOf(toolMessage)
         if (selectedTool === "complete") {
-            const recap = (toolUses[0].input as Record<string, unknown>)['recap']
-            pushCallback({ title: '', input: recap, tokensIn: toolSelectionMessage.usage.input_tokens + toolMessage.usage.input_tokens,
-                tokensOut: toolSelectionMessage.usage.output_tokens + toolMessage.usage.output_tokens, isRecap: true
-            }) 
+            // prose here is the recap itself, written without the tool
+            const written = toolUses[0]?.input as Record<string, unknown> | undefined
+            const recap = typeof written?.['recap'] === 'string' && written['recap'] ? written['recap'] as string : prose
+            if (!recap) {
+                pushCallback({ title: 'Recap failed', input: `The model returned no recap (stop reason: ${toolMessage.stop_reason}).`, tokensIn: usageIn, tokensOut: usageOut })
+                return
+            }
+            pushCallback({ title: '', input: recap, tokensIn: selectionUsage.input_tokens + toolMessage.usage.input_tokens,
+                tokensOut: selectionUsage.output_tokens + toolMessage.usage.output_tokens, isRecap: true
+            })
             return recap
+        }
+        if (toolUses.length === 0) {
+            console.warn(`${selectedTool} returned no tool call:`, toolMessage)
+            pushCallback({ title: '', input: prose || `The model made no ${selectedTool} call (stop reason: ${toolMessage.stop_reason}).`,
+                tokensIn: usageIn, tokensOut: usageOut, isRecap: true })
+            return
         }
         // console.log('Found Tool Uses:', toolUses, "in message:", toolMessage, getMemoryContext(memory))
 
@@ -235,12 +283,19 @@ export async function promptTemplateAnthropic(chatHistory: ChatItem[], prompt: s
         const nextNote = `Done. Plan from here: ${String(next_steps ?? '').trim() || 'continue the roadmap'}\nSelect the next tool.`
         messages.push({ role: 'user', content: [...results, { type: 'text', text: nextNote }] });
 
-        pushCallback({ title: (TOOL_DESCRIPTORS[selectedTool] ?? selectedTool).replace('ing', 'ed').replace('<>',  DESCRIPTORS_PAST[descriptorIndex]), 
-            input: toolUses.length === 1 ? toolUses[0].input as Record<string, any> : toolUses.map(u => u.input as Record<string, any>), 
-            tokensIn: toolSelectionMessage.usage.input_tokens,
-            tokensOut: toolSelectionMessage.usage.output_tokens, reasonedSeconds: takeReasonedSeconds() })
+        executed.push(`${selectedTool}: ${intention}`)
+
+        pushCallback({ title: (TOOL_DESCRIPTORS[selectedTool] ?? selectedTool).replace('ing', 'ed').replace('<>',  DESCRIPTORS_PAST[descriptorIndex]),
+            input: toolUses.length === 1 ? toolUses[0].input as Record<string, any> : toolUses.map(u => u.input as Record<string, any>),
+            tokensIn: selectionUsage.input_tokens,
+            tokensOut: selectionUsage.output_tokens, reasonedSeconds: takeReasonedSeconds() })
     }
     console.log('PROMPTING COMPLETE', memory, usageIn, usageOut)
+}
+
+/** The prose a response carries: its text blocks, joined. Empty when it is only tool calls. */
+function textOf(message: Anthropic.Messages.Message): string {
+    return message.content.flatMap((b) => b.type === 'text' ? [b.text.trim()] : []).filter(Boolean).join('\n\n')
 }
 
 const SCORE_ONLY_TOOLS = [ "edit_clef", "edit_time_sig", "edit_key_sig", "edit_tempo", "edit_add_instrument", "edit_delete_staff", "edit_delete_measures" ]
@@ -346,29 +401,37 @@ async function processCommand(command: { tool: string, input: Record<string, unk
             // nothing to edit, invents a fresh one-item template instead.
             if (!Array.isArray(template)) {
                 console.warn(command, "No template stored under", in_key, "— nothing to edit. Memory holds:", Object.keys(memory))
-                break
+                return `Nothing was edited: no template named "${in_key}" is in memory.`
             }
 
             // With edit_measures, stage 2 only sees (and returns) the items in those measures; the
             // rest is spliced back around its answer. Omitted, or matching nothing, the whole
             // template is sent as before.
             const measures = new Set((command.input['edit_measures'] ?? []) as number[])
-            const inMeasures = (i: AnyTemplateItem) => i.kind === 'masked'
-                ? [...measures].some((m) => m >= i.measure_start && m < i.measure_start + i.mask_measure_length)
-                : measures.has(i.measure as number)
+            const inMeasures = (i: AnyTemplateItem) => templateItemInMeasures(i, measures)
             const scoped = template.filter(inMeasures)
-            const shown = scoped.length ? scoped : template
+            // Stage 1 may say the edit rewrites those measures wholesale and doesn't depend on what
+            // is there. Their items are then left out of stage 2's context (a real saving on a long
+            // template) and replaced by what it returns. Needs measures to say what is replaced.
+            const blind = command.input['needs_context'] === false && measures.size > 0
+            const shown = blind ? [] : scoped.length ? scoped : template
+            const scopedRun = blind || scoped.length > 0
 
             // the setup the scoped items sit in, shown read-only so it is not returned (and duplicated)
-            const setup = scoped.length ? template.filter((i) => !inMeasures(i)
+            const setup = scopedRun ? template.filter((i) => !inMeasures(i)
                 && ['instrument', 'clef', 'time', 'key', 'tempo'].includes(i.kind)) : []
 
+            const measureList = [...measures].join(', ')
             const stage2Task = (setup.length ? `Context — the template's setup items, for reference only. Do NOT return these:\n${JSON.stringify(setup)}\n\n` : '')
-                + `Template "${in_key}" — ${shown.length} items`
-                + (scoped.length ? ` (only the items in measures ${[...measures].join(', ')}; the rest of the template is kept as is, so stay within these measures)` : '')
-                + `:\n${JSON.stringify(shown)}\n\n`
-                + `Edit this template so that: ${intention}\n\n`
-                + `Return the complete edited template: all ${shown.length} items in their original order, with your edits applied.`
+                + (blind
+                    ? `Template "${in_key}" — measures ${measureList}. Whatever is in these measures now is NOT shown: everything in them is replaced by the items you return, and the rest of the template is kept as is.\n\n`
+                        + `Write the items for these measures so that: ${intention}\n\n`
+                        + `Return only the new items for measures ${measureList}, in order, and stay within these measures.`
+                    : `Template "${in_key}" — ${shown.length} items`
+                        + (scoped.length ? ` (only the items in measures ${measureList}; the rest of the template is kept as is, so stay within these measures)` : '')
+                        + `:\n${JSON.stringify(shown)}\n\n`
+                        + `Edit this template so that: ${intention}\n\n`
+                        + `Return the complete edited template: all ${shown.length} items in their original order, with your edits applied.`)
             const messageStage2 = await createThinking({
                 model: activeModel(),
                 // The whole edited template comes back in this response, so the budget has to fit
@@ -386,18 +449,30 @@ async function processCommand(command: { tool: string, input: Record<string, unk
                 console.warn('Stage 2 hit the output limit — the edited template is truncated:', messageStage2)
             }
             const toolUses = messageStage2.content.filter((b): b is ToolUseBlock => b.type === "tool_use");
-            if (toolUses.length == 0) { console.warn('NO EDITS FOUND:', template, messageStage2); return }
+            if (toolUses.length == 0) {
+                // Prose instead of an edit: throw it so the run ends with what the model said shown,
+                // rather than reporting an edit that never happened.
+                console.warn('NO EDITS FOUND:', template, messageStage2)
+                throw new Error(textOf(messageStage2) || `The model returned no edit (stop reason: ${messageStage2.stop_reason}).`)
+            }
             const input = toolUses[0].input as Record<string, unknown>
             const { out_key } = getScoreInputOutputNames(input)
             const newTemplate = input['template'] as AnyTemplateItem[]
             if (!Array.isArray(newTemplate) || newTemplate.length === 0) {
                 console.warn('Stage 2 returned no template — keeping', in_key, 'as it was:', input)
-                break
+                return `Nothing was edited: the edit returned no items, so "${in_key}" is unchanged.`
             }
-            const at = template.indexOf(scoped[0])
-            const merged = scoped.length
-                ? [...template.slice(0, at), ...newTemplate, ...template.slice(at).filter((i) => !inMeasures(i))]
-                : newTemplate
+            let merged: AnyTemplateItem[]
+            if (scopedRun) {
+                // the new items go where the replaced ones started; with none there, before the
+                // first later measure (or at the end)
+                const first = scoped.length ? template.indexOf(scoped[0])
+                    : template.findIndex((i) => i.kind !== 'masked' && typeof i.measure === 'number' && i.measure > Math.min(...measures))
+                const at = first === -1 ? template.length : first
+                merged = [...template.slice(0, at).filter((i) => !inMeasures(i)), ...newTemplate,
+                    ...template.slice(at).filter((i) => !inMeasures(i))]
+            }
+            else merged = newTemplate
             saveToMemory(memory, out_key || `${in_key}_edited`, keepInstruments(template, merged))
             break
         }
@@ -421,26 +496,28 @@ async function processCommand(command: { tool: string, input: Record<string, unk
             }
             break
         }
-        case "read_score": {
-            const reads = (command.input['queries'] ?? [ ]) as Record<string, any>[]
-            const readOutput = []
-            for (const read of reads) {
-                const { in_key, out_key: _ } = getScoreInputOutputNames(read)
-                let source = memory[in_key] as string | null
-                const state = useStore.getState()
-                if (source) {
-                    const result = read['element'] === 'chord' ? describeChords(source as unknown as AnyTemplateItem[])
-                        : getReadResults([ read['element'] as ReadQuery ], source!, in_key, state.selection)
-                    readOutput.push("# Read for tab: " + in_key + "\n" + result)
-                }
-                else {
-                    source = memory[state.activeTab] as string | null
-                    const result = read['element'] === 'chord' ? describeChords(source as unknown as AnyTemplateItem[])
-                        : getReadResults([ read['element'] as ReadQuery ], source!, state.activeTab, state.selection)
-                    readOutput.push("# Read for tab: " + state.activeTab + "\n" + result)
-                }
+        case "read_tab": {
+            // Whether each tab is a score or a template, and its basics. Blank reads the active tab.
+            const state = useStore.getState()
+            const names = ((command.input['memory_names'] ?? []) as string[]).filter(Boolean)
+            const out = (names.length ? names : [state.activeTab]).map((name) => {
+                const known = name in memory
+                return known || name === state.activeTab
+                    ? describeTab(name, memory[name])
+                    : `# Tab "${name}"\nNo tab by that name is in memory. Memory holds: ${Object.keys(memory).join(', ') || 'nothing yet'}.`
+            })
+            if (command.input['include_selection']) out.push(`Active tab: ${state.activeTab}\n${describeSelection(state.selection)}`)
+            return out.join('\n\n')
+        }
+        case "read_template": {
+            const { in_key } = getScoreInputOutputNames(command.input)
+            const template = memory[in_key]
+            if (!Array.isArray(template)) {
+                return typeof template === 'string'
+                    ? `"${in_key}" is a score, not a template: use read_tab for its basics.`
+                    : `No template named "${in_key}" is in memory. Memory holds: ${Object.keys(memory).join(', ') || 'nothing yet'}.`
             }
-            return readOutput.join('\n\n')
+            return describeTemplateMeasures(in_key, template, (command.input['measures'] ?? []) as number[])
         }
         default: {
             console.warn(command, "No implementation yet")
@@ -467,17 +544,6 @@ function keepInstruments(source: AnyTemplateItem[], edited: AnyTemplateItem[]): 
     return [...instruments, ...edited]
 }
 
-// Chords aren't part of a template's XML rendering — the item list is the only place they
-// live — so read_tab's "chord" element reads straight off the template's items instead of
-// going through readContext's XML-based getReadResults.
-function describeChords(template: AnyTemplateItem[]): string {
-    const chords = (template ?? []).filter((i): i is ChordTemplateItem => i.kind === 'chord')
-    if (chords.length === 0) return "No chords found."
-    return chords
-        .map(c => `m${c.measure ?? '?'}${c.pos != null ? `.${c.pos}` : ''}: ${c.root ?? '?'}${c.quality ?? ''}`)
-        .join("\n")
-}
-
 function saveToMemory(memory: Record<string, string | AnyTemplateItem[]>, key: string, value: string | AnyTemplateItem[]) {
     memory[key] = value
     const appState = useStore.getState()
@@ -502,7 +568,8 @@ function getScoreInputOutputNames(input: Record<string, unknown>) {
 
 function getHistoryContext(history: ChatItem[]) {
     if (history.length === 0) return "" 
-    return "History of Prompts:\n" + history.map(h => "User prompt: " + h.prompt + "\nOutput: " + h.output).join('\n')
+    // a run that ended without a recap is just its prompt
+    return "History of Prompts:\n" + history.map(h => "User prompt: " + h.prompt + (h.output ? "\nOutput: " + h.output : "")).join('\n')
 }
 
 const TOOL_DESCRIPTORS: Record<string, string> = {
@@ -519,7 +586,8 @@ const TOOL_DESCRIPTORS: Record<string, string> = {
     "edit_template": "<> a template",
     "fill_template": "Filling a template",
     "write_score": "<> the score",
-    "read_tab": "Reading the score"
+    "read_tab": "Reading the score",
+    "read_template": "Reading a template"
 }
 
 const DESCRIPTORS = [ 'Modifying', 'Editing', 'Shifting', 'Revising', 'Adjusting', 'Shaping', 'Composing', 'Arranging', 'Writing' ]
@@ -551,7 +619,8 @@ const ROADMAP_TOOL = {
                                 "create_template_from_scratch", "create_template_from_score", "edit_template",
                                 "fill_template",
                                 "write_score",
-                                "read_tab"
+                                "read_tab",
+                                "read_template"
                             ],
                             description: "Each distinct type of edit that can be made. Tool descriptions:"
                                 + "\ngenerate_score: \"Uses a transformer model only to append more creative measures to the score. Your only controls are the key, time_sig, tempo so do not use if there are detailed content requirements. Do not include key, time_signature, or tempo when these attributes should remain the same.\""
@@ -560,7 +629,8 @@ const ROADMAP_TOOL = {
                                 + "\nedit_template: \"Edit a template already stored in memory (e.g. to strip it down/mask some of its musical elements). Use this to alter a template so that there is more variance when it is filled.\""
                                 + "\nfill_template: \"Fills a template's masked elements, essentially converting it from a template to a score and storing it to a new name on memory.\""
                                 + "\nwrite_score: \"Write a score onto another score. Essentially a copy and paste. Accepts multiple writes to perfrom at once to save tokens. Also lets you open a score if the user requires it.\""
-                                + "\nread_tab: \"Use to read specific elements of a score/template, typically to locate places defined by the user (e.g. 'where the key changes to D major'). May also be used to read the user's current selection (e.g. 'where I am currently highlighting' or 'my current tab').\""
+                                + "\nread_tab: \"Reads the basics of a score or template: whether it is a score or a template, its measure count, instruments, clef, key, time signature and tempo. May also be used to read the user's current selection (e.g. 'where I am currently highlighting' or 'my current tab').\""
+                                + "\nread_template: \"Reads the items of a template (notes, chords, etc...) in the given measures. Use it before editing a template when you need to see what is in specific measures. A template's content cannot be seen any other way.\""
                                 + "\n\nedit_clef, edit_time_sig, edit_key_sig, edit_tempo, edit_add_instrument, edit_delete_staff, and edit_delete_measures are all ONLY usable for editing scores, not templates."
                         },
                         intention: {
@@ -598,6 +668,7 @@ const TOOL_INTROS = [
                         "fill_template",
                         "write_score",
                         "read_tab",
+                        "read_template",
                         "complete"
                     ],
                     description: "The tool to execute, as provided by the current roadmap step. Use complete when the user's prompt has been completed. edit_clef, edit_time_sig, edit_key_sig, edit_tempo, edit_add_instrument, edit_delete_staff, and edit_delete_measures are all ONLY usable for editing scores, not templates."
@@ -1097,6 +1168,10 @@ const TOOLS = {
                     },
                     description: "The measures to edit. Only edits within the measures of this array will be allowed. Can be omitted to edit everything.",
                 },
+                needs_context: {
+                    type: "boolean",
+                    description: "Whether stage 2 needs to see what is currently in edit_measures. Set false when the edit replaces those measures wholesale and does not depend on their current content (e.g. 'rewrite measures 9-16 as whole-note string pads over these chords', with the details in your intention): the existing items are then not sent to stage 2, which saves tokens, and are replaced by what it writes. Needs edit_measures. Leave true (the default) for any edit that keeps or modifies what is there (e.g. masking its pitches).",
+                },
                 open: {
                     type: "string",
                     description: "Enter an existing tab or written-to tab to draw the user's attention by opening it. Omit to not open the tab."
@@ -1165,29 +1240,39 @@ const TOOLS = {
     },
     "read_tab": {
         name: "read_tab",
-        description: "Reads specified elements of the given score/template",
+        description: "Reads the basics of the given scores/templates: whether each is a score or a template, then its measure count, instruments, clef, key signature, time signature and tempo. To see a template's items, use read_template.",
         input_schema: {
             type: "object",
             properties: {
-                queries: {
+                memory_names: {
                     type: "array",
-                    items: {
-                        type: "object",
-                        properties: {
-                            element: {
-                                type: "string",
-                                enum: [ "clef", "key_signature", "time_signature", "tempo", "staves", "measure_count", "selection", "tab", "chord" ]
-                            },
-                            memory_name: {
-                                type: "string",
-                                description: "The name of the score/template in memory to read from. Leave blank for the user's active tab."
-                            }
-                        }
-                    },
-                    description: "Aspects to read. clef=per-staff clef changes; key_signature/time_signature/tempo=value at measure 1 and every measure it changes; staves=instrument roster with 0-based staff_num; measure_count=number of measures; selection=the measure(s) and staff/staves the user has selected on the score; chord=every chord item defined on a template, with its measure/position, root (a note name or a roman numeral) and quality."
+                    items: { type: "string" },
+                    description: "The names of the scores/templates in memory to read. Leave empty for the user's active tab."
+                },
+                include_selection: {
+                    type: "boolean",
+                    description: "True to also read the user's active tab and the measure(s) and staff/staves they have selected on it."
+                }
+            }
+        }
+    },
+    "read_template": {
+        name: "read_template",
+        description: "Reads the items of a template that are in the given measures: notes, chords, and any other items, as stored. A field an item lacks is masked.",
+        input_schema: {
+            type: "object",
+            properties: {
+                memory_name: {
+                    type: "string",
+                    description: "The name of the template stored in memory to read."
+                },
+                measures: {
+                    type: "array",
+                    items: { type: "integer" },
+                    description: "The 1-based measures whose items should be returned. Keep it to the measures you need."
                 }
             },
-            required: [ "queries" ]
+            required: [ "memory_name", "measures" ]
         }
     },
     "complete": {

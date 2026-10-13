@@ -111,10 +111,13 @@ export interface ThoughtProcessTask {
   isPrompt?: boolean;
 }
 
-/** One prompt and the recap the model closed it with — the reduction fed back as history. */
+/**
+ * One prompt and the recap the model closed it with — the reduction fed back as history. A run
+ * that ended without a recap (failed, was answered in prose) is kept as just its prompt.
+ */
 export interface ChatItem {
   prompt: string;
-  output: string;
+  output?: string;
 }
 
 /**
